@@ -305,10 +305,16 @@ a remap do something.
   - `MOUSE {action: BUTTON, hidUsage}` → `BTN_LEFT/MIDDLE/RIGHT/SIDE/EXTRA`;
     `WIN_BACK`/`WIN_FORWARD` → `BTN_SIDE`/`BTN_EXTRA` (what the kernel sends today, so
     default = unchanged behaviour).
-  - `SYSTEM {action}` → Linux equivalents: `SWITCH_APPS` → Alt+Tab; show desktop, virtual
-    desktop next/prev, screenshot, lock, media keys, volume, brightness → XF86 keys. Desktop
-    switching is compositor-specific; ship a default keystroke per action and a user
-    override file `~/.config/optionsplus-linux/actions.toml`.
+  - `SYSTEM {action}` → Linux equivalents: `SWITCH_APPS` → Alt+Tab; lock → Super+L; screenshot →
+    Print; media, volume, brightness, sleep, power → XF86 keys (`SHUT_DOWN` sends the power key, which
+    logind may act on at once); show desktop, minimize (Super+H), virtual desktop next/prev
+    (Super+Page Up/Down), overview, language (Super+Space) → the GNOME 40+ chords where GNOME binds
+    one (stock GNOME has no show-desktop key; Super+D is Ubuntu's, and `CONSOLE_CLIENT` Ctrl+Alt+T is
+    Ubuntu's too). `SCROLL_LEFT`/`SCROLL_RIGHT` move the horizontal wheel. Desktop switching is
+    compositor-specific; ship a default keystroke per action and a user override file
+    `~/.config/optionsplus-linux/actions.toml`.
+  - A `MOUSE` button card holds the virtual button while the real one is held (drag works);
+    keystroke, system and media cards are taps. Macro sequences may wait 5 s in all.
   - `MACRO_PLAYBACK` sequences, `ADAPTER_4WAYS` gesture cards (direction thresholds from
     `gestureInfo`), `ADAPTER_2WAYS` for the thumb wheel.
   - Unsupported card types answer with an error the UI understands (observe the `what`
@@ -341,12 +347,18 @@ a remap do something.
   big-endian words. A swipe fires its action once the travel on the stronger axis reaches the
   threshold; release without a swipe runs the click action. Unconfirmed on hardware.
 - Threshold: mid point of `gestureInfo.x|y.actionThreshold` (device units) of the card, else 50 counts.
-- Card layout is assumed: `nestedCards` keyed by `up|down|left|right|click` (a token of the key or of
-  the nested card id is enough). The real Windows layout of ADAPTER_4WAYS / ADAPTER_2WAYS has not
-  been captured; check it against the UI once and adjust `opl_agent/gestures.py`.
+- Card layout is assumed: `nestedCards` keyed by `up|down|left|right|click` (a token of the key is
+  enough; the nested card's id never counts, and a key without a word falls back to its place in
+  `nestedCardsOrder` against `gestureInfo.directions`). The real Windows layout of ADAPTER_4WAYS /
+  ADAPTER_2WAYS has not been captured; check it against the UI once and adjust `opl_agent/gestures.py`.
+  A card naming a Logitech preset in `gestureInfo.implementation` with no nested cards is refused
+  (NOT_SUPPORTED, naming the preset). The captured card has no `actionThreshold`, so the 50-count
+  default applies; the threshold path exists per the schema but has no hardware evidence.
 - Thumb wheel (`<prefix>_thumb_wheel_adapter`, ADAPTER_2WAYS): reporting mode 1 (diverted) in
-  `0x2150` fn2; event fn0 rotation is a signed big-endian word, positive taken as right; one action
-  per reporting unit. Sign and unit are unconfirmed on hardware.
+  `0x2150` fn2; event fn0 is rotation (signed big-endian word), timestamp (word), status and flags;
+  positive rotation is taken as right (the default-direction byte of getThumbwheelInfo is not read).
+  One action per notch: `getThumbwheelInfo`'s diverted resolution in units (14 when unreadable).
+  Sign and unit are unconfirmed on hardware.
 - Manual: hold the gesture button and move left on a compositor with a "desktop left" key bound
   (for example Ctrl+Alt+Left on KDE or GNOME-with-extension): the desktop must switch.
 

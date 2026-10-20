@@ -44,7 +44,10 @@ class Router:
         self.runner = runner or SubprocessRunner()
         self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
         self.apps = None                 # last scan result; None until first scan
-        self._switch_lock = threading.Lock()   # button assignments and focus switches, one at a time
+        # Everything that decides which buttons are diverted runs under this lock, one at a time:
+        # assignments, focus switches, resets and reapplying after a wake. Reentrant: they call each other.
+        self._switch_lock = threading.RLock()
+        self.loop = None                 # the event loop, set by main; worker threads schedule broadcasts on it
         self._focused = None             # the window that has the focus, when known
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
@@ -54,6 +57,7 @@ class Router:
         self.relay = wheel_relay.WheelRelay(self.reg, self.engine.sink,
                                             enabled=os.environ.get("OPL_WHEEL_RELAY", "1") != "0")
         self.relay.thumb_owned = self.engine.owns_thumb     # a thumb action card outranks thumb speed
+        self.engine.on_stale.append(self._card_gone)
         self.button_swap = swap.ButtonSwap(self.reg, _state_dir(state_dir), self.runner)
         self.reg.on_discovered.append(self.apply_stored)
         self.reg.on_resumed.append(self.apply_stored)
@@ -276,6 +280,23 @@ class Router:
         if self.server is not None:
             self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
 
+    def _schedule_broadcast(self):
+        """Any thread: push the profiles to the UI from the event loop. Never waits."""
+        loop = self.loop
+        if loop is None or self.server is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._broadcast_profiles(), loop)
+        except RuntimeError:
+            pass                         # the loop is closed: the agent is stopping
+
+    def _card_gone(self, dev_id, slot_id, app, message):
+        """Engine hook: a stored card cannot run any more. Forget it, so the mouse and what the UI
+        shows agree (the button is native again), and tell the UI."""
+        log.warning("dropping the stored card of %s%s: %s", slot_id, " for " + app if app else "", message)
+        self.store.discard(slot_id, app)
+        self._schedule_broadcast()
+
     def _device_for_slot(self, slot_id):
         for dev in self.reg.devices.values():
             if slot_id == profiles.mouse_settings_slot(dev.slot_prefix):
@@ -344,6 +365,10 @@ class Router:
 
     def apply_stored(self, dev_id):
         """Blocking: reapply stored settings to a device (discovery, reconnect)."""
+        with self._switch_lock:
+            self._apply_stored(dev_id)
+
+    def _apply_stored(self, dev_id):
         dev = self.reg.devices.get(dev_id)
         if dev is None:
             return
@@ -429,6 +454,8 @@ class Router:
                         return "NOT_SUPPORTED", None, str(exc)
                     except Exception as exc:
                         log.warning("button write failed: %s", exc)
+                        if isinstance(exc, input_engine.NoVirtualDevice):
+                            return "FAULTED", None, str(exc)
                         return "FAULTED", None, "device write failed: %s" % exc
                     asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
                     handled = payload
@@ -517,53 +544,71 @@ class Router:
         for dev in list(self.reg.devices.values()):
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
-            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
-            self.store.remove(profiles.scroll_slot(dev.slot_prefix))
-            self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
-            self.store.remove_matching(lambda slot: profiles.is_button_slot(slot, dev.slot_prefix))
             try:
-                await loop.run_in_executor(None, self._apply_defaults, dev)
+                await loop.run_in_executor(None, self._reset_device, dev)
             except Exception as exc:
                 log.warning("applying defaults failed: %s", exc)
                 return "FAULTED", None, "device write failed: %s" % exc
         await self._broadcast_profiles()
         return "SUCCESS", info, ""
 
+    def _reset_device(self, dev):
+        """Blocking: forget the default profile's choices for `dev` and put its defaults back."""
+        with self._switch_lock:
+            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            self.store.remove(profiles.scroll_slot(dev.slot_prefix))
+            self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
+            self.store.remove_matching(lambda slot: profiles.is_button_slot(slot, dev.slot_prefix))
+            self._apply_defaults(dev)
+
     async def _app_profile_reset(self, app, info):
         """Reset an application's profile: it forgets its buttons and follows the default again."""
         devices = [d for d in self.reg.devices.values() if not info.get("deviceId") or info["deviceId"] == d.id]
-        self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
-                                                              for d in devices))
-        if self.engine.active_app == app:
-            try:
-                await asyncio.get_event_loop().run_in_executor(None, self.engine.activate, app, devices)
-                for dev in devices:
-                    await asyncio.get_event_loop().run_in_executor(None, self._settle_thumb, dev)
-            except Exception as exc:
-                return "FAULTED", None, "device write failed: %s" % exc
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, self._reset_app, app, devices)
+        except Exception as exc:
+            return "FAULTED", None, "device write failed: %s" % exc
         await self._broadcast_profiles()
         return "SUCCESS", info, ""
 
+    def _reset_app(self, app, devices):
+        """Blocking: forget application `app`'s buttons, and if it is in force hand them back."""
+        with self._switch_lock:
+            self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
+                                                                  for d in devices))
+            if self.engine.active_app == app:
+                self.engine.activate(app, devices)
+                for dev in devices:
+                    self._settle_thumb(dev)
+
     def on_focus(self, window):
         """Blocking: the focused window changed; put the profile of its application (else the
-        default) in force. Failures are logged: the next focus change tries again."""
+        default) in force. Returns False when the switch failed, so the caller tries again;
+        the UI is told when the profile in force changed."""
         with self._switch_lock:
             self._focused = window
             try:
-                self._refocus()
+                switched = self._refocus()
             except Exception as exc:
                 log.warning("switching profile failed: %s", exc)
+                return False
+        if switched:
+            self._schedule_broadcast()       # worker thread: the loop does the sending
+        return True
 
     def _refocus(self):
-        """Blocking: bring the profile in force in line with the focused window."""
+        """Blocking, under the switch lock: bring the profile in force in line with the focused
+        window. Returns whether the profile in force changed."""
         if self.apps is None:
             self.apps = applications.scan(self._app_dirs())
         app = focus.match_profile(self._focused, sorted(self.store.apps), self.apps)
-        if app != self.engine.active_app:
-            devices = list(self.reg.devices.values())
-            self.engine.activate(app, devices)
-            for dev in devices:
-                self._settle_thumb(dev)     # a profile switch can give the thumb wheel to the engine or take it back
+        if app == self.engine.active_app:
+            return False
+        devices = list(self.reg.devices.values())
+        self.engine.activate(app, devices)
+        for dev in devices:
+            self._settle_thumb(dev)     # a profile switch can give the thumb wheel to the engine or take it back
+        return True
 
     def _apply_defaults(self, dev):
         self.engine.sync(dev)               # the store holds no button choices now: hand them all back

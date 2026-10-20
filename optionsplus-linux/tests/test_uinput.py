@@ -64,3 +64,49 @@ def test_close_destroys_the_device():
 
 def test_event_struct_matches_the_kernel_layout():
     assert struct.calcsize(uinput.EVENT_FORMAT) == (24 if struct.calcsize("P") == 8 else 16)
+
+
+def test_a_batch_is_one_write_so_frames_stay_whole():
+    dev, be = device()
+    dev.emit([(uinput.EV_KEY, 29, 1), (uinput.EV_KEY, 46, 1), (uinput.EV_KEY, 46, 0)])
+    assert be.writes() == 1
+
+
+def test_a_failed_write_releases_every_pressed_key():
+    dev, be = device()
+    dev.emit([(uinput.EV_KEY, 29, 1)])                   # Ctrl is down from an earlier emit
+    be.fail_write_on = 1
+    with pytest.raises(OSError):
+        dev.emit([(uinput.EV_KEY, 56, 1), (uinput.EV_KEY, 46, 1)])
+    released = be.written()[-4:]
+    assert {(t, c, v) for t, c, v in released if t == uinput.EV_KEY} == {
+        (uinput.EV_KEY, 29, 0), (uinput.EV_KEY, 56, 0), (uinput.EV_KEY, 46, 0)}
+    assert released[-1] == (uinput.EV_SYN, 0, 0)
+
+
+def test_concurrent_emits_never_interleave_their_frames():
+    import threading
+    dev, be = device()
+
+    def hammer(code):
+        for _ in range(200):
+            dev.emit([(uinput.EV_KEY, code, 1), (uinput.EV_KEY, code, 0)])
+    threads = [threading.Thread(target=hammer, args=(c,)) for c in (30, 31, 32)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    events = be.written()
+    for i in range(0, len(events), 3):
+        frame = events[i:i + 3]
+        assert frame[2] == (uinput.EV_SYN, 0, 0) and frame[0][1] == frame[1][1]
+
+
+def test_a_short_write_is_an_error():
+    class Short(FakeUinputBackend):
+        def write(self, fd, data):
+            super().write(fd, data)
+            return len(data) - 1
+    dev, _ = device(Short())
+    with pytest.raises(OSError):
+        dev.emit([(uinput.EV_KEY, 29, 1)])

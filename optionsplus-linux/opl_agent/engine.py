@@ -3,8 +3,15 @@
 A button whose assignment is not the depot default is diverted: the mouse stops
 acting on it and reports presses to the agent instead, and the engine runs the
 assigned card through the virtual input device. A button on its default card is
-never diverted. This ticket runs KEYSTROKE cards; every other card type is
-refused with Unsupported, which the router turns into an error the UI shows.
+never diverted. A card that cannot run is refused with Unsupported, which the router
+turns into an error the UI shows.
+
+A press plays the card's steps once (a tap): keystroke, system, media and macro cards.
+Only a mouse button card is held: its virtual button goes down and up with the real
+one, so a remapped click can drag. A keystroke is not held (no auto-repeat from the
+mouse; the focused application repeats a key it sees held, so holding would repeat a
+shortcut). A macro may wait 5 s in all (MAX_WAIT); the player runs one press at a time
+and at most PLAY_QUEUE wait their turn.
 
 The device is the source of truth for what is diverted: every write is read
 back, and `sync` reads before it writes, so a mouse that slept, was replugged or
@@ -14,6 +21,7 @@ was left diverted by a crashed agent ends up as the store says.
 import logging
 import queue
 import threading
+import time
 
 from . import gestures, hidpp, keymap, profiles, sysactions, uinput
 
@@ -22,6 +30,14 @@ log = logging.getLogger("opl.engine")
 
 class Unsupported(Exception):
     """The card or control cannot be run on this system. Carries the text the UI shows."""
+
+
+class NoVirtualDevice(OSError):
+    """/dev/uinput could not be opened (usually a missing permission). The text is the UI's."""
+
+
+MAX_WAIT = 5.0                  # seconds a card may wait in all; one macro must not hold the player for long
+PLAY_QUEUE = 16                 # runs waiting for the player; a press beyond that is dropped
 
 
 def resolve_card(card):
@@ -38,7 +54,17 @@ def resolve_card(card):
 # Mouse button hidUsage (HID usage page 9) -> BTN_*; the WIN_ actions are what the kernel sends today.
 _MOUSE_BUTTONS = {1: uinput.BTN_LEFT, 2: uinput.BTN_RIGHT, 3: uinput.BTN_MIDDLE,
                   4: uinput.BTN_SIDE, 5: uinput.BTN_EXTRA}
-_MOUSE_ACTIONS = {"WIN_BACK": uinput.BTN_SIDE, "WIN_FORWARD": uinput.BTN_EXTRA}
+_MOUSE_ACTIONS = {"WIN_BACK": uinput.BTN_SIDE, "WIN_FORWARD": uinput.BTN_EXTRA,
+                  "OSX_GESTURE_BACK": uinput.BTN_SIDE, "OSX_GESTURE_FORWARD": uinput.BTN_EXTRA}
+
+
+class Hold:
+    """A mouse button card on a button: the virtual button goes down when the real one does and up
+    when it is let go, so a remapped click can drag. Inside a gesture's nested cards, where there
+    is no release to wait for, the same action is a tap."""
+
+    def __init__(self, codes):
+        self.codes = tuple(codes)
 
 
 def _tap(codes):
@@ -57,10 +83,18 @@ def _key_event(usage, down):
 
 def _compile_sequence(seq):
     steps = []
+    waited = 0.0
     for lst in seq.get("componentLists") or []:
         for comp in lst.get("components") or []:
             if "delay" in comp:
-                steps.append(("wait", max(0, int((comp["delay"] or {}).get("durationMs") or 0)) / 1000.0))
+                try:
+                    seconds = max(0, int((comp["delay"] or {}).get("durationMs") or 0)) / 1000.0
+                except (TypeError, ValueError):
+                    raise Unsupported("a delay in a macro is not a number of milliseconds")
+                waited += seconds
+                if waited > MAX_WAIT:
+                    raise Unsupported("a macro that waits more than %d seconds is not supported" % MAX_WAIT)
+                steps.append(("wait", seconds))
             elif "keyboard" in comp:
                 kbd = comp["keyboard"] or {}
                 steps.append(("emit", [_key_event(kbd.get("hidUsage"), kbd.get("isDown"))]))
@@ -101,6 +135,10 @@ def compile_card(card, table=None):
         return [("emit", _tap([code]))]
     if kind == "SYSTEM":
         action = (macro.get("system") or {}).get("action")
+        if action in sysactions.SCROLL_ACTIONS:
+            sign = sysactions.SCROLL_ACTIONS[action]
+            return [("emit", [(uinput.EV_REL, uinput.REL_HWHEEL_HI_RES, sign * 120),
+                              (uinput.EV_REL, uinput.REL_HWHEEL, sign)])]
         if table.chord(action) is None:
             raise Unsupported("%s has no Linux keystroke; set one in actions.toml" % (action,))
         return [("system", action)]
@@ -115,14 +153,28 @@ def compile_card(card, table=None):
     raise Unsupported("%s actions are not supported yet" % (kind or "this kind of"))
 
 
+def _mouse_codes(card):
+    """The virtual buttons a MOUSE card presses, or None when it is not one that can be held."""
+    macro = resolve_card(card).get("macro") or {}
+    if macro.get("type") != "MOUSE":
+        return None
+    steps = compile_card(card)
+    return [code for t, code, v in steps[0][1] if v]
+
+
 def compile_binding(card, table=None):
-    """What a press does: the events of a plain card, a `gestures.Gesture` for a four-way card,
-    a `gestures.Thumb` for a two-way card. Raises Unsupported when any action cannot run."""
+    """What a press does: the steps of a plain card, a `Hold` for a mouse button card, a
+    `gestures.Gesture` for a four-way card, a `gestures.Thumb` for a two-way card. Raises
+    Unsupported when any action cannot run."""
     kind = gestures.kind(card)
     if kind is None:
-        return compile_card(card, table)
+        codes = _mouse_codes(card)
+        return Hold(codes) if codes else compile_card(card, table)
     nested = gestures.nested_actions(card)
     if not nested:
+        preset = gestures.preset_name(card)
+        if preset:
+            raise Unsupported("the %s gesture preset is not supported; assign an action to each direction" % preset)
         raise Unsupported("this action card has no actions assigned")
     actions = {word: compile_card(sub, table) for word, sub in nested.items()}
     if kind == gestures.FOUR_WAYS:
@@ -131,7 +183,12 @@ def compile_binding(card, table=None):
 
 
 class InputEngine:
-    """Per-device diversions and the actions behind them. Methods that talk to the mouse block."""
+    """Per-device diversions and the actions behind them. Methods that talk to the mouse block.
+
+    Threads: the device writes of one mouse (`assign`, `release`, `sync`, `activate`) run one at a
+    time under that device's lock, so a wake-up resync cannot interleave its reads and writes with
+    a UI request; the data the event hooks read (`_active`, `_held`, `_swipes`) sits behind
+    `_lock`, which is never held across device I/O."""
 
     def __init__(self, registry, store, sink_factory=None, actions_path=None):
         self.reg = registry
@@ -139,28 +196,61 @@ class InputEngine:
         self.sink_factory = sink_factory or uinput.open_default
         self.table = sysactions.ActionTable(actions_path)
         self._sink = None
-        self._plays = queue.Queue()     # steps of presses, played one press at a time
+        self._plays = queue.Queue(PLAY_QUEUE)   # (dev_id, generation, steps) of presses, played one at a time
         self._player = None
         self._stop = threading.Event()
         self._lock = threading.RLock()
-        self._active = {}               # dev_id -> {control key: events | Gesture | Thumb}
+        self._io = {}                   # dev_id -> RLock held across the device writes of that mouse
+        self._gen = {}                  # dev_id -> generation; a run of an older one is abandoned
+        self._active = {}               # dev_id -> {control key: steps | Hold | Gesture | Thumb}
         self._held = {}                 # dev_id -> set of cids held down now
+        self._holding = {}              # dev_id -> {cid: key codes} a Hold keeps pressed now
         self.active_app = None          # application id whose profile is in force; None: the default
         self._swipes = {}               # dev_id -> (cid, Swipe) of the gesture button press in progress
+        self.on_stale = []              # callables(dev_id, slot_id, app_id, message): a stored card that no longer runs
         registry.on_button_event.append(self.on_event)
         registry.on_thumb_event.append(self.on_thumb_event)
 
+    def _dev_lock(self, dev_id):
+        with self._lock:
+            return self._io.setdefault(dev_id, threading.RLock())
+
     # ---- the virtual device ------------------------------------------------
     def sink(self):
-        """The one virtual input device, created on first use. Raises OSError when it cannot be."""
+        """The one virtual input device, created on first use. Raises NoVirtualDevice (an OSError)
+        when it cannot be."""
         with self._lock:
             if self._sink is None:
-                self._sink = self.sink_factory()
+                try:
+                    self._sink = self.sink_factory()
+                except OSError as exc:
+                    raise NoVirtualDevice("%s could not be opened: %s" % (uinput.UINPUT_PATH, exc)) from exc
             return self._sink
+
+    def _drop_sink(self, dev):
+        """Close and forget `dev` after a failed write: the kernel lifts its keys, and the next
+        use makes a fresh one."""
+        with self._lock:
+            if self._sink is dev:
+                self._sink = None
+        try:
+            dev.close()
+        except Exception:
+            log.debug("closing the virtual device failed", exc_info=True)
 
     def close(self):
         self._stop.set()
-        self._plays.put(None)
+        with self._plays.mutex:
+            self._plays.queue.clear()
+        try:
+            self._plays.put_nowait(None)
+        except queue.Full:
+            pass
+        player = self._player
+        if player is not None and player is not threading.current_thread():
+            player.join(2.0)            # a macro in its wait ends at once; one in a write gets a moment
+            if player.is_alive():
+                log.warning("the player thread did not stop; closing the virtual device under it")
         with self._lock:
             sink, self._sink = self._sink, None
         if sink is not None:
@@ -185,6 +275,13 @@ class InputEngine:
             raise Unsupported("this button cannot be reassigned")
         return info
 
+    def _controls(self, dev):
+        """The mouse's reprogrammable controls; empty when it has none."""
+        try:
+            return self.reg.controls(dev.id)
+        except hidpp.FeatureNotSupported:
+            return {}
+
     def _write(self, dev, key, binding):
         """Blocking: put the mouse in the state `binding` (None: native) needs for control `key`."""
         if key == profiles.THUMB_KEY:
@@ -193,6 +290,16 @@ class InputEngine:
         info = self.reg.controls(dev.id)[key]
         raw = isinstance(binding, gestures.Gesture)
         self.reg.set_divert(dev.id, key, binding is not None, raw if info["raw_xy"] else None)
+
+    def _tune(self, dev, binding):
+        """Blocking: give a thumb binding its step, the wheel's diverted units per notch."""
+        if isinstance(binding, gestures.Thumb):
+            try:
+                units = self.reg.thumb_units_per_notch(dev.id)
+            except Exception as exc:
+                log.debug("thumb wheel resolution unknown for %s: %s", dev.id, exc)
+                units = 0
+            binding.step = units if units and units > 0 else gestures.THUMB_STEP
 
     def _check(self, dev, key, binding):
         """Raise Unsupported unless control `key` of `dev` can run `binding`."""
@@ -214,10 +321,16 @@ class InputEngine:
         fails; nothing changes then."""
         binding = compile_binding(card, self.table)
         self._check(dev, key, binding)
-        self.sink()                     # never divert a control that could not be injected for
-        self._write(dev, key, binding)
-        with self._lock:
-            self._active.setdefault(dev.id, {})[key] = binding
+        with self._dev_lock(dev.id):
+            self.sink()                 # never divert a control that could not be injected for
+            self._tune(dev, binding)
+            self._write(dev, key, binding)
+            with self._lock:
+                self._active.setdefault(dev.id, {})[key] = binding
+                swipe = self._swipes.get(dev.id)
+                if swipe and swipe[0] == key:
+                    del self._swipes[dev.id]    # the press in progress belonged to the old card
+            self._let_go(dev.id, key)
 
     def validate(self, dev, key, card):
         """Raise Unsupported unless control `key` could run `card`; touches nothing."""
@@ -227,39 +340,58 @@ class InputEngine:
     def release(self, dev, key):
         """Hand control `key` back to the mouse. Blocking; raises when the device write fails,
         and the control then keeps running its card."""
-        if key == profiles.THUMB_KEY:
-            if not dev.thumb_wheel:
-                return
-        else:
-            try:
-                self.reg.controls(dev.id)
-            except hidpp.FeatureNotSupported:
-                return                  # nothing was ever diverted
-        self._write(dev, key, None)
-        with self._lock:
-            self._active.get(dev.id, {}).pop(key, None)
+        with self._dev_lock(dev.id):
+            if key == profiles.THUMB_KEY:
+                if not dev.thumb_wheel:
+                    return
+            else:
+                try:
+                    self.reg.controls(dev.id)
+                except hidpp.FeatureNotSupported:
+                    return              # nothing was ever diverted
+            self._write(dev, key, None)
+            with self._lock:
+                self._active.get(dev.id, {}).pop(key, None)
+                swipe = self._swipes.get(dev.id)
+                if swipe and swipe[0] == key:
+                    del self._swipes[dev.id]
+            self._cancel(dev.id)
+            self._let_go(dev.id, key)
 
     def _desired(self, dev):
-        """{control key: binding} the store asks for on `dev`: non-default cards that can run."""
+        """{control key: binding} the store asks for on `dev`: non-default cards that can run. A
+        stored card that no longer compiles is reported through `on_stale`."""
         defaults = {a["slotId"]: a["cardId"]
                     for a in profiles.default_assignments(dev.slot_prefix, dev.depot)}
-        out = {}
+        out, stale = {}, []
+        own = self.store.app_cards(self.active_app)
         for slot_id, card in self.store.effective_cards(self.active_app).items():
             key = profiles.control_key(slot_id, dev.slot_prefix)
             if key is None or card.get("id") == defaults.get(slot_id):
                 continue
             try:
-                out[key] = compile_binding(card, self.table)
+                binding = compile_binding(card, self.table)
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
+                stale.append((slot_id, self.active_app if slot_id in own else None, str(exc)))
+                continue
+            self._tune(dev, binding)
+            out[key] = binding
+        for slot_id, app, message in stale:
+            for hook in list(self.on_stale):
+                try:
+                    hook(dev.id, slot_id, app, message)
+                except Exception:
+                    log.exception("stale card hook failed")
         return out
 
     def activate(self, app_id, devices):
         """Blocking: put application `app_id`'s profile in force (None: the default one). Per
         device, only the controls whose diversion differs are written; a control that stays
         diverted the same way just runs its new card. The first error is raised after every
-        device is tried."""
-        self.active_app = app_id
+        device is tried, and the profile in force is then the one before, so the switch is tried
+        again."""
+        previous, self.active_app = self.active_app, app_id
         first_error = None
         for dev in devices:
             try:
@@ -268,6 +400,7 @@ class InputEngine:
                 log.warning("switching %s to the profile of %s failed: %s", dev.id, app_id or "the default", exc)
                 first_error = first_error or exc
         if first_error is not None:
+            self.active_app = previous
             raise first_error
 
     @staticmethod
@@ -276,68 +409,98 @@ class InputEngine:
         return None if binding is None else isinstance(binding, gestures.Gesture)
 
     def _rebase(self, dev):
-        try:
-            self.reg.controls(dev.id)
-        except hidpp.FeatureNotSupported:
-            return
-        desired = self._desired(dev)
-        with self._lock:
-            current = dict(self._active.get(dev.id, {}))
-        first_error = None
-        for key in sorted(set(current) | set(desired), key=str):
-            old, new = current.get(key), desired.get(key)
-            if self._diversion(old) == self._diversion(new):
+        with self._dev_lock(dev.id):
+            controls = self._controls(dev)
+            if not controls and not dev.thumb_wheel:
+                return
+            desired = {k: b for k, b in self._desired(dev).items()
+                       if k in controls or (k == profiles.THUMB_KEY and dev.thumb_wheel)}
+            with self._lock:
+                current = dict(self._active.get(dev.id, {}))
+            had = set(current)
+            first_error = None
+            for key in sorted(set(current) | set(desired), key=str):
+                old, new = current.get(key), desired.get(key)
+                if self._diversion(old) == self._diversion(new):
+                    if new is not None:
+                        current[key] = new
+                    continue
+                try:
+                    if new is not None:
+                        self.sink()
+                    self._write(dev, key, new)
+                except Exception as exc:
+                    first_error = first_error or exc
+                    if isinstance(exc, hidpp.HidppTimeout):
+                        break
+                    continue
                 if new is not None:
                     current[key] = new
-                continue
-            try:
-                if new is not None:
-                    self.sink()
-                self._write(dev, key, new)
-            except Exception as exc:
-                first_error = first_error or exc
-                if isinstance(exc, hidpp.HidppTimeout):
-                    break
-                continue
-            if new is not None:
-                current[key] = new
-            else:
-                del current[key]
-        with self._lock:
-            self._active[dev.id] = current
-        if first_error is not None:
-            raise first_error
+                else:
+                    del current[key]
+            with self._lock:
+                self._active[dev.id] = current
+                held = self._held.get(dev.id)
+                if held is not None:
+                    held &= set(current)        # a button handed back sends no release any more
+                swipe = self._swipes.get(dev.id)
+                if swipe and not isinstance(current.get(swipe[0]), gestures.Gesture):
+                    del self._swipes[dev.id]
+                stale_holds = [k for k in self._holding.get(dev.id, {}) if not isinstance(current.get(k), Hold)]
+            if had - set(current):
+                self._cancel(dev.id)        # a button handed back: its queued actions go with it
+            self._let_go(dev.id, *stale_holds)
+            if first_error is not None:
+                raise first_error
 
     def sync(self, dev):
         """Blocking: bring the mouse's diversions in line with the store. Reads each divertable
         control first, so it also clears a diversion nothing asked for. A control that fails does
-        not stop the others; the first error is raised at the end."""
-        try:
-            controls = self.reg.controls(dev.id)
-        except hidpp.FeatureNotSupported:
-            return
-        desired = self._desired(dev)
-        first_error = None
-        todo = [(cid, info) for cid, info in controls.items() if info["divertable"]]
-        if dev.thumb_wheel:
-            todo.append((profiles.THUMB_KEY, None))
-        for key, info in todo:
-            try:
-                if key in desired:
-                    self.sink()
-                self._write(dev, key, desired.get(key))
-            except Exception as exc:
-                log.warning("control %s on %s: %s", key, dev.id, exc)
-                desired.pop(key, None)
-                first_error = first_error or exc
-                if isinstance(exc, hidpp.HidppTimeout):
-                    break               # the mouse is not answering: do not wait per control
-        with self._lock:
-            self._active[dev.id] = desired
-            self._held[dev.id] = set()
-            self._swipes.pop(dev.id, None)
-        if first_error is not None:
-            raise first_error
+        not stop the others; the first error is raised at the end. What is tracked afterwards is
+        what was written: a control the mouse stopped answering for keeps what was known."""
+        with self._dev_lock(dev.id):
+            controls = self._controls(dev)
+            todo = [(cid, info) for cid, info in controls.items() if info["divertable"]]
+            if dev.thumb_wheel:
+                todo.append((profiles.THUMB_KEY, None))
+            if not todo:
+                return
+            self._cancel(dev.id)
+            desired = self._desired(dev)
+            with self._lock:
+                before = dict(self._active.get(dev.id, {}))
+            now, first_error, tried = {}, None, set()
+            for key, _info in todo:
+                binding = desired.get(key)
+                tried.add(key)
+                try:
+                    if binding is not None:
+                        try:
+                            self.sink()
+                        except Exception:
+                            # no way to inject: hand the control back so the mouse does not
+                            # keep a diversion nothing tracks any more
+                            self._write(dev, key, None)
+                            raise
+                    self._write(dev, key, binding)
+                except Exception as exc:
+                    log.warning("control %s on %s: %s", key, dev.id, exc)
+                    first_error = first_error or exc
+                    if isinstance(exc, hidpp.HidppTimeout):
+                        break           # the mouse is not answering: do not wait per control
+                    continue
+                if binding is not None:
+                    now[key] = binding
+            for key, _info in todo:
+                if key not in tried and key in before:
+                    now[key] = before[key]      # never reached: keep what was known
+            with self._lock:
+                self._active[dev.id] = now
+                self._held[dev.id] = set()
+                self._swipes.pop(dev.id, None)
+            self._let_go(dev.id)
+            if first_error is not None:
+                raise first_error
 
     # ---- events -------------------------------------------------------------------
     def on_event(self, dev_id, function, params):
@@ -357,13 +520,21 @@ class InputEngine:
             before = self._held.get(dev_id, set())
             self._held[dev_id] = held
             active = self._active.get(dev_id, {})
+            holding = self._holding.setdefault(dev_id, {})
             actions = []
             for cid in sorted(held - before):
                 binding = active.get(cid)
                 if isinstance(binding, gestures.Gesture):
                     self._swipes[dev_id] = (cid, binding.start())
+                elif isinstance(binding, Hold):
+                    holding[cid] = binding.codes
+                    actions.append([("hold", binding.codes)])
                 elif binding:
                     actions.append(binding)
+            for cid in sorted(before - held):
+                codes = holding.pop(cid, None)
+                if codes:
+                    actions.append([("lift", codes)])
             swipe = self._swipes.get(dev_id)
             if swipe and swipe[0] in before - held:
                 del self._swipes[dev_id]
@@ -379,38 +550,78 @@ class InputEngine:
             actions = binding.turn(hidpp.parse_thumb_rotation(params)) if binding else []
         self._emit(dev_id, actions)
 
+    def _let_go(self, dev_id, *keys):
+        """Lift the virtual buttons held for `keys` (all of the device's when none are named)."""
+        with self._lock:
+            holding = self._holding.get(dev_id, {})
+            lifts = [holding.pop(k) for k in (keys or list(holding)) if k in holding]
+        self._emit(dev_id, [[("lift", codes)] for codes in lifts])
+
     def _emit(self, dev_id, actions):
         """Queue the steps of each action for the player thread, in order."""
         for steps in actions:
-            if not steps:
+            if not steps or self._stop.is_set():
                 continue
             self._start_player()
-            self._plays.put(steps)
+            with self._lock:
+                gen = self._gen.get(dev_id, 0)
+            try:
+                self._plays.put_nowait((dev_id, gen, steps))
+            except queue.Full:
+                log.warning("too many actions waiting; dropped one")
+
+    def _cancel(self, dev_id):
+        """Drop what `dev_id` has queued or is playing: its mouse was handed back or resynced.
+        A lift (letting go of a held button) always survives."""
+        with self._lock:
+            self._gen[dev_id] = self._gen.get(dev_id, 0) + 1
+        with self._plays.mutex:
+            keep = [it for it in self._plays.queue
+                    if it is None or it[0] != dev_id or all(k == "lift" for k, _ in it[2])]
+            self._plays.queue.clear()
+            self._plays.queue.extend(keep)
 
     # ---- playback ------------------------------------------------------------------
     def _start_player(self):
         with self._lock:
-            if self._player is None:
+            if self._player is None and not self._stop.is_set():
                 self._player = threading.Thread(target=self._play_loop, name="opl-play", daemon=True)
                 self._player.start()
 
     def _play_loop(self):
         while not self._stop.is_set():
-            steps = self._plays.get()
-            if steps is None:
+            item = self._plays.get()
+            if item is None:
                 return
             try:
-                self._play(steps)
+                self._play(*item)
             except Exception as exc:
                 log.warning("running the card failed: %s", exc)
 
-    def _play(self, steps):
-        """Run the steps in order. Keys still down when the run ends or fails are released."""
-        down = []
+    def _abandoned(self, dev_id, gen):
+        with self._lock:
+            return self._stop.is_set() or self._gen.get(dev_id, 0) != gen
+
+    def _wait(self, dev_id, gen, seconds):
+        """Sleep `seconds`, in slices; False when the run was abandoned or the engine closed."""
+        end = time.monotonic() + seconds
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return True
+            if self._stop.wait(min(left, 0.05)) or self._abandoned(dev_id, gen):
+                return False
+
+    def _play(self, dev_id, gen, steps):
+        """Run the steps in order. Keys still down when the run ends or fails are released; if
+        that fails too the device is closed (the kernel lifts what it holds)."""
+        dev, down = None, []
         try:
             for kind, arg in steps:
+                if kind != "lift" and self._abandoned(dev_id, gen):
+                    return
                 if kind == "wait":
-                    if self._stop.wait(arg):
+                    if not self._wait(dev_id, gen, arg):
                         return
                     continue
                 if kind == "system":
@@ -418,17 +629,29 @@ class InputEngine:
                     if chord is None:
                         log.warning("system action %s has no keystroke any more", arg)
                         continue
-                    arg = _tap(chord)
-                self.sink().emit(arg)
+                    kind, arg = "emit", _tap(chord)
+                held = kind in ("hold", "lift")
+                if kind == "hold":
+                    arg = [(uinput.EV_KEY, c, 1) for c in arg]
+                elif kind == "lift":
+                    arg = [(uinput.EV_KEY, c, 0) for c in reversed(arg)]
+                if dev is None:
+                    dev = self.sink()
+                if held:
+                    dev.emit(arg)           # a held button outlives the run: not released below
+                    continue
                 for ev_type, code, value in arg:
-                    if ev_type == uinput.EV_KEY:
-                        if value:
-                            down.append(code)
-                        elif code in down:
-                            down.remove(code)
+                    if ev_type == uinput.EV_KEY and value:
+                        down.append(code)   # noted first: a write cut short may still have pressed it
+                dev.emit(arg)
+                for ev_type, code, value in arg:
+                    if ev_type == uinput.EV_KEY and not value and code in down:
+                        down.remove(code)
         finally:
             for code in reversed(down):
                 try:
-                    self.sink().emit([(uinput.EV_KEY, code, 0)])
+                    dev.emit([(uinput.EV_KEY, code, 0)])
                 except Exception:
-                    log.debug("releasing key %d failed", code, exc_info=True)
+                    log.warning("releasing key %d failed; closing the virtual device", code, exc_info=True)
+                    self._drop_sink(dev)
+                    break

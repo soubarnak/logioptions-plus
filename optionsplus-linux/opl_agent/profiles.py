@@ -273,6 +273,13 @@ class ProfileStore:
         if gone:
             self._save()
 
+    def discard(self, slot_id, app_id=None):
+        """Forget one stored card: the application's when `app_id` is given, else the default profile's."""
+        if app_id:
+            self.remove_app_buttons(app_id, lambda slot: slot == slot_id)
+        else:
+            self.remove(slot_id)
+
     def remove(self, slot_id):
         if self.cards.pop(slot_id, None) is not None:
             self._save()

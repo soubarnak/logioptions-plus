@@ -205,3 +205,22 @@ def test_a_failed_injection_does_not_stop_later_presses(client, bolt, uinput):
     uinput.fail_emit = False
     bolt.press_button(BACK)
     assert wait_for(lambda: len(uinput.keys()) >= 4)
+
+
+# ---- review fixes: persistent divert, reply check, locks, failures ----------------------
+
+def test_a_stale_persistent_divert_is_cleared_on_wake(client, bolt):
+    bolt.mouse.persistent.add(BACK)           # left by another program; survives a power cycle
+    bolt.emit_event(F_WAKE)
+    assert wait_for(lambda: BACK not in bolt.mouse.persistent)
+    assert BACK not in bolt.mouse.diverted
+
+
+def test_a_reply_for_another_control_is_refused(monkeypatch):
+    import struct
+    import pytest
+    from opl_agent import hidpp
+    monkeypatch.setattr(hidpp, "_fcall", lambda *a, **k: struct.pack(">HBHB", 83, 1, 83, 0))
+    with pytest.raises(hidpp.HidppError):
+        hidpp.get_cid_reporting(0, 1, 82)
+    assert hidpp.get_cid_reporting(0, 1, 83)[0] is True

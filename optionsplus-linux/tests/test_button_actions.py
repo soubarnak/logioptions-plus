@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from tests.fakes.hidpp_device import F_WAKE
 from tests.test_button_remap import BACK, FORWARD, assign
 from tests.test_wake_reapply import wait_for
 
@@ -66,16 +67,40 @@ def tap(*codes):
 
 @pytest.mark.parametrize("usage,button", [(1, BTN_LEFT), (2, BTN_RIGHT), (3, BTN_MIDDLE),
                                           (4, BTN_SIDE), (5, BTN_EXTRA)])
-def test_a_mouse_button_card_clicks_that_button(client, bolt, uinput, usage, button):
-    assert press_and_read(client, bolt, uinput, mouse("BUTTON", usage), 2) == tap(button)
+def test_a_mouse_button_card_holds_that_button_while_the_real_one_is_held(client, bolt, uinput, usage, button):
+    assert press_and_read(client, bolt, uinput, mouse("BUTTON", usage), 1) == [(button, 1)]
+    bolt.release_button(BACK)
+    assert wait_for(lambda: len(uinput.keys()) >= 2)
+    assert uinput.keys() == [(button, 1), (button, 0)]
 
 
 @pytest.mark.parametrize("action,button", [("WIN_BACK", BTN_SIDE), ("WIN_FORWARD", BTN_EXTRA)])
-def test_back_and_forward_cards_click_the_side_buttons(client, bolt, uinput, action, button):
-    assert press_and_read(client, bolt, uinput, mouse(action), 2) == tap(button)
+def test_back_and_forward_cards_hold_the_side_buttons(client, bolt, uinput, action, button):
+    assert press_and_read(client, bolt, uinput, mouse(action), 1) == [(button, 1)]
+    bolt.release_button(BACK)
+    assert wait_for(lambda: len(uinput.keys()) >= 2)
+    assert uinput.keys() == [(button, 1), (button, 0)]
 
 
-@pytest.mark.parametrize("c", [mouse("BUTTON", 99), mouse("BUTTON", 0), mouse("DPI_NEXT"), mouse("OSX_GESTURE_BACK")])
+@pytest.mark.parametrize("action,button", [("OSX_GESTURE_BACK", BTN_SIDE), ("OSX_GESTURE_FORWARD", BTN_EXTRA)])
+def test_the_mac_gesture_back_and_forward_cards_are_the_side_buttons(client, bolt, uinput, action, button):
+    assert press_and_read(client, bolt, uinput, mouse(action), 1) == [(button, 1)]
+
+
+def test_a_held_mouse_button_is_lifted_when_the_mouse_is_resynced(client, bolt, uinput):
+    press_and_read(client, bolt, uinput, mouse("BUTTON", 1), 1)
+    bolt.mouse.held.clear()                   # the release was lost: the mouse slept
+    bolt.emit_event(F_WAKE)
+    assert wait_for(lambda: uinput.keys() == [(BTN_LEFT, 1), (BTN_LEFT, 0)])
+
+
+def test_a_held_mouse_button_is_lifted_when_its_card_is_removed(client, bolt, uinput):
+    press_and_read(client, bolt, uinput, mouse("BUTTON", 1), 1)
+    assign(client, BACK, {"id": "card-back", "attribute": "MOUSE_BUTTON_ACTION"})
+    assert wait_for(lambda: uinput.keys() == [(BTN_LEFT, 1), (BTN_LEFT, 0)])
+
+
+@pytest.mark.parametrize("c", [mouse("BUTTON", 99), mouse("BUTTON", 0), mouse("DPI_NEXT")])
 def test_a_mouse_card_with_no_button_is_an_error(client, bolt, c):
     assert assign(client, BACK, c)["result"]["code"] == "NOT_SUPPORTED"
     assert bolt.mouse.diverted == set()
@@ -87,8 +112,12 @@ def test_a_mouse_card_with_no_button_is_an_error(client, bolt, c):
     ("SWITCH_APPS", tap(ALT, TAB)),
     ("SHIFT_SWITCH_APPS", tap(ALT, SHIFT, TAB)),
     ("SHOW_DESKTOP", tap(META, KEY_D)),
-    ("SWITCH_BETWEEN_DESKTOPS_RIGHT", tap(CTRL, ALT, KEY_RIGHT)),
-    ("SWITCH_BETWEEN_DESKTOPS_LEFT", tap(CTRL, ALT, KEY_LEFT)),
+    ("SWITCH_BETWEEN_DESKTOPS_RIGHT", tap(META, 109)),               # GNOME 40+: Super+Page Down
+    ("SWITCH_BETWEEN_DESKTOPS_LEFT", tap(META, 104)),                # Super+Page Up
+    ("MINIMIZE", tap(META, 35)),                                      # Super+H
+    ("TASK_VIEW", tap(META)),
+    ("APP_EXPOSE", tap(META)),
+    ("SWITCH_LANGUAGE", tap(META, 57)),                               # Super+Space
     ("LOCK", tap(META, KEY_L)),
     ("CLOSE", tap(ALT, F4)),
     ("COPY", tap(CTRL, KEY_C)),
@@ -97,6 +126,14 @@ def test_a_mouse_card_with_no_button_is_an_error(client, bolt, c):
 ])
 def test_a_system_card_sends_its_default_linux_keystroke(client, bolt, uinput, action, keys):
     assert press_and_read(client, bolt, uinput, system(action), len(keys)) == keys
+
+
+@pytest.mark.parametrize("action,sign", [("SCROLL_LEFT", -1), ("SCROLL_RIGHT", 1)])
+def test_scroll_left_and_right_cards_move_the_horizontal_wheel(client, bolt, uinput, action, sign):
+    assert assign(client, BACK, system(action))["result"]["code"] == "SUCCESS"
+    bolt.press_button(BACK)
+    assert wait_for(lambda: uinput.rels(6))
+    assert uinput.rels(6) == [sign] and uinput.rels(12) == [sign * 120]        # REL_HWHEEL, REL_HWHEEL_HI_RES
 
 
 def test_a_system_action_without_a_linux_equivalent_is_an_error(client, bolt):
@@ -144,20 +181,20 @@ def press_once(bolt, uinput, cid=BACK):
 
 
 def test_the_override_file_changes_a_system_keystroke(client, bolt, uinput, overrides):
-    overrides('[system]\nSWITCH_BETWEEN_DESKTOPS_RIGHT = "super+page_down"\n')
+    overrides('[system]\nSWITCH_BETWEEN_DESKTOPS_RIGHT = "ctrl+alt+right"\n')
     assign(client, BACK, system("SWITCH_BETWEEN_DESKTOPS_RIGHT"))
-    assert press_once(bolt, uinput) == tap(META, 109)
+    assert press_once(bolt, uinput) == tap(CTRL, ALT, KEY_RIGHT)
 
 
 def test_editing_the_override_file_applies_without_a_restart(client, bolt, uinput, overrides):
     assign(client, BACK, system("SWITCH_BETWEEN_DESKTOPS_RIGHT"))
-    assert press_once(bolt, uinput) == tap(CTRL, ALT, KEY_RIGHT)
-    overrides('[system]\nSWITCH_BETWEEN_DESKTOPS_RIGHT = "super+page_down"\n')
     assert press_once(bolt, uinput) == tap(META, 109)
+    overrides('[system]\nSWITCH_BETWEEN_DESKTOPS_RIGHT = "ctrl+alt+right"\n')
+    assert press_once(bolt, uinput) == tap(CTRL, ALT, KEY_RIGHT)
     overrides('[system]\nSWITCH_BETWEEN_DESKTOPS_RIGHT = "ctrl+alt+down"\n')
     assert press_once(bolt, uinput) == tap(CTRL, ALT, 108)
     os.remove(overrides.path)
-    assert press_once(bolt, uinput) == tap(CTRL, ALT, KEY_RIGHT)
+    assert press_once(bolt, uinput) == tap(META, 109)
 
 
 def test_an_override_can_be_a_single_media_key(client, bolt, uinput, overrides):

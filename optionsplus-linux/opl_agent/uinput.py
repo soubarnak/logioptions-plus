@@ -9,6 +9,7 @@ because the kernel, not the display server, owns the device.
 import fcntl
 import os
 import struct
+import threading
 
 DEVICE_NAME = "optionsplus-linux virtual input"
 UINPUT_PATH = "/dev/uinput"
@@ -44,7 +45,7 @@ class OsBackend:
         fcntl.ioctl(fd, request, arg)
 
     def write(self, fd, data):
-        os.write(fd, data)
+        return os.write(fd, data)
 
     def close(self, fd):
         os.close(fd)
@@ -63,6 +64,8 @@ class UinputDevice:
     def __init__(self, backend=None):
         self.backend = backend or OsBackend()
         self.fd = self.backend.open(UINPUT_PATH)
+        self._lock = threading.Lock()
+        self._pressed = set()           # key codes this device has sent down and not up
         try:
             for ev in (EV_SYN, EV_KEY, EV_REL):
                 self.backend.ioctl(self.fd, UI_SET_EVBIT, ev)
@@ -78,19 +81,44 @@ class UinputDevice:
             raise
 
     def emit(self, events):
-        """Send [(ev_type, code, value)] followed by one sync report. Raises OSError on failure."""
+        """Send [(ev_type, code, value)] followed by one sync report, as one write under a lock
+        (the relay and the player threads share the device, and their frames must not mix).
+        On a failed write every key this device holds down is released again, so a frame cut
+        short never leaves a modifier stuck; the error is raised all the same."""
+        events = list(events)
         data = b"".join(struct.pack(EVENT_FORMAT, 0, 0, t, c, v) for t, c, v in events)
         data += struct.pack(EVENT_FORMAT, 0, 0, EV_SYN, SYN_REPORT, 0)
-        # one write per event: a short write must never split an event
-        step = struct.calcsize(EVENT_FORMAT)
-        for i in range(0, len(data), step):
-            self.backend.write(self.fd, data[i:i + step])
+        with self._lock:
+            try:
+                done = self.backend.write(self.fd, data)
+                if done is not None and done != len(data):
+                    raise OSError("short write to %s (%d of %d bytes)" % (UINPUT_PATH, done, len(data)))
+            except BaseException:
+                self._release_all(events)
+                raise
+            for t, c, v in events:
+                if t == EV_KEY:
+                    (self._pressed.add if v else self._pressed.discard)(c)
+
+    def _release_all(self, events):
+        """Best effort after a failed write: lift every key that may be down, then sync."""
+        down = self._pressed | {c for t, c, v in events if t == EV_KEY and v}
+        self._pressed = set()
+        if not down:
+            return
+        data = b"".join(struct.pack(EVENT_FORMAT, 0, 0, EV_KEY, c, 0) for c in sorted(down))
+        data += struct.pack(EVENT_FORMAT, 0, 0, EV_SYN, SYN_REPORT, 0)
+        try:
+            self.backend.write(self.fd, data)
+        except Exception:
+            pass                # the device is broken; the kernel lifts the keys when it is destroyed
 
     def close(self):
-        try:
-            self.backend.ioctl(self.fd, UI_DEV_DESTROY, 0)
-        finally:
-            self.backend.close(self.fd)
+        with self._lock:
+            try:
+                self.backend.ioctl(self.fd, UI_DEV_DESTROY, 0)
+            finally:
+                self.backend.close(self.fd)
 
 
 def open_default():

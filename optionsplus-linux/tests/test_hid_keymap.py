@@ -23,3 +23,10 @@ def test_unmapped_usages_have_no_key(usage):
 def test_no_two_usages_share_a_key_except_the_non_us_hash():
     keys = [keymap.linux_key(u) for u in range(256) if keymap.linux_key(u)]
     assert len(keys) - len(set(keys)) <= 1
+
+
+@pytest.mark.parametrize("usage,key", [(133, 121), (135, 89), (136, 93), (137, 124), (138, 92), (139, 94),
+                                       (140, 95), (144, 122), (145, 123), (146, 90), (147, 91),
+                                       (148, 85), (156, 355)])
+def test_comma_international_language_and_clear_keys(usage, key):
+    assert keymap.linux_key(usage) == key

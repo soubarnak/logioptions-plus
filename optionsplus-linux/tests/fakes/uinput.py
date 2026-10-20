@@ -15,6 +15,7 @@ class FakeInput:
         self.fail_create = False      # /dev/uinput cannot be opened
         self.fail_emit = False        # writing an event fails
         self.fail_emit_on = None      # fail only the n-th emit from now (1-based), once
+        self.fail_after_events = None  # the next emit records this many events, then fails (a write cut short)
 
     def factory(self):
         if self.fail_create:
@@ -30,7 +31,12 @@ class FakeInput:
             if self.fail_emit_on == 0:
                 self.fail_emit_on = None
                 raise OSError("write failed")
-        self.events += list(events)
+        events = list(events)
+        if self.fail_after_events is not None:
+            keep, self.fail_after_events = self.fail_after_events, None
+            self.events += events[:keep]
+            raise OSError("write failed partway")
+        self.events += events
 
     def keys(self):
         """[(key code, 1 down / 0 up)] of the key events emitted."""
@@ -50,6 +56,7 @@ class FakeUinputBackend:
     def __init__(self):
         self.calls = []
         self.fail_open = False
+        self.fail_write_on = None     # fail only the n-th write from now (1-based), once
 
     def open(self, path):
         if self.fail_open:
@@ -61,6 +68,11 @@ class FakeUinputBackend:
         self.calls.append(("ioctl", request, arg))
 
     def write(self, fd, data):
+        if self.fail_write_on is not None:
+            self.fail_write_on -= 1
+            if self.fail_write_on == 0:
+                self.fail_write_on = None
+                raise OSError("write failed")
         self.calls.append(("write", bytes(data)))
 
     def close(self, fd):
@@ -72,4 +84,12 @@ class FakeUinputBackend:
     def written(self):
         """[(type, code, value)] decoded from the input_event structs written."""
         size = struct.calcsize("llHHi")
-        return [struct.unpack("llHHi", c[1])[2:] for c in self.calls if c[0] == "write" and len(c[1]) == size]
+        out = []
+        for c in self.calls:
+            if c[0] == "write":
+                out += [struct.unpack("llHHi", c[1][i:i + size])[2:] for i in range(0, len(c[1]), size)]
+        return out
+
+    def writes(self):
+        """The number of write calls made (a batch is one)."""
+        return sum(1 for c in self.calls if c[0] == "write")

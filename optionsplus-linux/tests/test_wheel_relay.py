@@ -379,7 +379,7 @@ def test_a_thumb_action_card_wins_over_thumb_speed(client, bolt, uinput):
     assert bolt.mouse.thumb["mode"] == 1
     assert assign_thumb(client)["result"]["code"] == "SUCCESS"
     assert bolt.mouse.thumb["mode"] == 1
-    assert bolt.turn_thumb(1)
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)
     assert wait_for(lambda: keys_down(uinput) == [KEY_RIGHT])
     settle()
     assert uinput.rels(REL_HWHEEL) == [] and uinput.rels(REL_HWHEEL_HI_RES) == []   # not scaled as well
@@ -394,7 +394,7 @@ def test_a_speed_set_while_the_card_is_bound_is_kept_but_not_applied(client, bol
     assert bolt.mouse.thumb["mode"] == 1 and bolt.mouse.thumb["invert"] == 1
     assert thumb_settings(client)["speed"] == FAST
     bolt.turn_thumb(14)
-    assert wait_for(lambda: len(keys_down(uinput)) >= 14)
+    assert wait_for(lambda: len(keys_down(uinput)) >= 1)               # one notch, one action
     settle()
     assert uinput.rels(REL_HWHEEL_HI_RES) == []
 
@@ -428,7 +428,7 @@ def test_reapply_after_wake_keeps_the_card_as_owner(client, bolt, uinput):
     bolt.mouse.thumb["mode"] = 0
     bolt.emit_event(F_WAKE)
     assert wait_for(lambda: bolt.mouse.thumb["mode"] == 1)
-    bolt.turn_thumb(1)
+    bolt.turn_thumb(DIVERTED_RESOLUTION)
     assert wait_for(lambda: keys_down(uinput) == [KEY_RIGHT])
     settle()
     assert uinput.rels(REL_HWHEEL_HI_RES) == []
