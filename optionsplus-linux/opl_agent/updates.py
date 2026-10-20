@@ -15,7 +15,8 @@ import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 
-from . import __version__, responses
+from . import __version__, fetch, paths, responses
+from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.updates")
 TYPE = responses.TYPE
@@ -25,11 +26,18 @@ OS_RELEASE = "/etc/os-release"
 CHANNELS = ("stable", "testing")
 DEFAULT_SETTINGS = {"checkPeriodically": True, "intervalInSeconds": 86400, "channel": "stable"}
 MAX_FEED_BYTES = 2 * 1024 * 1024
+PACKAGE = "optionsplus-linux"
+INSTALL_ARGV = ["pkexec", "xbps-install", "-Syu", PACKAGE]
+SUDO_COMMAND = "sudo xbps-install -Su " + PACKAGE
+FETCH_COMMAND = "optionsplus-fetch-payload"
+LAUNCHER = "optionsplus-linux"
+EXIT_DECLINED = fetch.EXIT_DECLINED
+POLKIT_NOT_AUTHORIZED = (126, 127)          # pkexec: dialog dismissed / not authorized
 
 
 def default_payload_path():
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.join(base, "optionsplus-linux", "payload.json")
+    """The record the fetcher writes into the payload directory the launcher uses."""
+    return os.path.join(paths.payload_dir(), paths.RECORD)
 
 
 def read_os_release(path=OS_RELEASE):
@@ -134,7 +142,7 @@ def state_dir_for(explicit=None):
 
 class Updater:
     def __init__(self, build_id="dev", payload_path=None, release_base_url=None,
-                 clock=None, state_dir=None):
+                 clock=None, state_dir=None, runner=None, manifest_path=None):
         self.build_id = build_id
         self.base_url = (release_base_url or DEFAULT_RELEASES_URL).rstrip("/")
         self.clock = clock or RealClock()
@@ -148,6 +156,12 @@ class Updater:
         self._recheck = False
         self._wake = asyncio.Event()
         self.payload_path = payload_path or default_payload_path()
+        self.runner = runner or SubprocessRunner()
+        self.manifest_path = manifest_path
+        self.on_restart = lambda: None         # wired to the agent: leave so the launcher can start anew
+        self._installing = False
+        self._fetching = False
+        self._payload_error = ""
 
     # ---- persisted settings ---------------------------------------------
     def _load_settings(self):
@@ -238,7 +252,8 @@ class Updater:
         """Version of the Logitech data the fetcher installed, or None."""
         try:
             with open(self.payload_path) as fh:
-                return json.load(fh).get("version") or None
+                rec = json.load(fh)
+            return rec.get("dataVersion") or rec.get("version") or None
         except (OSError, ValueError, AttributeError):
             return None
 
@@ -287,6 +302,7 @@ class Updater:
                     break
         finally:
             self._checking = False
+        self.broadcast("/updates/payload", self.payload_status())
 
     def request_check(self):
         asyncio.ensure_future(self.check())
@@ -299,3 +315,108 @@ class Updater:
         return {"@type": TYPE + "logi.protocol.updates.DepositoryInfo",
                 "version": version, "buildId": self.build_id,
                 "appId": APP_ID, "branch": "stable"}
+
+    # ---- install ---------------------------------------------------------
+    def download(self):
+        """xbps fetches the package while installing, so "download" only acknowledges."""
+        if self.state != "UPDATE_AVAILABLE":
+            return "INVALID_ARG", "no update is available to download"
+        self._set_state("UPDATE_READY")
+        return "SUCCESS", ""
+
+    def install(self):
+        """Start the privileged xbps update; progress arrives as status broadcasts."""
+        if self._installing or self.state not in ("UPDATE_AVAILABLE", "UPDATE_READY"):
+            return "INVALID_ARG", "no update is ready to install"
+        if not self.runner.which("pkexec"):
+            self._set_state("UPDATER_ERROR", "pkexec (polkit) is not installed. "
+                            "Run this in a terminal: " + SUDO_COMMAND)
+            return "SUCCESS", ""
+        self._installing = True
+        self._set_state("UPDATE_INSTALLING")
+        asyncio.ensure_future(self._install())
+        return "SUCCESS", ""
+
+    async def _install(self):
+        try:
+            code = await asyncio.get_event_loop().run_in_executor(None, self.runner.run_wait, INSTALL_ARGV)
+        except Exception as exc:
+            log.exception("update install failed")
+            code, why = None, "the update could not be started: %s" % exc
+        finally:
+            self._installing = False
+        if code == 0:
+            self._set_state("RESTARTING")
+            return
+        if code in POLKIT_NOT_AUTHORIZED:
+            why = "the update was not authorized (password prompt dismissed or refused)"
+        elif code is not None:
+            why = "xbps-install failed (exit status %d)" % code
+        self._set_state("UPDATER_ERROR", "%s. To update by hand run: %s" % (why, SUDO_COMMAND))
+
+    def restart_now(self):
+        """Relaunch UI and agent through the launcher once this agent has exited."""
+        launcher = self.runner.which(LAUNCHER)
+        if not launcher:
+            return "FAILED", "the %s launcher is not on PATH" % LAUNCHER
+        self.runner.run(["env", "OPL_RESTART_WAIT_PID=%d" % os.getpid(), launcher])
+        self.on_restart()
+        return "SUCCESS", ""
+
+    # ---- Logitech data refresh ------------------------------------------
+    def _pinned(self):
+        try:
+            return fetch.load_manifest(self.manifest_path or fetch.default_manifest_path())
+        except fetch.FetchError as exc:
+            log.warning("%s", exc)
+            return None
+
+    def payload_status(self):
+        """Whether the installed package pins newer Logitech data than the user has."""
+        manifest = self._pinned()
+        have = paths.installed_versions(os.path.dirname(self.payload_path))
+        pinned = (manifest or {}).get("dataVersion", "")
+        installed = (have or {}).get("dataVersion", "")
+        offer = bool(manifest and have and _data_newer(manifest, have))
+        st = {"@type": TYPE + "logi.protocol.updates.PayloadStatus", "available": offer,
+              "installedVersion": installed, "pinnedVersion": pinned,
+              "downloading": self._fetching}
+        if self._payload_error:
+            st["errorMessage"] = self._payload_error
+        return st
+
+    def download_payload(self):
+        if self._fetching or not self.payload_status()["available"]:
+            return "INVALID_ARG", "no newer Logitech data is pinned"
+        self._fetching = True
+        self._payload_error = ""
+        self.broadcast("/updates/payload", self.payload_status())
+        asyncio.ensure_future(self._fetch_payload())
+        return "SUCCESS", ""
+
+    async def _fetch_payload(self):
+        try:
+            code = await asyncio.get_event_loop().run_in_executor(None, self.runner.run_wait, [FETCH_COMMAND])
+        except Exception as exc:
+            log.exception("payload fetch failed")
+            code = -1
+        finally:
+            self._fetching = False
+        if code not in (0, EXIT_DECLINED):
+            self._payload_error = "downloading the Logitech data failed (exit status %d)" % code
+        self.broadcast("/updates/payload", self.payload_status())
+
+
+def _version_key(text):
+    nums = re.findall(r"\d+", text or "")
+    return tuple(int(n) for n in nums)
+
+
+def _data_newer(manifest, have):
+    """Newer pinned data: a higher data version, or the same version with different depots."""
+    pin, cur = _version_key(manifest.get("dataVersion")), _version_key(have.get("dataVersion"))
+    if pin != cur:
+        return pin > cur
+    recorded = have.get("depots") or {}
+    return any((recorded.get(d["name"]) or {}).get("sha256") != d["sha256"]
+               for d in manifest["depots"])

@@ -45,7 +45,7 @@ Conventions used below:
 | 15 | ADD APPLICATION, per-app profiles | lists installed apps, switches profile with the active window | "Scanning for applications" forever | `/applications/scan/installed` accepted but nothing is ever broadcast; no active-window tracking | 4 |
 | 16 | Smart Actions templates | gallery from marketplace | empty | marketplace is Logitech cloud | out of scope (stub) |
 | 17 | App Settings → "Logi Options+ version" | shows version | agent serves `/updates/info` and `/system/info` (tested); live UI run pending | field names of `system_info` unverified against the UI | 5 |
-| 18 | Check for update / auto update | Logitech pipeline | agent checks GitHub releases (stable redirect, testing Atom feed), periodic setting, channel (tested); live UI run pending | install/download routes not done | 5 |
+| 18 | Check for update / auto update | Logitech pipeline | agent checks GitHub releases (stable redirect, testing Atom feed), periodic setting, channel (tested); live UI run pending | `/updates/download`, `install` (pkexec xbps-install, polkit action), `restart_now` and payload refresh (`/updates/payload`) tested with a fake runner; real pkexec run pending | 5 |
 | 19 | Support, release notes, feedback links | Logitech URLs | Logitech URLs | hard-coded in `app.min.js`; opened through `electronSend.openExternal` | 5 |
 | 20 | LOGI SERVICES, account login, cloud backup | works | empty / login dialog only | Logitech cloud | out of scope (stub) |
 | 21 | Packaging, udev, launcher, autostart, updates via xbps | MSI installer, updater service | none | not written | 0 |

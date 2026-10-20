@@ -38,6 +38,7 @@ def clean_tree(root):
         "usr/lib/optionsplus-linux/bootstrap/main.js",
         "usr/lib/optionsplus-linux/bootstrap/package.json",
         "usr/lib/udev/rules.d/70-optionsplus-linux.rules",
+        "usr/share/polkit-1/actions/io.github.soubarnak.optionsplus-linux.policy",
         "etc/xdg/autostart/optionsplus-linux-agent.desktop",
         "usr/share/applications/optionsplus-linux.desktop",
         "usr/share/icons/hicolor/scalable/apps/optionsplus-linux.svg",
@@ -150,6 +151,18 @@ def test_udev_rule_grants_input_group_and_uaccess():
     assert 'SUBSYSTEM=="hidraw"' in rule and "046d" in rule
 
 
+def test_polkit_action_authorizes_exactly_the_xbps_update():
+    import xml.etree.ElementTree as ET
+    root = ET.parse(ROOT / "data" / "io.github.soubarnak.optionsplus-linux.policy").getroot()
+    [action] = root.findall("action")
+    assert action.get("id") == "io.github.soubarnak.optionsplus-linux.update"
+    annotations = {a.get("key"): a.text for a in action.findall("annotate")}
+    assert annotations["org.freedesktop.policykit.exec.path"] == "/usr/bin/xbps-install"
+    defaults = {d.tag: d.text for d in action.find("defaults")}
+    assert defaults["allow_active"] == "auth_admin_keep"
+    assert "yes" not in defaults.values()          # never unauthenticated
+
+
 def test_menu_entry_launches_ui():
     d = (ROOT / "data" / "optionsplus-linux.desktop").read_text()
     assert "Exec=optionsplus-linux" in d and "Icon=optionsplus-linux" in d
@@ -216,6 +229,7 @@ def test_built_package_carries_hooks_and_all_parts(built):
     names = set(archive_names(pkg))
     for need in ("INSTALL", "REMOVE","usr/bin/optionsplus-linux", "usr/bin/optionsplus-agent",
                  "usr/lib/udev/rules.d/70-optionsplus-linux.rules",
+                 "usr/share/polkit-1/actions/io.github.soubarnak.optionsplus-linux.policy",
                  "etc/xdg/autostart/optionsplus-linux-agent.desktop",
                  "usr/share/applications/optionsplus-linux.desktop",
                  "usr/share/icons/hicolor/scalable/apps/optionsplus-linux.svg",
