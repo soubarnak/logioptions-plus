@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { rewrite, reportIssueUrl, NOT_AVAILABLE_MESSAGE } = require('./links');
+const { rewrite, isBlockedLoad, reportIssueUrl, NOT_AVAILABLE_MESSAGE } = require('./links');
 
 const GH = 'https://github.com/soubarnak/logioptions-plus';
 const open = (url) => ({ action: 'open', url });
@@ -73,4 +73,34 @@ test('report issue URL uses the bug template with prefilled fields', () => {
   assert.equal(u.searchParams.get('version'), '0.1.0');
   assert.equal(u.searchParams.get('os'), 'Void Linux');
   assert.match(u.searchParams.get('logs'), /optionsplus-linux\/logs\.tar\.gz/);
+});
+
+test('the UI\'s own windows may not load cloud hosts', () => {
+  for (const u of [
+    'https://marketplace.logi.com/plugins/en/4?sort=mostRecent&platform=9&client=optionsplus',
+    'https://marketplace.logi.com/',
+    'https://logiid.logi.com/login',
+    'https://id.logitech.com/auth',
+    'https://recommendations.logi.com/v1/x',
+    'https://optionsplus-recommendation.logitech.com/x',
+  ]) assert.equal(isBlockedLoad(u), true, u);
+});
+
+test('the UI\'s own windows may still load local files, release notes and other sites', () => {
+  for (const u of [
+    'https://marketplace.logi.com/releasenotes/optionsplus/',
+    'file:///usr/lib/optionsplus-linux/app.asar/index.html',
+    'http://localhost:8080/',
+    'https://github.com/soubarnak/logioptions-plus',
+    'devtools://devtools/bundled/inspector.html',
+    'not a url',
+  ]) assert.equal(isBlockedLoad(u), false, u);
+});
+
+test('isBlockedLoad agrees with rewrite on every http(s) URL', () => {
+  for (const u of [
+    'https://marketplace.logi.com/plugins/en/4', 'https://marketplace.logi.com/releasenotes/x',
+    'https://logiid.logi.com/', 'https://id.logitech.com/', 'https://recommendations.logi.com/',
+    'https://github.com/x', 'https://support.logi.com/hc/',
+  ]) assert.equal(isBlockedLoad(u), rewrite(u).action === 'block', u);
 });

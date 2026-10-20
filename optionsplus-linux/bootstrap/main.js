@@ -18,7 +18,7 @@ app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 // link policy (links.js) before the frontend loads, so app.asar stays unmodified.
 // OPL_LINK_LOG=<file> appends "<requested>\t<opened|blocked>\t<url>" (live verification).
 const { shell, dialog } = require('electron');
-const { rewrite } = require('./links');
+const { rewrite, isBlockedLoad, NOT_AVAILABLE_MESSAGE } = require('./links');
 const realOpenExternal = shell.openExternal.bind(shell);
 shell.openExternal = async (url, ...rest) => {
   const d = rewrite(String(url));
@@ -34,5 +34,69 @@ shell.openExternal = async (url, ...rest) => {
   }
   return realOpenExternal(d.url, ...rest);
 };
+
+// The UI also opens cloud pages in its own windows (the marketplace button sends IPC
+// OPEN_MARKETPLACE and the main process loads the URL in a new BrowserWindow), which
+// never touches shell.openExternal. Stop those loads at the network layer instead.
+// webRequest is per session and a webview may use its own partition, so hook every
+// session as it is created. Each session accepts a single onBeforeRequest listener, so
+// wrap the setter: a listener the frontend installs later runs after ours instead of
+// replacing it.
+const { BrowserWindow } = require('electron');
+let mainWindow = null;
+let lastNotice = 0;
+const notifyBlocked = () => {
+  const now = Date.now();
+  if (now - lastNotice < 3000) return; // one page makes several requests
+  lastNotice = now;
+  dialog.showMessageBox({ type: 'info', message: NOT_AVAILABLE_MESSAGE, buttons: ['OK'] }).catch(() => {});
+};
+const logLoad = (url, verdict) => {
+  if (!process.env.OPL_LINK_LOG) return;
+  try { require('fs').appendFileSync(process.env.OPL_LINK_LOG, `${url}\t${verdict}\t\n`); } catch (_) { /* best effort */ }
+};
+function blockLoad(url, contents) {
+  logLoad(url, 'blocked-load');
+  notifyBlocked();
+  try {
+    const win = contents && BrowserWindow.fromWebContents(contents.hostWebContents || contents);
+    if (win && win !== mainWindow && !win.isDestroyed()) setImmediate(() => { if (!win.isDestroyed()) win.close(); });
+  } catch (_) { /* the window is already gone */ }
+}
+
+const guarded = new WeakSet();
+function guardSession(ses) {
+  if (!ses || guarded.has(ses)) return;
+  guarded.add(ses);
+  const wr = ses.webRequest;
+  const setNext = wr.onBeforeRequest.bind(wr);
+  let theirs = null;
+  const ours = (details, callback) => {
+    if ((details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') && isBlockedLoad(details.url)) {
+      blockLoad(details.url, details.webContents);
+      return callback({ cancel: true });
+    }
+    return theirs ? theirs(details, callback) : callback({});
+  };
+  setNext(ours);
+  wr.onBeforeRequest = (...args) => {
+    // (filter?, listener) or (null) to clear
+    const listener = args.find((a) => typeof a === 'function');
+    theirs = listener || null;
+  };
+}
+
+app.on('session-created', guardSession);
+app.on('browser-window-created', (_e, win) => { if (!mainWindow) mainWindow = win; });
+app.on('web-contents-created', (_e, contents) => {
+  guardSession(contents.session); // covers sessions created before this handler ran
+  // Belt and braces for navigations the network hook would see too late to close the window.
+  const guard = (event, url) => {
+    if (isBlockedLoad(url)) { event.preventDefault(); blockLoad(url, contents); }
+  };
+  contents.on('will-navigate', guard);
+  contents.on('will-redirect', guard);
+});
+app.whenReady().then(() => guardSession(require('electron').session.defaultSession));
 
 require(path.join(asar, 'main.js'));
