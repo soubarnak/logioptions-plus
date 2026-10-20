@@ -93,7 +93,7 @@ side:
 | BLE direct devices (`BluetoothGATT`) | `bluez` pairs the device; the kernel exposes it as `hidraw` with HID id `0005:046D:*`; only long reports (`0x11`) exist | rule written; agent must not require short reports (phase 3) |
 | Battery to the OS | kernel `hid-logitech-hidpp` already exports a power supply to upower; the agent reads `0x1004` itself | done |
 | `SendInput` | `/dev/uinput` virtual keyboard/mouse (ioctl over `ctypes`, no extra package) | phase 2 |
-| Foreground window | X11 `_NET_ACTIVE_WINDOW`; Wayland per compositor (wlr-foreign-toplevel, KWin scripting, GNOME shell extension) | phase 4 |
+| Foreground window | X11 `_NET_ACTIVE_WINDOW` (done); wlroots foreign-toplevel via a pure-Python wire client (`wayland_focus.py`, done); KWin scripting and GNOME shell extension not done | phase 4 |
 | Updater service, crashpad, appbroker, LPS plugin service | not ported; xbps is the updater | phase 0/5 |
 
 Kernel notes to verify in phase 1 and 3:
