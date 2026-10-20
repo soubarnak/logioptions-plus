@@ -57,6 +57,9 @@ F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
+REG_RECEIVER_PAIRING = 0xB2     # Unifying receiver pairing lock (HID++ 1.0 register)
+N_PAIRING_LOCK = 0x4A           # HID++ 1.0 notification: lock status (address bit0 open, data[0] error)
+RECEIVER_NOTIFICATIONS = {N_PAIRING_LOCK}
 F_RECEIVER_PAIRING = 0x1817     # Bolt receiver pairing (open lock, passkey, status events)
 F_CHANGE_HOST = 0x1814
 F_HOSTS_INFO = 0x1815
@@ -391,6 +394,10 @@ class Reader:
             slot["done"].set()
         elif version is None and r[3] & 0x0F == 0:
             self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
+        elif version is None and idx == DEV_RECEIVER and r[2] in RECEIVER_NOTIFICATIONS:
+            # HID++ 1.0 receiver notification: sub id in the feature slot, address byte
+            # (not a function nibble) in the function slot
+            self._events.put((idx, r[2], r[3], bytes(r[4:])))
 
     # ---- requests --------------------------------------------------------
     def request(self, msg, timeout):
@@ -844,6 +851,19 @@ def _pairing_wpid(fd, n, bolt):
     # Unifying: big-endian at [3:5]. Bolt: [0] echo, [1] kind, [2:4] wpid
     # little-endian, [4:8] unit id (MX Master 3S: 51 42 34b0 43ccd316 -> b034)
     return (d[3] << 8 | d[2]) if bolt else struct.unpack(">H", d[3:5])[0]
+
+
+def write_register(fd, idx, address, params=b"", timeout=DEFAULT_TIMEOUT):
+    """HID++ 1.0 SET_REGISTER (sub id 0x80); raises HidppError if the receiver rejects it."""
+    return bytes(_transact(fd, idx, 0x80, address, params, False, timeout)[4:])
+
+
+def unifying_lock(fd, open_, timeout=60):
+    """Unifying receiver register 0xB2: [1 open | 2 close, device (0 = any), timeout seconds].
+    Raises HidppError/HidppTimeout when the receiver does not accept the write."""
+    if not 0 < timeout <= 255:
+        raise ValueError("pairing timeout must be 1..255 seconds")
+    write_register(fd, DEV_RECEIVER, REG_RECEIVER_PAIRING, bytes([1 if open_ else 2, 0, timeout]))
 
 
 def pairing_open(fd, feature_index, timeout=60):

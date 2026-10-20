@@ -304,6 +304,19 @@ class SimulatedBolt:
                 return b""
         return 7
 
+    def _receiver_register(self, data):
+        """HID++ 1.0 register access to the receiver; True when handled (lock held)."""
+        if data[2] == 0x83 and data[3] == 0xB5:
+            params = data[4:]
+            # pairing info for slot params[0] - 0x50: wpid little endian at [2:4]
+            if params[0] - 0x50 in self.mice:
+                mouse = self.mice[params[0] - 0x50]
+                self._reply(data, bytes([params[0], 0x10]) + struct.pack("<H", mouse.wpid) + b"\x01\x02\x03\x04")
+            else:
+                self._error(data, False, 2)
+            return True
+        return False
+
     # -- device side ------------------------------------------------------
     def _reply(self, request, params):
         short = request[0] == hidpp.SHORT and len(params) <= 3
@@ -319,13 +332,7 @@ class SimulatedBolt:
         with self._lock:
             self.writes.append(data)
             idx, b2, b3, params = data[1], data[2], data[3], data[4:]
-            if idx == 0xFF and b2 == 0x83 and b3 == 0xB5:
-                # pairing info for slot params[0] - 0x50: wpid little endian at [2:4]
-                if params[0] - 0x50 in self.mice:
-                    mouse = self.mice[params[0] - 0x50]
-                    self._reply(data, bytes([params[0], 0x10]) + struct.pack("<H", mouse.wpid) + b"\x01\x02\x03\x04")
-                else:
-                    self._error(data, False, 2)
+            if idx == 0xFF and self._receiver_register(data):
                 return
             if idx == 0xFF:
                 result = self._receiver_handle(data)
@@ -388,3 +395,75 @@ class SimulatedBluetoothMouse(SimulatedBolt):
                 self._error(data, True, result)
             else:
                 self._reply(data, result)
+
+
+UNIFYING_RECEIVER_PID = 0xC52B
+# HID++ 1.0 error codes
+ERR_INVALID_SUBID, ERR_INVALID_ADDRESS, ERR_BUSY = 1, 2, 7
+
+
+class SimulatedUnifying(SimulatedBolt):
+    """A Unifying receiver with one paired mouse. It speaks HID++ 1.0 only: no feature
+    table on the receiver, pairing is register 0xB2 and progress arrives as 0x4A
+    lock-status notifications (address bit 0 = lock open, data[0] = error code)."""
+
+    PATH = "/dev/hidraw-sim-unifying0"
+
+    def __init__(self):
+        super().__init__()
+        self.path = self.PATH
+        self.ignore_pairing_writes = False        # never answer a write to 0xB2 (receiver hung)
+
+    def list_nodes(self):
+        if not self.present:
+            return []
+        return [hidpp.HidppNode(path=self.path, vid=hidpp.LOGITECH_VID, pid=UNIFYING_RECEIVER_PID,
+                                name="Simulated Unifying Receiver", is_receiver=True, is_bolt=False)]
+
+    def emit_lock_status(self, open_, error=0):
+        """Queue a 0x4A lock-status notification from the receiver."""
+        self.emit(bytes([hidpp.SHORT, 0xFF, 0x4A, 0x01 if open_ else 0x00, error, 0, 0]))
+
+    def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
+        """A device pairs in the open lock: it takes the next index and the lock closes."""
+        index = max(self.mice) + 1
+        self.mice[index] = SimulatedMouse(name, wpid)
+        self.pairing_open = False
+        self.emit_lock_status(open_=False)
+        return index
+
+    def _receiver_register(self, data):
+        sub, address, params = data[2], data[3], data[4:]
+        if sub == 0x83 and address == 0xB5:
+            # pairing info for slot params[0] - 0x20 + 1: wpid big endian at [3:5]
+            slot = params[0] - 0x20 + 1
+            if slot in self.mice:
+                self._reply(data, bytes([params[0], 0x10, 0x00]) + struct.pack(">H", self.mice[slot].wpid) + b"\x01\x02")
+            else:
+                self._error(data, False, ERR_INVALID_ADDRESS)
+            return True
+        if sub == 0x80 and address == 0xB2:
+            if self.ignore_pairing_writes:
+                return True
+            action = params[0]
+            if action == 0x01:                    # open the lock: [1, device (0 = any), timeout]
+                if self.fail_pairing_open:
+                    self._error(data, False, ERR_BUSY)
+                    return True
+                self.pairing_open = True
+                self._reply(data, bytes(params[:3]))
+                self.emit_lock_status(open_=True)
+            elif action == 0x02:                  # close the lock
+                if self.fail_pairing_cancel:
+                    self._error(data, False, ERR_BUSY)
+                    return True
+                self.pairing_open = False
+                self._reply(data, bytes(params[:3]))
+                self.emit_lock_status(open_=False)
+            else:
+                self._error(data, False, ERR_INVALID_ADDRESS)
+            return True
+        return False
+
+    def _receiver_handle(self, data):
+        return ERR_INVALID_SUBID                  # no HID++ 2.0 root on the receiver

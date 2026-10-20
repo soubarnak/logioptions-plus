@@ -375,7 +375,19 @@ Setting survives a receiver re-plug.
   Unverified on hardware: the 0x1817 function layout (fn0 open lock + timeout, fn1 close;
   events fn0 `[status, error, slot]`, fn1 passkey digits), the PairingState enum value names
   (`STARTED`, `PASSKEY_DISPLAYED`, `PAIRED`, `FAILED`, `CANCELLED`) and the pairing error
-  names. Not done: Unifying register `0xB2`, `.../pair/passkey/entry`, `/receivers/<id>/unpair`.
+  names. Not done: `.../pair/passkey/entry`, `/receivers/<id>/unpair`.
+  Review of #18 found the Bolt side wrong for real hardware (it uses HID++ 1.0 registers
+  `0xC0`/`0x2C1`, not feature `0x1817`) and its state names not in the schema; it needs a rework.
+- Done (ticket #19): Unifying receivers pair through register `0xB2` (write `[1 open | 2 close,
+  device 0, timeout]`, Solaar layout) on the same `/devices/<rcv>/pair` routes and
+  broadcasts. Progress comes from the HID++ 1.0 `0x4A` lock-status notification (the Reader
+  now delivers it): lock closed with a new device is `STOP`+`NO_PAIRING_ERROR` with a
+  `Device.Info.Basic` `pairedDevice`; closed without one or with error 1/3 is `STOP`+`TIMEOUT`;
+  error 2 is `STOP`+`FAILED`; cancel is `CANCEL`. A rejected or unanswered write is FAULTED.
+  Unverified on hardware: the register layout, the `0x4A` error codes, and the
+  `START`/`CANCEL`/`STOP` and error value names (taken from `devices.proto` via the #18
+  review). The Unifying UI may expect `/devices/<rcv>/locking/*` routes (in
+  `re/agent_routes.txt`); not implemented.
 
 ### 6.5 Hot-plug and reconnect (finding 14)
 
