@@ -13,6 +13,8 @@ proto3 defaults; ``defaults.fill`` adds the rest on the way out.
 
 import re
 
+from . import paths
+
 TYPE = "type.googleapis.com/"
 
 
@@ -74,7 +76,7 @@ _SET = {
 # whole saga tree, see FINDINGS.md). They configure Logitech services we do not run, so
 # the UI's own payload is echoed back.
 _SET_ECHO = {
-    "/scarif/event", "/scarif/settings", "/system/settings", "/updates/depot/info",
+    "/scarif/event", "/scarif/settings", "/system/settings",
     "/lps/start_library_package_update_check", "/lps/enable_notification",
     "/lps/enable_trace_events", "/lps/enabled_in_background",
     "/lps/set_actions_ring_scale_factor", "/lps/set_image_size",
@@ -82,6 +84,21 @@ _SET_ECHO = {
     "/integration_manager/settings/led_sdk_enabled", "/set_feature_flag",
 }
 _LOGIVOICE_SET = re.compile(r"^/logivoice/set_[a-z_]+$")
+
+
+def _depot_install_status(payload):
+    """Depot.InstallStatus for SET /updates/depot/info. The UI names the depot by name or by the
+    uuid in its URL; nothing is downloaded here (the fetcher installs depots). The UI sends a
+    Depot.Info (state REQUESTED); the reply uses Depot.InstallStatus.InstallState: COMPLETED when the depot
+    is installed, INVALID (the proto default) when not. Which of these the UI expects is unconfirmed."""
+    name = str((payload or {}).get("name", "")) if isinstance(payload, dict) else ""
+    rec = paths.installed_versions(paths.payload_dir())
+    have = rec.get("depots") if isinstance(rec, dict) else None
+    installed = bool(name) and isinstance(have, dict) and any(
+        name == dname or (isinstance(d, dict) and name in str(d.get("url", "")).split("/"))
+        for dname, d in have.items())
+    return _msg("logi.protocol.updates.Depot.InstallStatus", depotName=name,
+                state="COMPLETED" if installed else "INVALID")
 
 
 def lookup(verb, path, payload=None):
@@ -95,6 +112,8 @@ def lookup(verb, path, payload=None):
             return "SUCCESS", _bool(False)
         return None
     if verb == "SET":
+        if path == "/updates/depot/info":
+            return "SUCCESS", _depot_install_status(payload)
         if path in _SET:
             return "SUCCESS", _SET[path]
         if path in _SET_ECHO or _LOGIVOICE_SET.match(path):

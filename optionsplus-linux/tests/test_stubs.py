@@ -111,9 +111,54 @@ def test_unhandled_set_is_refused_and_logged_as_warning(client, caplog):
 
 
 @pytest.mark.parametrize("path", [
-    "/scarif/event", "/system/settings", "/updates/depot/info",
+    "/scarif/event", "/system/settings",
     "/lps/start_library_package_update_check", "/logivoice/set_microphone",
 ])
 def test_boot_saga_sets_stay_accepted_and_echo_the_payload(client, path):
     r = client.call("SET", path, {"a": 1})
     assert r["result"]["code"] == "SUCCESS" and r["payload"]["a"] == 1
+
+
+def _install_record(tmp_path, monkeypatch, depots):
+    import json
+    (tmp_path / "payload.json").write_text(json.dumps({"schema": 1, "dataVersion": "1", "depots": depots}))
+    (tmp_path / "app.asar").write_bytes(b"x")
+    monkeypatch.setenv("OPL_PAYLOAD_DIR", str(tmp_path))
+
+
+def test_depot_info_answers_install_status_for_an_installed_depot(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {"mx_master_3s": {
+        "url": "https://u.invalid/depots/9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81/mx_master_3s.depot"}})
+    for name in ("mx_master_3s", "9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81"):
+        r = client.call("SET", "/updates/depot/info", {"name": name, "state": "REQUESTED"})
+        assert r["result"]["code"] == "SUCCESS"
+        assert r["payload"]["@type"] == TYPE + "logi.protocol.updates.Depot.InstallStatus"
+        assert r["payload"]["depotName"] == name and r["payload"]["state"] == "COMPLETED"
+
+
+# updates.proto, Depot.InstallStatus.InstallState
+INSTALL_STATES = {"INVALID", "INSTALLING", "COMPLETED"}
+
+
+def test_depot_info_states_are_names_of_the_proto_enum(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {"mx_master_3s": {"url": "/depots/u-1/mx_master_3s.depot"}})
+    for name in ("mx_master_3s", "u-1", "other"):
+        r = client.call("SET", "/updates/depot/info", {"name": name, "state": "REQUESTED"})
+        assert r["payload"]["state"] in INSTALL_STATES
+
+
+def test_depot_info_ignores_a_partial_uuid_and_malformed_records(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {"a": "junk", "mx_master_3s": {
+        "url": "https://u.invalid/depots/9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81/mx_master_3s.depot"}})
+    r = client.call("SET", "/updates/depot/info", {"name": "9c81feae", "state": "REQUESTED"})
+    assert r["payload"]["state"] == "INVALID"
+    (tmp_path / "payload.json").write_text("[1]")
+    r = client.call("SET", "/updates/depot/info", {"name": "x"})
+    assert r["payload"]["state"] == "INVALID"
+
+
+def test_depot_info_answers_not_installed_for_a_missing_depot(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {})
+    r = client.call("SET", "/updates/depot/info", {"name": "mx_master_3s", "state": "REQUESTED"})
+    assert r["result"]["code"] == "SUCCESS"
+    assert r["payload"]["depotName"] == "mx_master_3s" and r["payload"]["state"] == "INVALID"

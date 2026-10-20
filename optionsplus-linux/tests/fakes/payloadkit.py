@@ -90,16 +90,17 @@ def make_world(corrupt=False):
     return srv, manifest, {"logioptionsplus": main, "test_mouse": dev}
 
 
-def offline_installer(path, depots, version="9.9.2"):
+def offline_installer(path, depots, version="9.9.2", trailer=b"", depot_macs=None, comment=b""):
     """A fake offline installer: junk PE-like prefix, then a ZIP holding offline.json and depots."""
     entries = []
     with zipfile.ZipFile(path, "w") as z:
+        z.comment = comment
         for name, data in depots.items():
             fname = "%s.depot" % name
             z.writestr(fname, data)
             entries.append({"name": name, "url": "https://example.invalid/depots/uuid-%s/%s" % (name, fname),
-                            "mac": sha(data), "size": len(data)})
+                            "mac": (depot_macs or {}).get(name, sha(data)), "size": len(data)})
         z.writestr("offline.json", json.dumps({"version": version, "depots": entries}))
     raw = open(path, "rb").read()
     with open(path, "wb") as f:      # prefix shifts offsets like a PE overlay
-        f.write(b"MZ" + b"\0" * 1000 + raw)
+        f.write(b"MZ" + b"\0" * 1000 + raw + trailer)   # trailer: Authenticode signature after the EOCD

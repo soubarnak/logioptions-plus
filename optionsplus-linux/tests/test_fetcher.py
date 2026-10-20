@@ -79,3 +79,13 @@ def test_confirmed_run_unpacks_both_depot_formats(world):
     assert (p / "depots" / "logioptionsplus" / "data" / "strings" / "en-US.yaml").read_bytes() == b"HELLO: Hello\n"
     assert (p / "depots" / "test_mouse" / "thumb.png").read_bytes() == b"fake-png"
     assert (p / "depots" / "test_mouse" / "sub" / "layout.json").read_bytes() == b"{}"
+
+
+def test_prompt_for_an_installer_says_it_is_read_from_the_file_not_downloaded(world, tmp_path):
+    exe = tmp_path / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots)
+    r = fetch(world, "--from-installer", str(exe), stdin="n\n")
+    text = r.stdout + r.stderr
+    assert "It will be read from %s" % exe in text
+    assert "downloaded from Logitech" not in text
+    assert "https://example.invalid/eula" in text

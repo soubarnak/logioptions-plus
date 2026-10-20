@@ -26,6 +26,16 @@ def test_shipped_manifest_is_well_formed_and_pins_https_urls():
     assert "logitech" in m["eulaUrl"]
 
 
+def test_shipped_manifest_pins_the_three_depots_and_logitechs_eula_url():
+    m = fetch.load_manifest(str(MANIFEST))
+    assert m["eulaUrl"] == "https://www.logitech.com/legal/eula.html"
+    assert {d["name"]: (d["size"], d["sha256"]) for d in m["depots"]} == {
+        "logioptionsplus": (552459832, "baf9ecf05f322b42b0c85a2304e33038f929ee49579ed77be193f2983a715869"),
+        "system_actions": (159698, "85bd8bdba43b61bc7e8341863e5d072518224c9f0defe1710cf6b7c3330445c3"),
+        "mx_master_3s": (1606141, "50803b06f23984ef26204c4c8018a274145ab52b94c8bafa9b8ab1a6d88ef521"),
+    }
+
+
 def run_verify(manifest, tmp_path):
     p = tmp_path / "m.json"
     p.write_text(json.dumps(manifest))

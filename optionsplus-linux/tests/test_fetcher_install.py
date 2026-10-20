@@ -1,5 +1,12 @@
 """Seam: fetcher CLI, verification, atomic install, recorded versions, offline installer."""
+import io
 import json
+import struct
+import zipfile
+
+import pytest
+
+from opl_agent import fetch as fetchmod
 
 from tests.fakes import payloadkit as kit
 from tests.test_fetcher import fetch, tree, world  # noqa: F401  (world is a fixture)
@@ -128,3 +135,110 @@ def test_installer_missing_a_depot_fails_cleanly(world):
     assert r.returncode != 0
     assert "test_mouse" in r.stderr
     assert not world.payload.exists()
+
+
+def test_installer_with_a_signature_trailer_after_the_zip_installs(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, trailer=b"\x30\x82" * 51200)     # 100 KiB
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+    assert (world.payload / "app.asar").read_bytes() == b"fake-asar"
+    assert (world.payload / "depots" / "test_mouse" / "thumb.png").exists()
+
+
+def test_installer_without_a_zip_directory_is_rejected_with_the_usual_message(world):
+    exe = world.tmp / "junk.exe"
+    exe.write_bytes(b"MZ" + b"\0" * 5000)
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "not an Options+ offline installer" in r.stderr
+    assert not world.payload.exists()
+
+
+def test_installer_depot_is_checked_against_the_pinned_sha256_too(world):
+    exe = world.tmp / "installer_offline.exe"
+    other = b"another depot" + world.depots["test_mouse"]
+    # the installer's own mac matches the bytes it carries, the manifest pin does not
+    kit.offline_installer(exe, dict(world.depots, test_mouse=other))
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "checksum mismatch for test_mouse; nothing was installed" in r.stderr
+    assert not world.payload.exists()
+
+
+def fake_eocd(**kw):
+    f = dict(disk=0, cd_disk=0, n_disk=1, n_total=1, cd_size=46, cd_off=0, clen=0)
+    f.update(kw)
+    return struct.pack("<4s4H2LH", b"PK\x05\x06", f["disk"], f["cd_disk"], f["n_disk"], f["n_total"],
+                       f["cd_size"], f["cd_off"], f["clen"])
+
+
+def test_installer_trailer_holding_a_fake_end_record_is_skipped(world):
+    exe = world.tmp / "installer_offline.exe"
+    # looks valid by offsets alone, but no central directory entry sits where it points
+    kit.offline_installer(exe, world.depots, trailer=b"junk" + fake_eocd(cd_size=40, cd_off=0) + b"more")
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+
+
+def test_installer_trailer_holding_a_multi_disk_end_record_is_skipped(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, trailer=fake_eocd(n_disk=0, cd_size=0, cd_off=0))
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+
+
+# the 22-byte record (T = chunk - 10) or just its signature (T = chunk - 20) crosses a 1 MiB read boundary
+@pytest.mark.parametrize("trailer_len", [(1 << 20) - 10, (1 << 20) - 20, (1 << 20) - 2, (1 << 20) + 5])
+def test_installer_end_record_across_a_scan_chunk_boundary_is_found(world, trailer_len):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, trailer=b"\0" * trailer_len)
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+
+
+def test_installer_archive_with_a_comment_is_found(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, comment=b"signed by nobody", trailer=b"\x30\x82" * 1000)
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+
+
+def test_installer_wrong_mac_fails_even_when_the_pin_is_right(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, depot_macs={"test_mouse": "0" * 64})
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "checksum mismatch for test_mouse; nothing was installed" in r.stderr
+    assert not world.payload.exists()
+
+
+def zip_bytes():
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("offline.json", "{}")
+    return b.getvalue()
+
+
+def test_find_zip_end_gives_up_beyond_the_scan_limit(monkeypatch):
+    data = zip_bytes() + b"\0" * 5000
+    assert fetchmod.find_zip_end(io.BytesIO(data), len(data)) == len(zip_bytes())
+    monkeypatch.setattr(fetchmod, "SCAN_LIMIT", 1000)
+    assert fetchmod.find_zip_end(io.BytesIO(data), len(data)) is None
+
+
+def test_zip64_installer_gets_a_clear_error(world):
+    exe = world.tmp / "big.exe"
+    exe.write_bytes(b"MZ" + zip_bytes()[:-22] + fake_eocd(n_total=0xFFFF, n_disk=0xFFFF, cd_size=0xFFFFFFFF,
+                                                         cd_off=0xFFFFFFFF))
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "ZIP64" in r.stderr
+    assert not world.payload.exists()
+
+
+def test_declining_with_an_installer_says_nothing_was_installed(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots)
+    r = fetch(world, "--from-installer", str(exe), stdin="n\n")
+    assert "Nothing was installed" in r.stderr and "downloaded" not in r.stderr.split("Declined")[1]
