@@ -138,7 +138,8 @@ def test_an_advertising_device_is_announced_and_paired(bolt, pairing):
     assert adv["deviceType"] == "MOUSE"
     assert wait_for(lambda: bolt.pairing_open)
     assert bolt.paired_address == ADDRESS
-    assert bolt.writes[-1][2:4] == bytes([0x82, 0xC1]) and bolt.writes[-1][0] == 0x11   # a long write
+    # a long write; a later periodic rescan may add reads or writes after it
+    assert any(w[0] == 0x11 and w[2:4] == bytes([0x82, 0xC1]) for w in bolt.writes)
 
 
 def test_a_device_address_in_the_request_is_paired_without_discovery(bolt, pairing):
