@@ -7,7 +7,7 @@ import pytest
 from opl_agent import hidpp
 from tests.fakes.depot import build_depot
 from tests.fakes.clock import FakeClock
-from tests.fakes.hidpp_device import SimulatedBolt
+from tests.fakes.hidpp_device import SimulatedBluetoothMouse, SimulatedBolt
 from tests.fakes.releases import FakeReleaseServer
 from tests.harness import RunningAgent, short_tmpdir
 
@@ -47,6 +47,11 @@ def workdir():
 @pytest.fixture
 def bolt():
     return SimulatedBolt()
+
+
+@pytest.fixture
+def ble():
+    return SimulatedBluetoothMouse()
 
 
 @pytest.fixture

@@ -181,7 +181,8 @@ class Registry:
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
-            fd = hidpp.Reader(self.transport.open(node.path))
+            fd = hidpp.Reader(self.transport.open(node.path),
+                              long_only=getattr(node, "long_only", False))
             fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx))
             self._fds[node.path] = fd
         return fd
