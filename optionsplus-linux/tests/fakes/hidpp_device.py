@@ -17,7 +17,7 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x2121]
 
 
 class SimulatedMouse:
@@ -32,25 +32,32 @@ class SimulatedMouse:
         self.fail_dpi_write = False                 # answer setSensorDpi with an error
         self.smartshift = {"mode": 2, "threshold": 30, "torque": 0}
         self.firmware = (0x12, 0x34, 0x0567)        # major, minor, build
+        self.features = list(FEATURES)              # a test may drop some to model a simpler mouse
+        self.fail_smartshift_write = False
+        self.fail_wheel_write = False
+        self.wheel_multiplier = 8
+        self.wheel_caps = 0x08 | 0x04               # invert supported, ratchet switch
+        self.wheel_mode = 0x02                      # as the kernel driver leaves it: HID++ target off,
+                                                    # high resolution on, invert off
 
     def handle(self, fidx, fn, params):
         """Return reply params for feature index `fidx`, or an int error code."""
-        if fidx >= len(FEATURES):
+        if fidx >= len(self.features):
             return 6                                  # INVALID_FEATURE_INDEX
-        fid = FEATURES[fidx]
+        fid = self.features[fidx]
         if fid == 0x0000:
             if fn == 0:
                 want = struct.unpack(">H", params[:2])[0]
-                if want in FEATURES:
-                    return bytes([FEATURES.index(want), 0, 1])
+                if want in self.features:
+                    return bytes([self.features.index(want), 0, 1])
                 return bytes([0, 0, 0])
             if fn == 1:
                 return bytes([4, 2, params[2]])
         elif fid == 0x0001:
             if fn == 0:
-                return bytes([len(FEATURES) - 1])
+                return bytes([len(self.features) - 1])
             if fn == 1:
-                return struct.pack(">HB", FEATURES[params[0]], 0)
+                return struct.pack(">HB", self.features[params[0]], 0)
         elif fid == 0x0003:
             if fn == 0:
                 return bytes([1])
@@ -86,12 +93,24 @@ class SimulatedMouse:
                 s = self.smartshift
                 return bytes([s["mode"], s["threshold"], s["torque"]])
             if fn == 1:
+                if self.fail_smartshift_write:
+                    return 5                          # ERR_BUSY
                 s = self.smartshift
                 if params[0]:
                     s["mode"] = params[0]
                 if params[1]:
                     s["threshold"] = params[1]
                 return b""
+        elif fid == 0x2121:
+            if fn == 0:
+                return bytes([self.wheel_multiplier, self.wheel_caps])
+            if fn == 1:
+                return bytes([self.wheel_mode])
+            if fn == 2:
+                if self.fail_wheel_write:
+                    return 5
+                self.wheel_mode = params[0]
+                return bytes([self.wheel_mode])
         return 7                                      # INVALID_FUNCTION_ID
 
 

@@ -92,6 +92,51 @@ def default_pointer_value(depot):
     return None
 
 
+SCROLL_SUFFIX = "_mouse_scroll_wheel_settings"
+SCROLL_ATTRIBUTE = "MOUSE_SCROLL_WHEEL_SETTINGS"
+SENSITIVITY_MIN, SENSITIVITY_MAX = 1, 50       # the panel's SmartShift slider; the 0x2110 threshold
+
+
+def scroll_slot(slot_prefix):
+    return slot_prefix + SCROLL_SUFFIX
+
+
+def scroll_card(state):
+    """The scroll wheel card for what the mouse reports ({"smartshift", "wheel"} from
+    Registry.read_scroll), or None when it has neither feature."""
+    settings = {}
+    ss, wheel = state.get("smartshift"), state.get("wheel")
+    if ss is not None:
+        settings["smartshift"] = {
+            "isEnabled": ss["mode"] == "ratchet",
+            "sensitivity": min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["threshold"])))}
+    if wheel is not None:
+        settings["isSmooth"] = wheel["hires"]
+        settings["dir"] = "INVERTED" if wheel["invert"] else "NORMAL"
+    if not settings:
+        return None
+    return {"id": SCROLL_ATTRIBUTE, "attribute": SCROLL_ATTRIBUTE, "mouseScrollWheelSettings": settings}
+
+
+def scroll_request(card):
+    """What a scroll wheel card asks for: {ratchet, threshold, hires, invert}, each None
+    when the card leaves it alone; None when it is not a scroll wheel card at all."""
+    try:
+        s = card["mouseScrollWheelSettings"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(s, dict):
+        return None
+    ss = s.get("smartshift") or {}
+    req = {"ratchet": ss.get("isEnabled"), "threshold": None,
+           "hires": s.get("isSmooth"), "invert": None}
+    if ss.get("sensitivity") is not None:
+        req["threshold"] = min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["sensitivity"])))
+    if s.get("dir") in ("NORMAL", "INVERTED"):
+        req["invert"] = s["dir"] == "INVERTED"
+    return req
+
+
 class ProfileStore:
     """User settings that override the depot defaults, persisted as profiles.json.
 
@@ -141,6 +186,10 @@ def profiles(devices, store=None, live=None):
         if card is None and dev.id in live:
             rd = live[dev.id]
             card = mouse_settings_card(value_from_dpi(rd["dpi"], rd["range"]), rd["dpi"])
+        if card is not None:
+            assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
+        slot = scroll_slot(dev.slot_prefix)
+        card = (store.get(slot) if store else None) or (live.get(dev.id) or {}).get("scroll")
         if card is not None:
             assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
     return {

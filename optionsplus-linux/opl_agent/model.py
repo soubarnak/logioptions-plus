@@ -65,6 +65,7 @@ class Device:
         self.fw = ""
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.battery_cache = None    # last {percent, charging, status} from HID++
+        self.scroll_caps = {"smartshift": False, "highResolution": False}   # features present
         self.catalogue = resources.catalogue_entry(pid) or {}
 
     @property
@@ -92,7 +93,7 @@ class Device:
     # ---- payload builders -------------------------------------------------
     def info(self):
         """logi.protocol.devices.Device.Info for /devices/list and /devices/<id>/info."""
-        return {
+        out = {
             "id": self.id,
             "pid": self.pid,
             "state": "ACTIVE" if self.connected else "ABSENT",
@@ -118,6 +119,13 @@ class Device:
             "firstConnectedTimestamp": str(self.first_connected),
             **self._battery_fields(),
         }
+        out.setdefault("capabilities", {})["scrollWheelCapabilities"] = self._scroll_capabilities()
+        return out
+
+    def _scroll_capabilities(self):
+        return {"highResolution": self.scroll_caps["highResolution"],
+                "smartshift": self.scroll_caps["smartshift"],
+                "adjustableSpeed": False}       # needs the wheel relay (not built yet)
 
     def _battery_fields(self):
         """Capability flags and level that make the UI show the battery indicator."""
@@ -215,6 +223,13 @@ class Registry:
                     self.refresh_battery(dev_id)
                 except Exception:
                     pass
+                try:
+                    d.scroll_caps = {
+                        "smartshift": (hidpp.has_feature(fd, idx, hidpp.F_SMART_SHIFT)
+                                       or hidpp.has_feature(fd, idx, hidpp.F_SMART_SHIFT_ENH)),
+                        "highResolution": hidpp.has_feature(fd, idx, hidpp.F_HIRES_WHEEL)}
+                except Exception:
+                    pass
                 log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
                 for hook in list(self.on_discovered):
                     try:
@@ -294,6 +309,28 @@ class Registry:
         fd = self._fds[d.node.path]
         hidpp.set_dpi(fd, d.index, int(dpi))
         return hidpp.get_dpi(fd, d.index)["dpi"]
+
+    def read_scroll(self, dev_id):
+        """Blocking: {"smartshift": {...}|None, "wheel": {...}|None} as the mouse has it now."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        out = {"smartshift": None, "wheel": None}
+        if d.scroll_caps["smartshift"]:
+            out["smartshift"] = hidpp.get_smartshift(fd, d.index)
+        if d.scroll_caps["highResolution"]:
+            out["wheel"] = hidpp.get_wheel(fd, d.index)
+        return out
+
+    def write_scroll(self, dev_id, ratchet=None, threshold=None, hires=None, invert=None):
+        """Blocking 0x2110 / 0x2121 writes; None leaves a setting alone. Returns read_scroll()."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        if d.scroll_caps["smartshift"] and (ratchet is not None or threshold is not None):
+            mode = None if ratchet is None else ("ratchet" if ratchet else "freespin")
+            hidpp.set_smartshift(fd, d.index, mode=mode, threshold=threshold)
+        if d.scroll_caps["highResolution"] and (hires is not None or invert is not None):
+            hidpp.set_wheel(fd, d.index, hires=hires, invert=invert)
+        return self.read_scroll(dev_id)
 
     def close(self):
         for fd in self._fds.values():

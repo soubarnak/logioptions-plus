@@ -168,6 +168,10 @@ class Router:
                                 "range": self.reg.dpi_range(dev_id)}
             except Exception as exc:
                 log.debug("no live DPI for %s: %s", dev_id, exc)
+            try:
+                live.setdefault(dev_id, {})["scroll"] = profiles.scroll_card(self.reg.read_scroll(dev_id))
+            except Exception as exc:
+                log.debug("no live scroll state for %s: %s", dev_id, exc)
         return live
 
     async def _profiles_payload(self):
@@ -190,13 +194,34 @@ class Router:
         dpi = self.reg.write_dpi(dev.id, profiles.dpi_from_value(value, rng))
         return profiles.mouse_settings_card(profiles.value_from_dpi(dpi, rng), dpi)
 
+    def _device_for_scroll_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if slot_id == profiles.scroll_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_scroll(self, dev, req):
+        """Blocking: write the requested wheel settings; returns the card read back."""
+        state = self.reg.write_scroll(dev.id, ratchet=req["ratchet"], threshold=req["threshold"],
+                                      hires=req["hires"], invert=req["invert"])
+        return profiles.scroll_card(state)
+
     def apply_stored(self, dev_id):
         """Blocking: reapply stored settings to a device (discovery, reconnect)."""
         dev = self.reg.devices.get(dev_id)
-        card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix)) if dev else None
+        if dev is None:
+            return
+        card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix))
         value = profiles.pointer_value(card) if card else None
         if value is not None:
             self._apply_pointer(dev, value)
+        card = self.store.get(profiles.scroll_slot(dev.slot_prefix))
+        req = profiles.scroll_request(card) if card else None
+        if req is not None:
+            try:
+                self._apply_scroll(dev, req)
+            except Exception as exc:
+                log.warning("reapplying scroll wheel settings failed: %s", exc)
 
     async def _profiles_set(self, path, payload):
         loop = asyncio.get_event_loop()
@@ -209,15 +234,25 @@ class Router:
         handled = None
         for entry in entries:
             asg = entry.get("assignment") or {}
-            dev = self._device_for_slot(asg.get("slotId", ""))
-            value = profiles.pointer_value(asg.get("card") or entry.get("card") or {})
-            if dev is None or value is None:
-                continue
+            slot_id = asg.get("slotId", "")
+            requested = asg.get("card") or entry.get("card") or {}
+            dev = self._device_for_slot(slot_id)
+            value = profiles.pointer_value(requested)
+            if dev is not None and value is not None:
+                apply_fn, arg, what = self._apply_pointer, value, "pointer speed"
+            else:
+                dev = self._device_for_scroll_slot(slot_id)
+                req = profiles.scroll_request(requested)
+                if dev is None or req is None:
+                    continue
+                apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
             try:
-                card = await loop.run_in_executor(None, self._apply_pointer, dev, value)
+                card = await loop.run_in_executor(None, apply_fn, dev, arg)
             except Exception as exc:
-                log.warning("pointer speed write failed: %s", exc)
+                log.warning("%s write failed: %s", what, exc)
                 return "FAULTED", None, "device write failed: %s" % exc
+            if card is None:
+                continue
             self.store.set(asg["slotId"], card)
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
@@ -232,6 +267,7 @@ class Router:
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
             self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            self.store.remove(profiles.scroll_slot(dev.slot_prefix))
             try:
                 await loop.run_in_executor(None, self._apply_defaults, dev)
             except Exception as exc:
