@@ -241,7 +241,9 @@ def test_pairing_routes_do_not_exist_on_a_mouse(bolt, pairing):
 def test_the_discovery_route_looks_for_devices_without_pairing_them(bolt, pairing):
     reply = pairing.call("SET", DISCOVERY, {"timeoutSeconds": 20})
     assert reply["result"]["code"] == "SUCCESS" and bolt.discovering is True
-    assert bolt.writes[-1][4] == 20                # the timeout goes first, then the action
+    # the last discovery write (register 0xC0); other writes may follow it under load
+    start = [w for w in bolt.writes if w[1] == 0xFF and w[2] == 0x80 and w[3] == 0xC0][-1]
+    assert start[4] == 20 and start[5] == 1        # the timeout goes first, then the action
     bolt.advertise("New Mouse", ADDRESS)
     assert next_push(pairing, ADVERTISED)["deviceAddress"] == ADDRESS.hex()
     assert bolt.pairing_open is False
