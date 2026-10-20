@@ -36,5 +36,6 @@ def build_depot(root):
             {"key": "layout", "src": "layout.json"}]}]}))
     _write(os.path.join(dev, "default_configurations.json"), json.dumps({"defaultConfigurations": [{
         "settings": {"control_id_mappings": {"82": {"id": "card-back"}, "83": {"id": "card-forward"}},
-                     "mouseThumbWheelAction": {"id": "card-wheel"}}}]}))
+                     "mouseThumbWheelAction": {"id": "card-wheel"},
+                     "mouseSettings": {"pointerSpeed": {"active": {"value": 0.5}}}}}]}))
     return root
