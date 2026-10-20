@@ -65,7 +65,6 @@ BOOT = {
     # OPL_UI_LOGGING=1 keeps the renderer's console logging on (debugging aid)
     "/logging/optionsplus_backend/status": {"@type": TYPE + "logi.protocol.logging.Status",
                                             "enabledByCfg": os.environ.get("OPL_UI_LOGGING") == "1"},
-    "/mouse/global/swap": {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap", "state": "LEFT"},
     "/rightsight/status": {"@type": TYPE + "logi.protocol.right_sight.Status"},
     "/dfu/config/update": {"@type": TYPE + "logi.protocol.dfu.UpdateCheckConfig"},
     "/api/v1/integrations": {"@type": TYPE + "logi.protocol.integrations.Integrations"},
