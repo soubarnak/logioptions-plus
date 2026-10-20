@@ -121,6 +121,7 @@ def default_pointer_value(depot):
     return None
 
 
+DIR_INVERTED, DIR_STANDARD = "NATURAL", "STANDARD"   # logi.protocol.mouse.WheelDirection
 SCROLL_SUFFIX = "_mouse_scroll_wheel_settings"
 SCROLL_ATTRIBUTE = "MOUSE_SCROLL_WHEEL_SETTINGS"
 SENSITIVITY_MIN, SENSITIVITY_MAX = 1, 50       # the panel's SmartShift slider; the 0x2110 threshold
@@ -149,7 +150,7 @@ def scroll_card(state, speed=0):
             "sensitivity": min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["threshold"])))}
     if wheel is not None:
         settings["isSmooth"] = wheel["hires"]
-        settings["dir"] = "INVERTED" if wheel["invert"] else "NORMAL"
+        settings["dir"] = DIR_INVERTED if wheel["invert"] else DIR_STANDARD
         settings["speed"] = speed
     if not settings:
         return None
@@ -170,13 +171,12 @@ def scroll_request(card):
            "hires": s.get("isSmooth"), "invert": None, "speed": _speed(s.get("speed"))}
     if ss.get("sensitivity") is not None:
         req["threshold"] = min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["sensitivity"])))
-    if s.get("dir") in ("NORMAL", "INVERTED"):
-        req["invert"] = s["dir"] == "INVERTED"
+    if s.get("dir") in (DIR_STANDARD, DIR_INVERTED, "NORMAL", "INVERTED"):    # the last two: old profiles.json
+        req["invert"] = s["dir"] in (DIR_INVERTED, "INVERTED")
     return req
 
 THUMB_WHEEL_SUFFIX = "_mouse_thumb_wheel_settings"
 THUMB_ATTRIBUTE = "MOUSE_THUMB_WHEEL_SETTINGS"
-DIR_INVERTED, DIR_STANDARD = "NATURAL", "STANDARD"   # logi.protocol.mouse.WheelDirection
 
 
 def thumb_wheel_slot(slot_prefix):
