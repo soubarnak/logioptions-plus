@@ -52,7 +52,6 @@ BOOT = {
     "/lps/endpoint/info": {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"},
     "/lps/enable_notification": {"@type": TYPE + "google.protobuf.BoolValue", "value": False},
     "/lps/status": {"@type": TYPE + "logi.protocol.lps.ServiceStatus", "status": 1, "uptime": 0, "version": ""},
-    "/applications/all": {"@type": TYPE + "logi.protocol.applications.Applications", "applications": []},
     # per-device app profiles: none until app integration exists; the device
     # resource saga fails (and shows "Download failed") if these error
     "/applications/predefined": {"@type": TYPE + "logi.protocol.applications.Applications", "applications": []},
