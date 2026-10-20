@@ -21,10 +21,11 @@ def main(argv):
     box = actions.rac(payload)
     print("prefixes:", [argv[1]] if payload else actions._installed_prefixes())
     for key in ("availableCards", "recommendedCards"):
+        field = "desktopCards" if key == "availableCards" else "cards"
         racs = box[key]["racList"]
         print("%s: %d apps" % (key, len(racs)))
         for rac in racs:
-            counts = ", ".join("%s=%d" % (s["slotId"], len(s.get("desktopCards", s.get("cards", ()))))
+            counts = ", ".join("%s=%d" % (s["slotId"], len(s.get(field, ())))
                                for s in rac["slotCardList"])
             print("  %-45s %s" % (rac["appId"], counts))
 

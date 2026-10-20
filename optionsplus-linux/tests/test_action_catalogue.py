@@ -91,8 +91,8 @@ def test_the_lists_use_the_fields_the_ui_reducer_reads(client):
     box = rac(client)
     avail = [s for r in box["availableCards"]["racList"] for s in r["slotCardList"]]
     rec = [s for r in box["recommendedCards"]["racList"] for s in r["slotCardList"]]
-    assert any(s["desktopCards"] for s in avail) and not any(s["cards"] for s in avail)
-    assert any(s["cards"] for s in rec) and not any(s["desktopCards"] for s in rec)
+    assert any(s.get("desktopCards") for s in avail) and not any(s.get("cards") for s in avail)
+    assert any(s.get("cards") for s in rec) and not any(s.get("desktopCards") for s in rec)
 
 
 def test_a_slot_without_a_tag_row_uses_the_control_tag_row(client):
