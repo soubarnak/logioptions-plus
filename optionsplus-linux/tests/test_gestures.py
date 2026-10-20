@@ -449,7 +449,7 @@ def test_the_default_gesture_card_compiles_with_linux_desktop_actions():
         "left": [("system", "SWITCH_BETWEEN_DESKTOPS_LEFT")],
         "right": [("system", "SWITCH_BETWEEN_DESKTOPS_RIGHT")],
         "down": [("system", "SHOW_DESKTOP")],
-        "up": [("system", "SWITCH_BETWEEN_DESKTOPS")]}
+        "up": [("system", "TASK_VIEW")]}
 
 
 def test_only_a_card_that_resolves_to_a_four_way_adapter_needs_software():

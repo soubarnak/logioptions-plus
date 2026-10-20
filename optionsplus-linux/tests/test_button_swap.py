@@ -302,10 +302,12 @@ def test_swapping_back_when_nothing_is_swapped_is_not_an_error(client):
 
 # ---- feedback on a refusal (the UI shows nothing of the reply) ------------------------------
 
-def test_a_refused_swap_snaps_the_toggle_back_and_says_why(agent_factory, monkeypatch):
+def test_a_refused_swap_snaps_the_toggle_back_and_says_why(agent_factory, monkeypatch, spawned):
+    from opl_agent import runner as real_runner
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    runner = FakeRunner(installed={"notify-send"})
-    running = agent_factory(runner=runner)
+    monkeypatch.setattr(real_runner.SubprocessRunner, "which",
+                        lambda _self, name: name if name == "notify-send" else None)
+    running = agent_factory()
     client = running.client()
     watcher = running.client()
     try:
@@ -315,7 +317,7 @@ def test_a_refused_swap_snaps_the_toggle_back_and_says_why(agent_factory, monkey
         push = watcher.recv()
         assert push["path"] == "/mouse/global/swap" and push["verb"] == "BROADCAST"
         assert push["payload"]["state"] == "LEFT"
-        (argv,) = runner.launched
+        (argv,) = spawned
         assert argv[0] == "notify-send" and reply["result"]["what"] in argv
     finally:
         watcher.close()

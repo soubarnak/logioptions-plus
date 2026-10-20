@@ -304,6 +304,14 @@ def test_reset_hands_both_wheels_back(client, bolt, uinput):
     assert not bolt.turn_wheel(8) and not bolt.turn_thumb(14)
 
 
+def test_releasing_with_reset_hands_the_wheel_back_without_hi_res(client, agent, bolt):
+    scroll(client, speed=FAST, isSmooth=True)
+    assert bolt.mouse.wheel_mode & TARGET_BIT and bolt.mouse.wheel_mode & HIRES_BIT
+    dev = next(iter(agent.agent.reg.devices.values()))
+    agent.agent.router.relay.release(dev, reset=True)
+    assert bolt.mouse.wheel_mode & (TARGET_BIT | HIRES_BIT | INVERT_BIT) == 0
+
+
 def test_speeds_survive_a_restart_and_are_diverted_again(agent_factory, bolt, uinput):
     first = agent_factory()
     c = first.client()

@@ -16,8 +16,14 @@ from tests.harness import RunningAgent, short_tmpdir
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
+@pytest.fixture
+def spawned():
+    """The argv of every program the real runner was asked to launch (none is started)."""
+    return []
+
+
 @pytest.fixture(autouse=True)
-def hermetic(monkeypatch):
+def hermetic(monkeypatch, spawned):
     """Tests need no network, hidraw, uinput or display: fail loudly if touched."""
     real_socket = socket.socket
 
@@ -42,7 +48,7 @@ def hermetic(monkeypatch):
     from opl_agent import runner as real_runner
 
     # a test that lets the agent use the real runner must not start desktop tools (notify-send ...)
-    monkeypatch.setattr(real_runner.SubprocessRunner, "run", lambda _self, argv: None)
+    monkeypatch.setattr(real_runner.SubprocessRunner, "run", lambda _self, argv: spawned.append(list(argv)))
     for var in ("DISPLAY", "WAYLAND_DISPLAY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("OPL_REPLAY", raising=False)

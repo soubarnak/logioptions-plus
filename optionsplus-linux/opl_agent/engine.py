@@ -116,7 +116,7 @@ WINDOWS_CHORD_ACTIONS = {
     "inner_card_vd_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
     "inner_card_vd_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
     "inner_card_vd_hide_show_desktop": "SHOW_DESKTOP",
-    "inner_card_vd_start_menu": "SWITCH_BETWEEN_DESKTOPS",      # the overview
+    "inner_card_vd_start_menu": "TASK_VIEW",                     # the overview
 }
 
 

@@ -349,8 +349,7 @@ class WheelRelay:
             with ax.lock:
                 if reset:
                     ax.invert = False
-                    if name == THUMB:
-                        ax.smooth = False
+                    ax.smooth = False
                 # a thumb wheel the action engine holds is not ours to hand back
                 if ax.diverted and not (name == THUMB and self.thumb_owned(dev.id)):
                     try:

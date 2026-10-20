@@ -564,11 +564,13 @@ class Router:
             else:
                 dev = self._thumb_device_for_slot(slot_id) if app is None else None
                 if dev is None:
-                    target = self._button_target(slot_id) if requested else None
+                    target = self._button_target(slot_id)
                     if target is None and app is not None and requested:
                         return "NOT_SUPPORTED", None, "only button assignments can differ per application"
                     if target is None:
                         return await self._profiles_failed(handled, "INVALID_ARG", "no such slot %s" % slot_id)
+                    if not requested:
+                        return await self._profiles_failed(handled, "INVALID_ARG", "no card")
                     try:
                         await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
                     except input_engine.Unsupported as exc:
@@ -596,7 +598,9 @@ class Router:
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
         if handled is None:
-            return "INVALID_ARG", None, "nothing to apply" if entries else None
+            if not entries:
+                return None
+            return "INVALID_ARG", None, "nothing to apply"
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
 
@@ -808,6 +812,7 @@ class Router:
         except Exception as exc:
             log.warning("handing the wheels back failed: %s", exc)
         if dev.scroll_caps["highResolution"]:
+            # only a mouse with the hi-res wheel (0x2121) has these bits to clear
             self.reg.divert_wheel(dev.id, None, invert=False, hires=False)    # the relay only writes a wheel it holds
         if dev.thumb_wheel:
             self.reg.write_thumb(dev.id, False, False)

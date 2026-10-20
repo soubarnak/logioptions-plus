@@ -1,5 +1,8 @@
 """Pointer speed (ticket #9): slider -> DPI on the mouse, profile store, reapply."""
 
+import json
+import os
+
 import pytest
 
 from tests.fakes import depot as fx
@@ -145,9 +148,18 @@ def test_an_assignment_for_an_unknown_slot_is_an_invalid_argument(client):
     assert "no-such-device_c999" in reply["result"]["what"]
 
 
-def test_device_restore_resets_the_device_named_by_the_payload(client, bolt):
+def _stored_slots(workdir):
+    path = os.path.join(workdir, "state", "profiles.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path) as fh:
+        return json.load(fh).get("assignments") or {}
+
+
+def test_device_restore_resets_the_device_named_by_the_payload(client, bolt, workdir):
     slider(client, 0.9)
     assert bolt.mouse.dpi != 4500
+    assert SLOT in _stored_slots(workdir)
     reply = client.call("SET", "/device/restore", {
         "@type": TYPE + "logi.protocol.device.DeviceInfo", "id": "dev00000000",
         "deviceModel": fx.MODEL_ID, "slotPrefix": fx.SLOT_PREFIX})

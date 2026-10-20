@@ -33,10 +33,18 @@ def find_device(node=None, index=None):
     raise SystemExit("no device found")
 
 
+def _optional(read, fd, idx):
+    """What `read` returns, or None for a mouse without that feature."""
+    try:
+        return read(fd, idx)
+    except hidpp.FeatureNotSupported:
+        return None
+
+
 def collect(fd, idx):
     """Every value this tool reads, as a JSON-able dict."""
     out = {"dpi": hidpp.get_dpi(fd, idx), "smartshift": hidpp.get_smartshift(fd, idx),
-           "wheel": hidpp.get_wheel(fd, idx), "thumb": hidpp.get_thumbwheel(fd, idx),
+           "wheel": _optional(hidpp.get_wheel, fd, idx), "thumb": _optional(hidpp.get_thumbwheel, fd, idx),
            "controls": {}, "hosts": []}
     for cid in sorted(hidpp.get_controls(fd, idx)):
         div, raw, remap = hidpp.get_cid_reporting(fd, idx, cid)
@@ -54,9 +62,11 @@ def restore(fd, idx, saved):
     ss = saved["smartshift"]
     hidpp.set_smartshift(fd, idx, mode=ss["mode"], threshold=ss["threshold"])
     w = saved["wheel"]
-    hidpp.set_wheel(fd, idx, hires=w["hires"], invert=w["invert"], target=False)
+    if w is not None:
+        hidpp.set_wheel(fd, idx, hires=w["hires"], invert=w["invert"], target=False)
     t = saved["thumb"]
-    hidpp.set_thumbwheel(fd, idx, t["invert"], t["smooth"], mode=hidpp.THUMB_NATIVE)
+    if t is not None:
+        hidpp.set_thumbwheel(fd, idx, t["invert"], t["smooth"], mode=hidpp.THUMB_NATIVE)
     for cid, state in saved["controls"].items():
         cid = int(cid)
         if state["remap"] != cid:
@@ -71,9 +81,11 @@ def show(state):
     s = state["smartshift"]
     print("smartshift %s threshold %s" % (s["mode"], s["threshold"]))
     w = state["wheel"]
-    print("wheel      hires %s invert %s diverted %s" % (w["hires"], w["invert"], w["target"]))
+    if w is not None:
+        print("wheel      hires %s invert %s diverted %s" % (w["hires"], w["invert"], w["target"]))
     t = state["thumb"]
-    print("thumb      mode %s invert %s smooth %s" % (t["mode"], t["invert"], t["smooth"]))
+    if t is not None:
+        print("thumb      mode %s invert %s smooth %s" % (t["mode"], t["invert"], t["smooth"]))
     for cid, c in state["controls"].items():
         print("ctl %-4s   %s" % (cid, (c["diverted"], c["raw_xy"], c["remap"])))
     for h in state["hosts"]:

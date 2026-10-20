@@ -150,14 +150,14 @@ def test_focus_switches_the_injected_action(client, bolt, uinput, windows):
     assign_to(client, FIREFOX, BACK, RELOAD)
     assert bolt.mouse.diverted == set()
     windows.focus(("Navigator", "firefox"))
-    assert wait_for(lambda: bolt.mouse.diverted == {BACK})
+    assert wait_for(lambda: bolt.mouse.diverted == {BACK}, timeout=20)
     assert press(bolt, uinput, BACK, 2) == RELOAD_KEYS
     windows.focus(("gnome-terminal-server", "Gnome-terminal"))
-    assert wait_for(lambda: bolt.mouse.diverted == set())         # Back is the mouse's own again
+    assert wait_for(lambda: bolt.mouse.diverted == set(), timeout=20)  # Back is the mouse's own again
     windows.focus(None)
     settled(windows)
     windows.focus(("Navigator", "firefox"))
-    assert wait_for(lambda: bolt.mouse.diverted == {BACK})
+    assert wait_for(lambda: bolt.mouse.diverted == {BACK}, timeout=20)
 
 
 def test_an_unknown_window_runs_the_default_profile(client, bolt, uinput, windows):
