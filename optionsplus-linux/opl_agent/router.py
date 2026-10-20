@@ -16,7 +16,9 @@ import json
 import logging
 import os
 
-from . import profiles, resources, responses
+import asyncio
+
+from . import applications, profiles, resources, responses
 
 log = logging.getLogger("opl.router")
 
@@ -31,8 +33,10 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None):
+    def __init__(self, registry, state_dir=None, app_dirs=None):
         self.reg = registry
+        self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
+        self.apps = None                 # last scan result; None until first scan
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
@@ -65,6 +69,8 @@ class Router:
         if path == "/lps/endpoint/info_changed":
             return [("/lps/endpoint/info_changed",
                      {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"})]
+        if path == "/applications/installed" and self.apps is not None:
+            return [(path, applications.payload(self.apps))]
         if path == "/devices/state/changed":
             out = []
             for d in self.reg.devices.values():
@@ -86,6 +92,14 @@ class Router:
         if verb == "GET" and path == "/resources/localized_packages":
             lang = (self.config.get("language") or {}).get("value", "en-US")
             return "SUCCESS", resources.localized_packages(payload, lang), ""
+
+        if path == "/applications/scan/installed" and verb == "SET":
+            await self._scan_applications(announce=True)
+            return "SUCCESS", payload, ""
+        if verb == "GET" and path in ("/applications/installed", "/applications/all"):
+            if self.apps is None:
+                await self._scan_applications(announce=False)
+            return "SUCCESS", applications.payload(self.apps), ""
 
         if verb == "GET" and path == "/v2/profiles":
             return "SUCCESS", profiles.profiles(self.reg.devices.values()), ""
@@ -122,6 +136,24 @@ class Router:
             log.info("unhandled SET %s accepted", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    async def _scan_applications(self, announce):
+        """Scan off the event loop. An unreadable tree or a scan error counts
+        as "nothing found": the completion broadcast is sent regardless, so the
+        UI's scanning spinner always stops."""
+        dirs = self.app_dirs if self.app_dirs is not None else applications.default_dirs()
+        try:
+            self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
+        except Exception as exc:
+            log.warning("application scan failed: %s", exc)
+            self.apps = []
+        if announce and self.server is not None:
+            # after the SET reply, which the caller is about to send
+            asyncio.get_event_loop().call_soon(self._announce_applications)
+
+    def _announce_applications(self):
+        for path in ("/applications/installed", "/applications"):
+            self.server.broadcast(path, applications.payload(self.apps))
 
     def _set_config(self, payload):
         for k, v in payload.items():

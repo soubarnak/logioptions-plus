@@ -52,7 +52,8 @@ def agent_factory(workdir, bolt):
 
     def make(**overrides):
         kw = dict(transport=bolt, socket_path=os.path.join(workdir, "s"),
-                  state_dir=os.path.join(workdir, "state"), depot_dir=depot)
+                  state_dir=os.path.join(workdir, "state"), depot_dir=depot,
+                  app_dirs=[os.path.join(workdir, "applications")])
         kw.update(overrides)
         running = RunningAgent(**kw).start()
         started.append(running)
