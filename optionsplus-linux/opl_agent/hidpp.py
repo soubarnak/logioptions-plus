@@ -116,6 +116,7 @@ class HidppNode:
     name: str
     is_receiver: bool
     is_bolt: bool = False
+    long_only: bool = False   # no short-report collection (Bluetooth direct): use long reports
 
 
 def _parse_descriptor(desc):
@@ -150,14 +151,14 @@ def _read_uevent(path):
     return d
 
 
-def list_receivers_and_devices():
+def list_receivers_and_devices(base="/sys/class/hidraw"):
     """Scan /sys/class/hidraw for Logitech nodes exposing the HID++ collection.
 
     A node qualifies when its report descriptor declares report id 0x10 and/or
-    0x11 under vendor usage page 0xFF00 or 0xFF43.
+    0x11 under vendor usage page 0xFF00 or 0xFF43. A node with the long report
+    only (a Bluetooth-direct device) is marked `long_only`.
     """
     nodes = []
-    base = "/sys/class/hidraw"
     try:
         names = sorted(os.listdir(base), key=lambda n: int(n[6:]) if n[6:].isdigit() else 0)
     except OSError:
@@ -179,9 +180,11 @@ def list_receivers_and_devices():
             continue
         if not any(p in (0xFF00, 0xFF43) and r in (SHORT, LONG) for p, r in pairs):
             continue
+        has_short = any(p in (0xFF00, 0xFF43) and r == SHORT for p, r in pairs)
         nodes.append(HidppNode(
             path="/dev/" + n, vid=vid, pid=pid, name=ue.get("HID_NAME", ""),
-            is_receiver=pid in RECEIVER_PIDS, is_bolt=pid in BOLT_PIDS))
+            is_receiver=pid in RECEIVER_PIDS, is_bolt=pid in BOLT_PIDS,
+            long_only=not has_short))
     return nodes
 
 
@@ -311,8 +314,9 @@ class Reader:
 
     POLL = 0.1
 
-    def __init__(self, handle):
+    def __init__(self, handle, long_only=False):
         self.handle = handle
+        self.long_only = long_only      # transport has no short-report collection
         self._lock = threading.Lock()
         self._waiting = []              # [(key, slot)] in request order
         self._listeners = []
@@ -467,7 +471,9 @@ def open_device(path):
 def _transact(fd, idx, b2, b3, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
     """Write one report, return the matching reply report (full bytes)."""
     params = bytes(params)
-    if long is None:
+    if getattr(fd, "long_only", False):
+        long = True
+    elif long is None:
         long = len(params) > SHORT_LEN - 4
     size = LONG_LEN if long else SHORT_LEN
     if len(params) > size - 4:
