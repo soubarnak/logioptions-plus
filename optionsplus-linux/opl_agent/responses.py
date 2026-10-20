@@ -66,7 +66,6 @@ BOOT = {
     "/logging/optionsplus_backend/status": {"@type": TYPE + "logi.protocol.logging.Status",
                                             "enabledByCfg": os.environ.get("OPL_UI_LOGGING") == "1"},
     "/rightsight/status": {"@type": TYPE + "logi.protocol.right_sight.Status"},
-    "/dfu/config/update": {"@type": TYPE + "logi.protocol.dfu.UpdateCheckConfig"},
     "/api/v1/integrations": {"@type": TYPE + "logi.protocol.integrations.Integrations"},
     "/integration/plugin/photoshop/uxp_plugin_exists": {"@type": TYPE + "google.protobuf.BoolValue", "value": False},
     "/options/devices/list": {"@type": TYPE + "logi.protocol.devices_support.OptionsDevices"},

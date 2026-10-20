@@ -78,6 +78,7 @@ class Device:
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
         self.controls = None         # 0x1b04 {cid: {...}}, read on first use
+        self.dpi_default = None      # the sensor's default DPI (0x2201 fn2), fixed, read on first use
         self.button_feature = None   # feature index of 0x1b04, once looked up
         self.thumb_feature = None    # feature index of 0x2150, once looked up
         self.battery_cache = None    # last {percent, charging, status} from HID++
@@ -1072,9 +1073,12 @@ class Registry:
                 "chargingStatus": "CHARGING" if b.get("charging") else "DISCHARGING"}
 
     def dpi_range(self, dev_id):
-        """Blocking read of the sensor's DPI list: {values, min, max, step}."""
+        """Blocking read of the sensor's DPI list: {values, min, max, step, default}."""
         d = self.devices[dev_id]
-        return hidpp.get_dpi_list(self._fds[d.node.path], d.index)
+        fd = self._fds[d.node.path]
+        if d.dpi_default is None:
+            d.dpi_default = hidpp.get_dpi(fd, d.index)["default"]
+        return {**hidpp.get_dpi_list(fd, d.index), "default": d.dpi_default}
 
     def read_dpi(self, dev_id):
         """Blocking read of the current and default DPI: {dpi, default, ...}."""

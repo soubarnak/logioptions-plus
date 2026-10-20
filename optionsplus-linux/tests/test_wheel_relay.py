@@ -29,7 +29,7 @@ def assignment(client, slot):
 
 
 def put(client, slot, attribute, key, **fields):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE,
         "assignment": {"slotId": slot, "card": {"attribute": attribute, key: fields}}})
@@ -143,12 +143,12 @@ def test_scrolling_the_other_way_emits_negative_values(client, bolt, uinput):
 
 
 def test_inverted_direction_flips_the_relayed_sign_and_clears_the_device_invert(client, bolt, uinput):
-    scroll(client, speed=FAST, dir="INVERTED")
+    scroll(client, speed=FAST, dir="NATURAL")
     assert bolt.mouse.wheel_mode & INVERT_BIT == 0       # software does the inversion
     turn(bolt, MULTIPLIER)
     assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES))
     assert uinput.rels(REL_WHEEL_HI_RES) == [-480]
-    assert scroll_settings(client)["dir"] == "INVERTED"
+    assert scroll_settings(client)["dir"] == "NATURAL"
 
 
 def test_without_smooth_scrolling_the_motion_is_whole_notches(client, bolt, uinput):
@@ -169,14 +169,14 @@ def test_unit_steps_without_hires_flag_count_whole_notches(client, bolt, uinput)
 
 
 def test_a_neutral_speed_hands_the_wheel_back_with_its_direction(client, bolt, uinput):
-    scroll(client, speed=FAST, dir="INVERTED")
+    scroll(client, speed=FAST, dir="NATURAL")
     reply = scroll(client, speed=NEUTRAL)
     assert reply["result"]["code"] == "SUCCESS"
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0
     assert bolt.mouse.wheel_mode & INVERT_BIT                 # the device inverts again
     assert not bolt.turn_wheel(8)
     assert uinput.events == []
-    assert scroll_settings(client)["dir"] == "INVERTED"
+    assert scroll_settings(client)["dir"] == "NATURAL"
 
 
 def test_smartshift_changes_keep_the_wheel_diverted(client, bolt):
@@ -189,7 +189,7 @@ def test_smartshift_changes_keep_the_wheel_diverted(client, bolt):
 
 
 def test_a_direction_change_alone_stays_native(client, bolt):
-    reply = scroll(client, dir="INVERTED")
+    reply = scroll(client, dir="NATURAL")
     assert reply["result"]["code"] == "SUCCESS"
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.wheel_mode & INVERT_BIT
 
@@ -295,7 +295,7 @@ def test_the_one_virtual_device_serves_buttons_and_wheels(client, bolt, uinput):
 
 
 def test_reset_hands_both_wheels_back(client, bolt, uinput):
-    scroll(client, speed=FAST, dir="INVERTED")
+    scroll(client, speed=FAST, dir="NATURAL")
     thumb(client, speed=FAST, dir="NATURAL")
     assert reset(client)["result"]["code"] == "SUCCESS"
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.thumb["mode"] == 0
@@ -304,10 +304,18 @@ def test_reset_hands_both_wheels_back(client, bolt, uinput):
     assert not bolt.turn_wheel(8) and not bolt.turn_thumb(14)
 
 
+def test_releasing_with_reset_hands_the_wheel_back_without_hi_res(client, agent, bolt):
+    scroll(client, speed=FAST, isSmooth=True)
+    assert bolt.mouse.wheel_mode & TARGET_BIT and bolt.mouse.wheel_mode & HIRES_BIT
+    dev = next(iter(agent.agent.reg.devices.values()))
+    agent.agent.router.relay.release(dev, reset=True)
+    assert bolt.mouse.wheel_mode & (TARGET_BIT | HIRES_BIT | INVERT_BIT) == 0
+
+
 def test_speeds_survive_a_restart_and_are_diverted_again(agent_factory, bolt, uinput):
     first = agent_factory()
     c = first.client()
-    scroll(c, speed=FAST, dir="INVERTED")
+    scroll(c, speed=FAST, dir="NATURAL")
     thumb(c, speed=SLOW)
     c.close()
     first.stop()
@@ -315,7 +323,7 @@ def test_speeds_survive_a_restart_and_are_diverted_again(agent_factory, bolt, ui
     c2 = agent_factory().client()
     try:
         assert bolt.mouse.wheel_mode & TARGET_BIT and bolt.mouse.thumb["mode"] == 1
-        assert scroll_settings(c2)["speed"] == FAST and scroll_settings(c2)["dir"] == "INVERTED"
+        assert scroll_settings(c2)["speed"] == FAST and scroll_settings(c2)["dir"] == "NATURAL"
         assert thumb_settings(c2)["speed"] == SLOW
         turn(bolt, MULTIPLIER)
         assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [-480])
@@ -324,7 +332,7 @@ def test_speeds_survive_a_restart_and_are_diverted_again(agent_factory, bolt, ui
 
 
 def test_stopping_the_agent_returns_the_wheels_to_native_reporting(agent, client, bolt):
-    scroll(client, speed=FAST, dir="INVERTED")
+    scroll(client, speed=FAST, dir="NATURAL")
     thumb(client, speed=FAST, dir="NATURAL")
     client.close()
     agent.stop()
@@ -344,7 +352,7 @@ def test_diversions_are_applied_again_when_the_mouse_is_rediscovered(agent, clie
 
 
 def test_disabling_the_relay_returns_the_wheels_to_native_reporting(agent, client, bolt, uinput):
-    scroll(client, speed=FAST, dir="INVERTED")
+    scroll(client, speed=FAST, dir="NATURAL")
     thumb(client, speed=FAST)
     agent.agent.router.set_wheel_relay(False)
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.wheel_mode & INVERT_BIT
@@ -565,7 +573,7 @@ def test_reversing_direction_drops_the_motion_held_back_the_other_way(client, bo
 def test_a_speed_stored_before_the_relay_became_unavailable_is_not_forgotten(agent, client, bolt):
     scroll(client, speed=FAST)
     agent.agent.router.set_wheel_relay(False)
-    assert scroll(client, dir="INVERTED")["result"]["code"] == "SUCCESS"
+    assert scroll(client, dir="NATURAL")["result"]["code"] == "SUCCESS"
     agent.agent.router.set_wheel_relay(True)
     assert scroll_settings(client)["speed"] == FAST
     assert bolt.mouse.wheel_mode & TARGET_BIT

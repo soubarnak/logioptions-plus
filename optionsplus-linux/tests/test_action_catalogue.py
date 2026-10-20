@@ -323,7 +323,7 @@ BACK = fx.SLOT_PREFIX + "_c83"
 
 
 def choose(client, card, slot=BACK):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE, "assignment": {"slotId": slot, "cardId": card["id"], "card": card}})
 
@@ -357,7 +357,7 @@ def test_chosen_action_survives_an_agent_restart(agent_factory):
 def test_choosing_in_an_ops_batch_also_stores(client):
     card = presets(client)[0]
     slot = fx.SLOT_PREFIX + "_c86"
-    reply = client.call("SET", "/v2/profiles/assignment", {"profileId": DEFAULT_PROFILE, "ops": [
+    reply = client.call("SET", "/v2/assignment", {"profileId": DEFAULT_PROFILE, "ops": [
         {"set": {"assignment": {"slotId": slot, "cardId": card["id"], "card": card}}}]})
     assert reply["result"]["code"] == "SUCCESS"
     assert assignment(client, slot)[0]["cardId"] == "card_play"

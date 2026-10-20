@@ -50,6 +50,18 @@ def kind(card):
     return attribute if attribute in WORDS else None
 
 
+def adapter(card):
+    """The gesture adapter card `card` is or selects: a ONE_OF card (the depot's default for the gesture
+    button) hands over to its selected nested card. None when no adapter is reached."""
+    for _ in range(4):
+        if kind(card):
+            return card
+        card = ((card or {}).get("nestedCards") or {}).get((card or {}).get("selectedNestedCard"))
+        if not isinstance(card, dict):
+            return None
+    return None
+
+
 def _word(key, allowed):
     """The direction word in a nested card's slot key, else None."""
     for token in re.split(r"[^a-z0-9]+", str(key or "").lower()):

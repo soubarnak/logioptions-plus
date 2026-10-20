@@ -238,12 +238,12 @@ Findings 3–6. All three panels are **profile assignments** on the slots listed
 
 ### 4.2 Routes and device writes
 
-| UI action | Route (observe exact path with the card seeded) | Payload | HID++ |
+| UI action | Route (observed in the real UI's traffic) | Payload | HID++ |
 |---|---|---|---|
-| pointer speed slider | `SET /v2/profiles/slice` with the `_mouse_settings` assignment (`mouse.Settings.pointer_speed.active.value` 0..1, `dpi_level`) | map 0..1 onto the `0x2201` DPI list (`200..8000 step 50` on this mouse) the way Options+ does (`Dpi.Info.Range`/`Levels` from `getSensorDpiList`) | `0x2201` fn3 `setSensorDpi`; read back fn2 and reply with the applied value |
-| SmartShift toggle/threshold | `ScrollWheelSettings.smartshift` (`is_enabled`, `sensitivity` 1..50, `mode`) and `/smartshift/<id>/params` | | `0x2110` fn1 `setRatchetControlMode` (mode 1 free-spin / 2 ratchet, threshold); `0x2111` on devices that have it |
-| hi-res / smooth scroll, direction, speed | `ScrollWheelSettings.isSmooth`, `dir`, `speed` | direction and speed are **host-side** on Windows (the agent scales events). On Linux: `0x2121` fn2 `setWheelMode` for hi-res/invert (device supports `invert`), speed via libinput is not available per-device → implement speed/direction in the uinput relay only when the wheel is diverted (phase 2), otherwise expose hi-res + invert only and grey out speed | `0x2121` fn0/fn1/fn2 |
-| thumb wheel direction/speed/smooth | `ThumbWheelSettings` | `0x2150` fn0 `getThumbwheelInfo`, fn1 `getThumbwheelStatus`, fn2 `setThumbwheelReporting` (invert, divert); speed via relay when diverted | `0x2150` |
+| pointer speed slider | `SET /v2/assignment` `{profileId, assignment:{slotId, cardId, card}}` with the `_mouse_settings` card (`mouse.Settings.pointer_speed.active.value`, `dpi_level`); the value runs -1..1 (see the fabled-corrections plan, W3) | piecewise map over the `0x2201` DPI list (`200..8000 step 50` on this mouse): 0.0 is the sensor default DPI (`getSensorDpi` default, 1000 here), -1 the minimum, 1 the maximum, each half linear and snapped to the step (the midpoint of the range when the sensor reports no default); the UI shows (value + 1) / 2 as a percentage (`Dpi.Info.Range`/`Levels` from `getSensorDpiList`) | `0x2201` fn3 `setSensorDpi`; read back fn2 and reply with the applied value |
+| SmartShift toggle/threshold | `SET /v2/assignment` with `ScrollWheelSettings.smartshift` (`is_enabled`, `sensitivity` 1..50, `mode`) and `/smartshift/<id>/params` | | `0x2110` fn1 `setRatchetControlMode` (mode 1 free-spin / 2 ratchet, threshold); `0x2111` on devices that have it |
+| hi-res / smooth scroll, direction, speed | `SET /v2/assignment` with `ScrollWheelSettings.isSmooth`, `dir` (`STANDARD` or `NATURAL` for Inverted), `speed` | direction and speed are **host-side** on Windows (the agent scales events). On Linux: `0x2121` fn2 `setWheelMode` for hi-res/invert (device supports `invert`), speed via libinput is not available per-device → implement speed/direction in the uinput relay only when the wheel is diverted (phase 2), otherwise expose hi-res + invert only and grey out speed | `0x2121` fn0/fn1/fn2 |
+| thumb wheel direction/speed/smooth | `SET /v2/assignment` with `ThumbWheelSettings` | `0x2150` fn0 `getThumbwheelInfo`, fn1 `getThumbwheelStatus`, fn2 `setThumbwheelReporting` (invert, divert); speed via relay when diverted | `0x2150` |
 
 ### 4.3 Persistence and reapply
 
@@ -580,6 +580,8 @@ hides the feature; "later" means a phase above; "no" means documented unsupporte
 | `/logivoice/*` | stub; no |
 | `/beta_testing/features`, `/get_secure_input_app_name` | stub |
 | `/macros/*`, `/rac`, `/macro_assignments/all` | later (5.1) |
+| `SET /device/restore` (RESET TO DEFAULT SETTINGS) | done: payload is the device info object (`id`, `deviceModel`, `slotPrefix`, ...); resets that device like `/v2/profiles/reset` |
+| `GET /v2/defaults/slice` | in the UI bundle, never sent in the verification runs; no action |
 | `/system/open_settings` | open the desktop's mouse settings (`gnome-control-center mouse`, `systemsettings kcm_mouse`, else nothing) |
 | `/mouse/global/swap` | later (5.2) |
 

@@ -23,7 +23,7 @@ def settings(asg):
 
 
 def put(client, **fields):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE,
         "assignment": {"slotId": SLOT, "card": {

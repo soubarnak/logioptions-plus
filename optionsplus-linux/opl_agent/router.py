@@ -4,7 +4,7 @@ Resolution order for a GET/SET:
   1. exact static boot route (responses.BOOT / responses.ERRORS / SET echo)
   2. device-scoped route (/devices, /battery, ...) resolved against the live
      Registry
-  3. unknown SET: SUCCESS (UI sagas do not catch SET failures)
+  3. unknown SET: NOT_SUPPORTED (SETs the boot sagas send without catching are in stubs.py)
   4. otherwise NO_SUCH_PATH, which the UI treats as "feature absent" and skips.
 
 SUBSCRIBE/UNSUBSCRIBE are handled by the IPC Server itself; this router only
@@ -156,10 +156,13 @@ class Router:
         if verb == "SET" and path == "/v2/profiles":
             return await self._profiles_update(payload or {})
 
-        if verb == "SET" and path.startswith("/v2/profiles/"):
+        if verb == "SET" and (path == "/v2/assignment" or path.startswith("/v2/profiles/")):
             r = await self._profiles_set(path, payload)
             if r is not None:
                 return r
+
+        if verb == "SET" and path == "/device/restore":
+            return await self._device_restore(payload)
 
         parts = path.strip("/").split("/")
         if verb in ("GET", "SET") and parts[0] == "mouse" and parts[-1] == "swap" \
@@ -186,6 +189,10 @@ class Router:
                 if code != "SUCCESS":
                     return code, None, "channel must be stable"
             return "SUCCESS", self.updater.channel(), ""
+        if path == "/dfu/config/update" and verb in ("GET", "SET"):
+            if verb == "SET" and self.updater.set_dfu_config(payload) != "SUCCESS":
+                return "INVALID_ARG", None, "autoInstallEnabled must be a boolean"
+            return "SUCCESS", self.updater.dfu_config(), ""
         if verb == "SET" and path == "/updates/check_now":
             self.updater.request_check()
             return "SUCCESS", payload, ""
@@ -463,12 +470,26 @@ class Router:
             try:
                 await asyncio.get_running_loop().run_in_executor(None, self.button_swap.set, wanted)
             except swap.SwapUnsupported as exc:
+                # the UI ignores the reply text and leaves the toggle where the user put it:
+                # push the real state back and say why on the desktop
+                self._broadcast_swap()
+                self._notify("Cannot swap the mouse buttons", str(exc))
                 return "NOT_SUPPORTED", None, str(exc)
             except Exception as exc:
                 log.warning("swapping the buttons failed: %s", exc)
                 return "FAULTED", None, "could not swap the buttons: %s" % exc
         return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
                            "state": self.button_swap.state}, ""
+
+    def _broadcast_swap(self):
+        if self.server is not None:
+            self.server.broadcast("/mouse/global/swap", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
+                                                         "state": self.button_swap.state})
+
+    def _notify(self, summary, body):
+        """A desktop notification, when notify-send is installed; never an error."""
+        if self.runner.which("notify-send"):
+            self.runner.run(["notify-send", "--app-name=Options+", summary, body])
 
     async def _app_for(self, profile_id):
         """The installed application a non-default profile id is for, else "" (a stale or made-up id)."""
@@ -546,11 +567,13 @@ class Router:
             else:
                 dev = self._thumb_device_for_slot(slot_id) if app is None else None
                 if dev is None:
-                    target = self._button_target(slot_id) if requested else None
+                    target = self._button_target(slot_id)
                     if target is None and app is not None and requested:
                         return "NOT_SUPPORTED", None, "only button assignments can differ per application"
                     if target is None:
-                        continue
+                        return await self._profiles_failed(handled, "INVALID_ARG", "no such slot %s" % slot_id)
+                    if not requested:
+                        return await self._profiles_failed(handled, "INVALID_ARG", "no card")
                     try:
                         await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
                     except input_engine.Unsupported as exc:
@@ -578,7 +601,9 @@ class Router:
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
         if handled is None:
-            return None
+            if not entries:
+                return None
+            return "INVALID_ARG", None, "nothing to apply"
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
 
@@ -608,10 +633,11 @@ class Router:
                             if a["slotId"] == slot_id), None)
             active = self.engine.active_app
             in_force = (app == active) if app is not None else slot_id not in self.store.app_cards(active)
+            native = card.get("id") == default and not profiles.needs_software(card)
             if not in_force:
-                if card.get("id") != default:
+                if not native:
                     self.engine.validate(dev, cid, card)
-            elif card.get("id") == default:
+            elif native:
                 self.engine.release(dev, cid)
             else:
                 self.engine.assign(dev, cid, card)
@@ -665,6 +691,21 @@ class Router:
                 self.relay.probe(dev)
             else:
                 self.apply_stored(dev.id)
+
+    async def _device_restore(self, info):
+        """SET /device/restore (RESET TO DEFAULT SETTINGS): the payload is the device info object."""
+        info = info if isinstance(info, dict) else {}
+        dev_id = info.get("id") or info.get("deviceId")
+        if dev_id not in self.reg.devices:
+            return "INVALID_DEVICE", None, "unknown device id"
+        code, _, what = await self._profiles_reset({"deviceId": dev_id})
+        if code != "SUCCESS":
+            return code, None, what
+        if self.server is not None:
+            for path, state in self.initial_state("/devices/state/changed"):
+                if state.get("id") == dev_id:
+                    self.server.broadcast(path, state)
+        return "SUCCESS", info, ""
 
     async def _profiles_reset(self, info):
         loop = asyncio.get_running_loop()
@@ -773,6 +814,9 @@ class Router:
             self.relay.release(dev, reset=True)
         except Exception as exc:
             log.warning("handing the wheels back failed: %s", exc)
+        if dev.scroll_caps["highResolution"]:
+            # only a mouse with the hi-res wheel (0x2121) has these bits to clear
+            self.reg.divert_wheel(dev.id, None, invert=False, hires=False)    # the relay only writes a wheel it holds
         if dev.thumb_wheel:
             self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)
@@ -912,6 +956,15 @@ class Router:
             return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info",
                                "requireFwUpdate": False, "dfuResult": "SUCCESS",
                                "eligibleVersion": model.format_firmware(dev.fw)}, ""
+
+        # SET /dfu/<id>/check (CHECK FOR UPDATE): there is never a firmware update to offer
+        if verb == "SET" and parts[0] == "dfu" and len(parts) == 3 and parts[2] == "check":
+            if parts[1] not in reg.devices:
+                return "INVALID_DEVICE", None, "unknown device id"
+            if self.server is not None:
+                self.server.broadcast("/dfu/update/available",
+                                      {"@type": TYPE + "google.protobuf.BoolValue", "value": False})
+            return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info"}, ""
 
         # /battery/<id>/state
         if parts[0] == "battery" and len(parts) >= 3 and parts[2] == "state":

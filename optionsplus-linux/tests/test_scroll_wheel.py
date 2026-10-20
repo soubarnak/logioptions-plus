@@ -34,7 +34,7 @@ def current(client):
 
 def change(client, **fields):
     """Set the wheel settings the way the panel does: a partial ScrollWheelSettings."""
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE,
         "assignment": {"slotId": SLOT, "card": {
@@ -56,7 +56,7 @@ def test_scroll_slot_is_seeded_from_live_reads(client):
     assert w["smartshift"]["isEnabled"] is True          # 0x2110 mode 2 = ratchet with auto-disengage
     assert w["smartshift"]["sensitivity"] == 30          # 0x2110 threshold
     assert w["isSmooth"] is True                         # 0x2121: kernel left high resolution on
-    assert w["dir"] == "NORMAL"
+    assert w["dir"] == "STANDARD"
 
 
 def test_kernel_set_wheel_state_is_shown_not_assumed(bolt, agent_factory):
@@ -66,7 +66,7 @@ def test_kernel_set_wheel_state_is_shown_not_assumed(bolt, agent_factory):
     try:
         w = current(client)
         assert w["isSmooth"] is False
-        assert w["dir"] == "INVERTED"
+        assert w["dir"] == "NATURAL"
         assert w["smartshift"]["isEnabled"] is False
         assert w["smartshift"]["sensitivity"] == 12
     finally:
@@ -142,22 +142,22 @@ def test_hires_off_clears_only_the_resolution_bit(client, bolt):
 
 
 def test_invert_sets_the_invert_bit_and_keeps_hires(client, bolt):
-    reply = change(client, dir="INVERTED")
+    reply = change(client, dir="NATURAL")
     assert bolt.mouse.wheel_mode == HIRES_BIT | INVERT_BIT
-    assert wheel(reply["payload"]["assignment"])["dir"] == "INVERTED"
-    change(client, dir="NORMAL")
+    assert wheel(reply["payload"]["assignment"])["dir"] == "NATURAL"
+    change(client, dir="STANDARD")
     assert bolt.mouse.wheel_mode == HIRES_BIT
 
 
 def test_failed_wheel_write_is_a_failure_and_not_persisted(client, bolt):
     bolt.mouse.fail_wheel_write = True
-    reply = change(client, dir="INVERTED")
+    reply = change(client, dir="NATURAL")
     assert reply["result"]["code"] != "SUCCESS"
-    assert current(client)["dir"] == "NORMAL"
+    assert current(client)["dir"] == "STANDARD"
 
 
 def test_a_change_to_one_setting_leaves_the_others_as_the_mouse_has_them(client, bolt):
-    change(client, dir="INVERTED")
+    change(client, dir="NATURAL")
     bolt.mouse.smartshift.update(mode=FREESPIN, threshold=7)   # changed behind our back
     change(client, isSmooth=False)
     assert bolt.mouse.smartshift == {"mode": FREESPIN, "threshold": 7, "torque": 0}
@@ -169,7 +169,7 @@ def test_a_change_to_one_setting_leaves_the_others_as_the_mouse_has_them(client,
 def test_settings_persist_across_agent_restart_and_reapply_at_discovery(agent_factory, bolt):
     first = agent_factory()
     c = first.client()
-    change(c, smartshift={"isEnabled": False, "sensitivity": 20}, dir="INVERTED", isSmooth=False)
+    change(c, smartshift={"isEnabled": False, "sensitivity": 20}, dir="NATURAL", isSmooth=False)
     c.close()
     first.stop()
     bolt.mouse.smartshift.update(mode=RATCHET, threshold=30)    # mouse forgot, e.g. power cycled
@@ -178,7 +178,7 @@ def test_settings_persist_across_agent_restart_and_reapply_at_discovery(agent_fa
     try:
         w = current(c2)
         assert (w["smartshift"]["isEnabled"], w["smartshift"]["sensitivity"]) == (False, 20)
-        assert (w["dir"], w["isSmooth"]) == ("INVERTED", False)
+        assert (w["dir"], w["isSmooth"]) == ("NATURAL", False)
         assert bolt.mouse.smartshift["mode"] == FREESPIN and bolt.mouse.smartshift["threshold"] == 20
         assert bolt.mouse.wheel_mode == INVERT_BIT
     finally:
@@ -193,14 +193,14 @@ def test_settings_are_reapplied_when_a_device_is_rediscovered(agent, client, bol
 
 
 def test_reset_to_default_forgets_the_stored_scroll_settings(client, bolt):
-    change(client, smartshift={"isEnabled": False}, dir="INVERTED")
+    change(client, smartshift={"isEnabled": False}, dir="NATURAL")
     reply = client.call("SET", "/v2/profiles/reset", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileResetInfo", "profileId": DEFAULT_PROFILE})
     assert reply["result"]["code"] == "SUCCESS"
     bolt.mouse.smartshift["mode"] = RATCHET
     bolt.mouse.wheel_mode = HIRES_BIT
     w = current(client)                                         # shown from the mouse again
-    assert w["smartshift"]["isEnabled"] is True and w["dir"] == "NORMAL"
+    assert w["smartshift"]["isEnabled"] is True and w["dir"] == "STANDARD"
 
 
 def test_second_subscribed_client_receives_profiles_update(agent, client):
@@ -216,5 +216,22 @@ def test_second_subscribed_client_receives_profiles_update(agent, client):
 
 
 def test_pointer_speed_is_unaffected_by_wheel_changes(client, bolt):
-    change(client, dir="INVERTED")
+    change(client, dir="NATURAL")
     assert bolt.mouse.dpi == 1000
+
+
+def test_an_old_stored_dir_spelling_is_still_understood(client, bolt):
+    change(client, dir="INVERTED")
+    assert bolt.mouse.wheel_mode & INVERT_BIT
+    change(client, dir="NORMAL")
+    assert not bolt.mouse.wheel_mode & INVERT_BIT
+    assert current(client)["dir"] == "STANDARD"
+
+
+def test_reset_clears_the_wheel_bits_the_mouse_holds_even_when_the_wheel_is_not_diverted(client, bolt):
+    bolt.mouse.wheel_mode = HIRES_BIT | INVERT_BIT           # not diverted: nothing of ours holds the wheel
+    reply = client.call("SET", "/v2/profiles/reset", {
+        "@type": TYPE + "logi.protocol.profiles_v2.ProfileResetInfo", "profileId": DEFAULT_PROFILE})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.wheel_mode & (HIRES_BIT | INVERT_BIT) == 0
+    assert bolt.mouse.wheel_mode & 0x01 == 0                  # and the wheel is not diverted

@@ -17,7 +17,7 @@ def test_event_reapplies_stored_settings(client, bolt, feature):
     slider(client, 0.5)
     bolt.mouse.dpi = 1000                      # mouse slept and woke at its own value
     bolt.emit_event(feature)
-    assert wait_for(lambda: bolt.mouse.dpi == 4100)
+    assert wait_for(lambda: bolt.mouse.dpi == 4500)
 
 
 def test_wake_refreshes_battery_and_broadcasts_it(client, bolt):

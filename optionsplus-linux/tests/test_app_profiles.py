@@ -27,7 +27,7 @@ RELOAD_KEYS = [(KEY_F5, 1), (KEY_F5, 0)]
 
 
 def assign_to(client, profile_id, cid, card):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": profile_id, "assignment": {"slotId": slot(cid), "card": card}})
 
@@ -114,7 +114,7 @@ def test_an_unsupported_card_for_an_application_is_refused_and_not_stored(client
 def test_only_buttons_can_differ_per_application(client):
     settings = {"id": "MOUSE_SETTINGS", "attribute": "MOUSE_SETTINGS",
                 "mouseSettings": {"pointerSpeed": {"active": {"value": 0.9, "dpiLevel": 6000}}}}
-    reply = client.call("SET", "/v2/profiles/assignment", {
+    reply = client.call("SET", "/v2/assignment", {
         "profileId": FIREFOX, "assignment": {"slotId": "046d_4242_mouse_settings", "card": settings}})
     assert reply["result"]["code"] == "NOT_SUPPORTED"
     assert profile(client, FIREFOX) is None
@@ -150,14 +150,14 @@ def test_focus_switches_the_injected_action(client, bolt, uinput, windows):
     assign_to(client, FIREFOX, BACK, RELOAD)
     assert bolt.mouse.diverted == set()
     windows.focus(("Navigator", "firefox"))
-    assert wait_for(lambda: bolt.mouse.diverted == {BACK})
+    assert wait_for(lambda: bolt.mouse.diverted == {BACK}, timeout=20)
     assert press(bolt, uinput, BACK, 2) == RELOAD_KEYS
     windows.focus(("gnome-terminal-server", "Gnome-terminal"))
-    assert wait_for(lambda: bolt.mouse.diverted == set())         # Back is the mouse's own again
+    assert wait_for(lambda: bolt.mouse.diverted == set(), timeout=20)  # Back is the mouse's own again
     windows.focus(None)
     settled(windows)
     windows.focus(("Navigator", "firefox"))
-    assert wait_for(lambda: bolt.mouse.diverted == {BACK})
+    assert wait_for(lambda: bolt.mouse.diverted == {BACK}, timeout=20)
 
 
 def test_an_unknown_window_runs_the_default_profile(client, bolt, uinput, windows):

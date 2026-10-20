@@ -25,6 +25,14 @@ from .defaults import fill
 
 log = logging.getLogger("opl.ipc")
 
+
+def _clip(payload):
+    """A payload for the debug log: 400 bytes, or all of it when OPL_IPC_LOG_FULL=1."""
+    if not payload:
+        return ""
+    text = json.dumps(payload)
+    return text if os.environ.get("OPL_IPC_LOG_FULL") == "1" else text[:400]
+
 PROTO = b"json"
 PROTO_PB = b"protobuf"
 
@@ -149,7 +157,7 @@ class Server:
     async def dispatch(self, conn, msg):
         verb = msg.get("verb")
         path = msg.get("path", "")
-        log.debug("<- %s %s %s", verb, path, json.dumps(msg.get("payload"))[:400] if msg.get("payload") else "")
+        log.debug("<- %s %s %s", verb, path, _clip(msg.get("payload")))
         if verb == "SUBSCRIBE":
             conn.subscriptions.add(path)
             reply = self._reply(msg, "SUCCESS")
@@ -174,7 +182,7 @@ class Server:
                 code, payload, what = "EXCEPTION", None, str(exc)
             reply = self._reply(msg, code, payload, what)
         log.debug("-> %s %s %s %s", reply["verb"], path, reply["result"]["code"],
-                  json.dumps(reply.get("payload"))[:400] if reply.get("payload") else "")
+                  _clip(reply.get("payload")))
         conn.send(reply)
 
     @staticmethod
