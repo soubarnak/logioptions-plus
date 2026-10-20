@@ -57,6 +57,7 @@ F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
+F_REPROG_CONTROLS = 0x1B04     # reprogrammable controls v4: divert buttons to software
 F_RECEIVER_PAIRING = 0x1817     # Bolt receiver pairing (open lock, passkey, status events)
 F_CHANGE_HOST = 0x1814
 F_HOSTS_INFO = 0x1815
@@ -763,6 +764,52 @@ def set_thumbwheel(fd, idx, invert, smooth, mode=THUMB_NATIVE):
     """fn2 setThumbwheelReporting(mode, invert, smooth) -> status read back."""
     _fcall(fd, idx, F_THUMB_WHEEL, 2, bytes([mode, 1 if invert else 0, 1 if smooth else 0]))
     return get_thumbwheel(fd, idx)
+
+
+# --------------------------------------------------------------------------
+# Reprogrammable controls v4 (0x1b04)
+# --------------------------------------------------------------------------
+
+CTRL_REPROGRAMMABLE, CTRL_DIVERTABLE = 0x10, 0x20      # control info flags1
+REPORT_DIVERT = 0x01            # setCidReporting flags: the divert value; the change bit is value << 1
+
+
+def get_controls(fd, idx):
+    """fn0 getControlCount, fn1 getControlInfo(i) -> {cid: {"reprogrammable", "divertable"}}."""
+    count = _fcall(fd, idx, F_REPROG_CONTROLS, 0)[0]
+    out = {}
+    for i in range(count):
+        p = _fcall(fd, idx, F_REPROG_CONTROLS, 1, bytes([i]))
+        cid, flags = struct.unpack(">H", p[:2])[0], p[4]
+        out[cid] = {"reprogrammable": bool(flags & CTRL_REPROGRAMMABLE),
+                    "divertable": bool(flags & CTRL_DIVERTABLE)}
+    return out
+
+
+def get_cid_diverted(fd, idx, cid):
+    """fn2 getCidReporting(cid) -> True while the control is diverted to software."""
+    p = _fcall(fd, idx, F_REPROG_CONTROLS, 2, struct.pack(">H", cid))
+    return bool(p[2] & REPORT_DIVERT)
+
+
+def set_cid_diverted(fd, idx, cid, divert):
+    """fn3 setCidReporting(cid, flags, remap): divert the control or hand it back. The device
+    state is read back; raises HidppError when it did not take."""
+    flags = (REPORT_DIVERT << 1) | (REPORT_DIVERT if divert else 0)
+    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, 0))
+    if get_cid_diverted(fd, idx, cid) != bool(divert):
+        raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request
+
+
+def parse_diverted_buttons(params):
+    """Event 0 params -> the control ids held down (up to four, big-endian words, 0 ends the list)."""
+    out = []
+    for i in range(0, min(len(params), 8) - 1, 2):
+        cid = (params[i] << 8) | params[i + 1]
+        if not cid:
+            break
+        out.append(cid)
+    return out
 
 
 # --------------------------------------------------------------------------

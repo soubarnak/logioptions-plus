@@ -17,8 +17,21 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150, 0x1814, 0x1815]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150, 0x1814, 0x1815, 0x1B04]
 F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
+F_REPROG = 0x1B04
+
+# 0x1b04 reprogrammable controls: (cid, task id, flags1, position, group, group mask, flags2).
+# flags1 bits: 0x01 mouse, 0x10 reprogrammable, 0x20 divertable. Invented table.
+CONTROLS = [
+    (80, 80, 0x01, 1, 1, 1, 0),                 # left button: fixed
+    (81, 81, 0x01, 2, 1, 1, 0),                 # right button: fixed
+    (82, 82, 0x31, 3, 2, 2, 0),                 # back
+    (83, 83, 0x31, 4, 2, 2, 0),                 # forward
+    (86, 86, 0x31, 5, 2, 2, 0),                 # middle
+    (195, 195, 0x31, 6, 3, 4, 0x01),            # gesture button
+]
+DIVERT = 0x01                                   # setCidReporting flags: divert; the change bit is DIVERT << 1
 
 # the receiver's own feature table (device index 0xFF)
 RECEIVER_FEATURES = [0x0000, 0x1817]
@@ -59,6 +72,11 @@ class SimulatedMouse:
         self.max_host_name = 32
         self.fail_host_switch = False               # answer setCurrentHost with an error
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
+        # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
+        self.diverted = set()
+        self.held = []
+        self.fail_divert_write = False              # answer setCidReporting with an error
+        self.ignore_divert = False                  # accept setCidReporting but change nothing
         self.wpid = wpid                            # hardware identity behind the receiver
         self.powered = True
 
@@ -150,6 +168,25 @@ class SimulatedMouse:
                     return 5                          # ERR_BUSY
                 t.update(mode=params[0], invert=params[1] & 1, smooth=params[2] & 1)
                 return bytes([t["mode"], t["invert"], t["smooth"]])
+        elif fid == F_REPROG:
+            if fn == 0:
+                return bytes([len(CONTROLS)])
+            if fn == 1:
+                return struct.pack(">HHBBBBB", *CONTROLS[params[0]]) if params[0] < len(CONTROLS) else 2
+            cid = struct.unpack(">H", params[:2])[0]
+            if cid not in [c[0] for c in CONTROLS]:
+                return 2
+            if fn == 2:                               # getCidReporting: cid, flags, remapped cid, flags2
+                return struct.pack(">HBHB", cid, DIVERT if cid in self.diverted else 0, cid, 0)
+            if fn == 3:                               # setCidReporting: cid, flags, remap cid
+                if self.fail_divert_write:
+                    return 5
+                if params[2] & (DIVERT << 1):
+                    if not next(c for c in CONTROLS if c[0] == cid)[2] & 0x20:
+                        return 2                      # not divertable
+                    if not self.ignore_divert:
+                        (self.diverted.add if params[2] & DIVERT else self.diverted.discard)(cid)
+                return bytes(params[:5])
         elif fid == 0x1814:
             if fn == 0:                               # getHostInfo: host count, current host
                 return bytes([len(self.hosts), self.current_host])
@@ -263,6 +300,22 @@ class SimulatedBolt:
         """Queue an unsolicited feature event (software id 0) from the mouse."""
         head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
         self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def press_button(self, cid, index=MOUSE_INDEX):
+        """The user presses a button; a diverted one is reported to software."""
+        mouse = self.mice[index]
+        mouse.held.append(cid)
+        self._button_event(mouse, index)
+
+    def release_button(self, cid, index=MOUSE_INDEX):
+        mouse = self.mice[index]
+        mouse.held.remove(cid)
+        self._button_event(mouse, index)
+
+    def _button_event(self, mouse, index):
+        if any(c in mouse.diverted for c in mouse.held) or not mouse.held:
+            held = [c for c in mouse.held if c in mouse.diverted]
+            self.emit_event(F_REPROG, 0, b"".join(struct.pack(">H", c) for c in held), index=index)
 
     def emit_pairing_status(self, status, error=0, slot=0):
         """Queue a pairing status event from the receiver."""
