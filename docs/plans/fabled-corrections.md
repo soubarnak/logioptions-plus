@@ -336,8 +336,9 @@ checksums (tier H).
 
 Files: `hidpp.py:972-992`, `easy_switch.py:26-42`, `test_easy_switch.py:32`.
 
-- Read 0x1815 `getHostOsVersion` (function 5: `[hostIndex]` → `osType, osMajor,
-  osMinor, osBuild`); map osType 1..9 to the proto `OSInfo.type` names. The proto enum
+- Read 0x1815 `getHostOsVersion` (function 7, not 5: function 5 is `moveHost` and 6 is
+  `deleteHost`, both writes; see section 9). The reply is `[hostIndex, osType, major u8,
+  minor u16 BE, patch u16 BE]`; map osType 1..9 to the proto `OSInfo.type` names. The proto enum
   names are not in `schema_defaults.py` (only the default `UNKNOWN`); the strings file
   gives the UI keys `OS_WINDOWS`, `OS_MACOS`, `OS_LINUX`, … Start with the bare names
   (`WINDOWS`, `MACOS`, `LINUX`, `ANDROID`, `IOS`, `CHROME`, `WEBOS`, `TIZEN`,
@@ -352,7 +353,7 @@ Files: `hidpp.py:972-992`, `easy_switch.py:26-42`, `test_easy_switch.py:32`.
   `setHostOsVersion`), so the omit-when-unknown branch fires first on this machine; the
   two "xserve" hosts were paired from another OS and may carry a real type.
 
-Tests: fake mouse answers fn5 with type 5 → payload `os.type` is the chosen spelling;
+Tests: fake mouse answers function 7 with type 5 → payload `os.type` is the chosen spelling;
 type 0 → no `os` key.
 
 Live check: EASY-SWITCH tab shows "Linux" (or nothing) under each host instead of
@@ -372,6 +373,10 @@ Files: `model.py:134`, `test_socket.py:105`, `test_bluetooth_direct.py:96`.
 Live check: SETTINGS tab shows "Firmware version RBM 22.01.B0006".
 
 Verdict: will work (proto field is a string, tier B; the formatter exists).
+
+Correction (section 9): the string alone was not enough. The SETTINGS page reads the
+version from `activeInterfaces[]` (the entry of type `DEVIO`), not from the top-level
+`firmwareVersion`, so the agent also sends one `DEVIO` interface carrying the string.
 
 ### W9. DFU routes
 
@@ -509,3 +514,25 @@ Session scratchpad `verify/`: `run1/agent.log` (first run, no device depot),
 full payloads), `baseline.txt`, screenshots `12-device.png` … `31-after-reset.png`,
 `offx/offline.json` (installer manifest, build 876310), `plan/routes-in.txt`,
 `plan/routes-reply.txt`, `plan/set-payloads.txt`, `plan/bundle-facts.txt`.
+
+## 9. Corrections found during implementation
+
+- W7: 0x1815 `getHostOsVersion` is function 7. The plan said function 5, which is
+  `moveHost` (a write); function 6 is `deleteHost`. The function table, from the
+  Logitech agent strings and OpenLogi PR #1824: 0 getFeatureInfos, 1 getHostInfo,
+  2 getHostDescriptor, 3 getHostFriendlyName, 4 setHostFriendlyName, 5 moveHost,
+  6 deleteHost, 7 getHostOsVersion, 8 setHostOsVersion. A test asserts the agent never
+  sends functions 5, 6 or 8, and never writes 0x1814.
+- W7: the OS type order is 0 UNKNOWN, 1 WINDOWS, 2 WINDOWS_EMBEDDED, 3 LINUX, 4 CHROME,
+  5 ANDROID, 6 MACOS, 7 IOS, 8 WEBOS, 9 TIZEN. The test MX Master 3S reports 0 for all
+  three hosts, so the live UI shows the bus type line only.
+- W6: the install states are the proto values `COMPLETED` and `INVALID`, not
+  `INSTALLED` / `NOT_INSTALLED`.
+- W8: the SETTINGS page reads the firmware string from the `DEVIO` entry of
+  `activeInterfaces`, not from `Device.Info.firmwareVersion`.
+- W9: the UI clears "Checking for updates..." only when `/dfu/update/available`
+  broadcasts a `devices.Device.Info` with the device `id`, its `state` and `fwUpdate`.
+  A `BoolValue` broadcast leaves the spinner on.
+- Profiles: the UI's UPDATE_PROFILES reducer applies `payload.updatedProfiles`
+  (`profiles_v2.Update`) and ignores a `profiles` list. Broadcasting `{profiles}` made
+  the hotspot labels lag one change behind.

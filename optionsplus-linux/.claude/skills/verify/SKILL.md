@@ -50,3 +50,16 @@ OPL_ASAR=... OPL_DATA_DIR=... OPL_DEPOT_DIR=... OPL_SHOT=/some/dir/shot.png dev/
 - `OPL_UI_LOGGING=1` is set by `live.sh`, so App Settings shows "Data is being logged". This is a dev aid, not a bug.
 - A setting counts only when the `dev/verify/readback.py` output changes (or the HID++ tx shows in `agent.log`). A UI change that "sticks" proves nothing: the UI keeps its own state.
 - Do not click LOGIN/CREATE ACCOUNT or Bluetooth pairing. Both leave the local machine.
+- Save the mouse state before any write and restore it after:
+  `python3 dev/verify/readback.py --save base.json`, then `--restore base.json`.
+  Without an argument it prints DPI, wheel and thumb settings and the diverted controls.
+- `live.sh` sets `OPL_IPC_LOG_FULL=1`, so `agent.log` holds whole payloads. Without it,
+  payloads are clipped at 400 bytes.
+- The UI bundle is obfuscated. The string decoder `a0_0x1ad2` is global in the renderer.
+  Get webpack's require with
+  `webpackChunklogioptionsplus.push([[Symbol()],{},r=>{req=r}])`, then read a module
+  with `req.m[id].toString()` and replace `_0x...(0x...)` calls with the decoded strings.
+- The redux store rejects shapes silently. Examples: profile broadcasts need
+  `updatedProfiles`, not `profiles`; the SETTINGS firmware string comes from
+  `activeInterfaces[type=DEVIO]`. When a value is in the store but not on screen, read
+  the component's source this way before you change the agent.

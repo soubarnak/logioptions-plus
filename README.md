@@ -273,6 +273,13 @@ disable the other tool first. (This is advice; the agent does not detect them.)
 - **Swap left/right is refused.** See [Swap left and right](#swap-left-and-right).
 - **A system action does the wrong thing.** Override it in `actions.toml`; see the defaults and
   [Known limitations](#known-limitations) for the risky ones.
+- **CHECK FOR UPDATE always says the firmware is current.** This is expected: the agent never
+  offers a mouse firmware update. The SETTINGS tab shows the version the mouse reports.
+- **The device page stays on CONFIGURING.** The device's depot is missing from the Logitech data.
+  Run the first-launch download again; `agent.log` names the depot it looked for.
+- **A setting looks applied in the UI but the mouse ignores it.** Run the agent with
+  `OPL_LOG_LEVEL=DEBUG` and look for the HID++ `tx` lines after the change. If there are none,
+  report it with the matching `<- SET` line from `agent.log`.
 - **Receiver firmware.** The app does not update firmware. Bolt and Unifying receivers are
   covered by fwupd and LVFS: `fwupdmgr get-devices` and `fwupdmgr update`. Mouse firmware cannot
   be updated on Linux with this project.

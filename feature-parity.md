@@ -53,6 +53,33 @@ Conventions used below:
 Robustness already verified: the agent survives malformed frames, unknown verbs, bad
 device ids and wrong payload types, and keeps accepting connections.
 
+### 0.1 Live check after the fabled-corrections branch (2026-10-20)
+
+The real Options+ 2.8.981479 UI was driven against the agent, with an MX Master 3S on a Bolt
+receiver. Every write was read back from the mouse with `dev/verify/readback.py`. The mouse
+was restored to its saved state afterwards.
+
+| Feature | Result |
+|---|---|
+| Home card, device page, no CONFIGURING (depots from the real installer) | works |
+| Pointer speed | 50% on a factory mouse; 27% sets 650 DPI; reapplied on relaunch |
+| Scroll direction, thumb wheel direction | the mouse invert bit follows every click; the hotspot label changes on the same click |
+| Action picker | populated (recommended actions and SMART ACTIONS); Volume up diverts 0x56, Forward undiverts it; the label updates at once |
+| Gesture button default | CID 0xc3 diverted with rawXY while the agent runs |
+| Easy-Switch tab | three hosts with their bus type; the mouse reports OS type 0, so no OS line |
+| SETTINGS firmware | "Firmware version RBM 22.01.B0006"; CHECK FOR UPDATE ends on "You have the latest version!" |
+| Swap left/right on Wayland without device support | refused; the toggle returns to off; the agent calls `notify-send` (the notification itself was not watched) |
+| RESET TO DEFAULT SETTINGS | success dialog; the mouse is back to 1000 DPI with both wheels standard; `profiles.json` is empty; the panels show the defaults |
+
+Not checked live: injected key presses from a physical button press and gesture swipes (they
+need a person at the mouse), and the `/updates/depot/info` request for
+`3982d17b-2683-4037-9b3f-6830691736bb`. That id is hard-coded in the UI and is not one of
+the three depots, so the agent answers `INVALID`.
+
+The profile broadcast `/v2/profiles/update` carries `profiles_v2.Update` with
+`updatedProfiles` (and `removedProfileIds` after a removal). The UI ignores a `profiles` list
+there, which made the labels lag one change behind.
+
 ---
 
 ## 1. Constraints that shape every phase
