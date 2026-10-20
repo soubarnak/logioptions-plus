@@ -55,6 +55,7 @@ F_UNIFIED_BATTERY = 0x1004
 F_ADJUSTABLE_DPI = 0x2201
 F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
+F_HIRES_WHEEL = 0x2121
 
 DEVICE_TYPES = [
     "keyboard", "remote control", "numpad", "mouse", "trackpad", "trackball",
@@ -699,6 +700,38 @@ def set_smartshift(fd, idx, mode=None, threshold=None, torque=None):
     else:
         _fcall(fd, idx, F_SMART_SHIFT, 1, params)
     return get_smartshift(fd, idx)
+
+
+# --------------------------------------------------------------------------
+# High resolution wheel (0x2121)
+# --------------------------------------------------------------------------
+
+WHEEL_MODE_TARGET = 0x01        # 1: wheel events go to HID++ (diverted), 0: HID
+WHEEL_MODE_HIRES = 0x02
+WHEEL_MODE_INVERT = 0x04
+WHEEL_CAP_INVERT = 0x08
+
+
+def get_wheel(fd, idx):
+    """fn0 getWheelCapability, fn1 getWheelMode
+    -> {multiplier, can_invert, target, hires, invert, mode}."""
+    cap = _fcall(fd, idx, F_HIRES_WHEEL, 0)
+    mode = _fcall(fd, idx, F_HIRES_WHEEL, 1)[0]
+    return {"multiplier": cap[0], "can_invert": bool(cap[1] & WHEEL_CAP_INVERT), "mode": mode,
+            "target": bool(mode & WHEEL_MODE_TARGET), "hires": bool(mode & WHEEL_MODE_HIRES),
+            "invert": bool(mode & WHEEL_MODE_INVERT)}
+
+
+def set_wheel(fd, idx, hires=None, invert=None):
+    """fn2 setWheelMode. Starts from the mode the device reports, so bits the
+    kernel driver set (including the diversion target) survive. Returns the
+    state read back."""
+    mode = get_wheel(fd, idx)["mode"]
+    for flag, want in ((WHEEL_MODE_HIRES, hires), (WHEEL_MODE_INVERT, invert)):
+        if want is not None:
+            mode = (mode | flag) if want else (mode & ~flag)
+    _fcall(fd, idx, F_HIRES_WHEEL, 2, bytes([mode]))
+    return get_wheel(fd, idx)
 
 
 # --------------------------------------------------------------------------
