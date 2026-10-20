@@ -93,7 +93,7 @@ def test_device_list_battery_and_firmware_over_long_reports(ble_client):
     info = ble_client.call("GET", "/devices/list")["payload"]["deviceInfos"][0]
     assert info["batteryDischargeLevel"] == 73
     assert info["capabilities"]["battery"]["stateOfCharge"] is True
-    assert info["firmwareVersion"]
+    assert isinstance(info["firmwareVersion"], str) and info["firmwareVersion"]
 
 
 def test_dpi_write_and_read_back_over_long_reports(ble, ble_client):

@@ -131,7 +131,7 @@ class Device:
             "modelId": self.model_id,
             "udid": self.serial,
             "deviceSerialNumber": self.serial,
-            "firmwareVersion": self.fw,
+            "firmwareVersion": format_firmware(self.fw),
             "resourcesAvailable": resources.depot_installed(self.depot),
             "fetchResource": False,
             "firstConnectedTimestamp": str(self.first_connected),

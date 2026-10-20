@@ -102,7 +102,7 @@ def test_device_info_route_reports_battery_and_firmware(client):
     info = reply["payload"]
     assert reply["result"]["code"] == "SUCCESS"
     assert info["id"] == "dev00000000"
-    assert info["firmwareVersion"] == [{"type": 0, "name": "RBM", "version": "12.34", "build": 0x567}]
+    assert info["firmwareVersion"] == "RBM 12.34.B0567"
     assert info["batteryStatus"] == {"stateOfCharge": 73, "chargingStatus": "DISCHARGING"}
 
 
