@@ -14,6 +14,7 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -239,11 +240,37 @@ class Agent:
         self.router.engine.close()
 
 
+LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+
+
+def log_file_path(environ=None):
+    env = os.environ if environ is None else environ
+    base = env.get("XDG_STATE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"),
+                                                     ".local", "state")
+    return os.path.join(base, "optionsplus-linux", "agent.log")
+
+
+def setup_logging(environ=None):
+    """Log to stderr and to a rotating agent.log in the user's state directory (so an
+    autostarted agent, which no launcher redirects, still leaves a log). Returns the file
+    path, or None when it cannot be written; the agent runs either way."""
+    env = os.environ if environ is None else environ
+    logging.basicConfig(level=env.get("OPL_LOG_LEVEL", "INFO"), format=LOG_FORMAT)
+    path = log_file_path(env)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3,
+                                                       encoding="utf-8")
+    except OSError as exc:
+        log.warning("cannot write %s: %s", path, exc)
+        return None
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+    return path
+
+
 async def main():
-    logging.basicConfig(
-        level=os.environ.get("OPL_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    setup_logging()
     if socket_alive(socket_path()):
         log.info("agent already running on %s; exiting", socket_path())
         return

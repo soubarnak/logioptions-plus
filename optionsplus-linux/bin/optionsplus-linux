@@ -60,10 +60,11 @@ export OPL_ASAR=${OPL_ASAR:-$PAYLOAD/app.asar}
 export OPL_DATA_DIR=${OPL_DATA_DIR:-$PAYLOAD/depots/logioptionsplus/data}
 export OPL_DEPOT_DIR=${OPL_DEPOT_DIR:-$PAYLOAD/depots}
 
+# The agent writes its own agent.log; this only catches what it prints before logging starts.
 if ! "$AGENT" --is-running; then
     LOGDIR=${XDG_STATE_HOME:-$HOME/.local/state}/optionsplus-linux
     mkdir -p "$LOGDIR"
-    setsid "$AGENT" >>"$LOGDIR/agent.log" 2>&1 </dev/null &
+    setsid "$AGENT" >>"$LOGDIR/agent.stderr.log" 2>&1 </dev/null &
     i=0
     while [ $i -lt 100 ] && ! "$AGENT" --is-running; do
         sleep 0.1
