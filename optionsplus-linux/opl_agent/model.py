@@ -1077,6 +1077,17 @@ class Registry:
         return {"stateOfCharge": int(b.get("percent") or 0),
                 "chargingStatus": "CHARGING" if b.get("charging") else "DISCHARGING"}
 
+    def device_info(self, dev_id, typed=True):
+        """The Device.Info record of a device with its battery status; `typed` adds the @type
+        the pushes carry (the GET reply leaves it out)."""
+        info = self.devices[dev_id].info()
+        bs = self.battery_status_for_info(dev_id)
+        if bs:
+            info["batteryStatus"] = bs
+        if typed:
+            info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+        return info
+
     def dpi_range(self, dev_id):
         """Blocking read of the sensor's DPI list: {values, min, max, step, default}."""
         d = self.devices[dev_id]

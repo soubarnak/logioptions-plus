@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -102,8 +103,6 @@ def test_no_profile_push_is_scheduled_once_the_router_is_stopping(caplog, bolt):
             pass
 
     class Quiet(Router):
-        sent = 0
-
         async def _broadcast_profiles(self, removed=()):
             await asyncio.sleep(30)          # a push still in flight when the agent stops
 
@@ -126,6 +125,49 @@ def test_no_profile_push_is_scheduled_once_the_router_is_stopping(caplog, bolt):
         assert all(f.cancelled() for f in threaded)
         assert all(f.cancelled() for f in queued)
 
+        # a push that fails after the stop is not reported as a failed push
+        async def boom(removed=()):
+            raise RuntimeError("late")
+        router._broadcast_profiles = boom
+        router._stopping = False
+        router._broadcast_after_reply()
+        (late,) = router._pushes
+        router._stopping = True
+        await asyncio.sleep(0.2)
+        assert late.done() and not router._pushes
+        del late
+        import gc
+        gc.collect()
+
     with caplog.at_level(logging.WARNING):
         asyncio.run(run())
     assert "profile push failed" not in caplog.text
+    assert "never retrieved" not in caplog.text
+
+
+def test_the_dfu_check_pushes_nothing_when_the_stop_lands_before_the_push_runs(agent, client):
+    from tests.test_socket import device_id
+    router = agent.agent.router
+    loop = router.loop
+    sent = []
+    real = router.server.broadcast
+    router.server.broadcast = lambda *a, **k: sent.append(a) or real(*a, **k)
+    real_call_soon = loop.call_soon
+
+    def stop_after_scheduling(callback, *args, **kw):
+        handle = real_call_soon(callback, *args, **kw)
+        if getattr(callback, "__name__", "") == "_push_dfu_info" or args[:1] == ("/dfu/update/available",):
+            router.cancel_pushes()       # the stop arrives between scheduling and running the push
+        return handle
+
+    loop.call_soon = stop_after_scheduling
+    try:
+        reply = client.call("SET", "/dfu/%s/check" % device_id(client), {})
+        assert reply["result"]["code"] == "SUCCESS"
+        done = threading.Event()
+        loop.call_soon_threadsafe(done.set)          # a later turn of the loop: the push has had its chance
+        assert done.wait(5)
+        assert router._stopping
+        assert not [a for a in sent if a[0] == "/dfu/update/available"]
+    finally:
+        loop.call_soon = real_call_soon

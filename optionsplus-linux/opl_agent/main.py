@@ -41,12 +41,7 @@ def _battery_key(reg, dev_id):
 
 
 def _device_info(reg, dev_id):
-    info = reg.devices[dev_id].info()
-    bs = reg.battery_status_for_info(dev_id)
-    if bs:
-        info["batteryStatus"] = bs
-    info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
-    return info
+    return reg.device_info(dev_id)
 
 
 def _receiver_info(receiver):

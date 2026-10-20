@@ -321,28 +321,27 @@ def test_firmware_string_uses_the_main_application_entity_and_pads_the_build():
     assert model.format_firmware("") == ""
 
 
-def test_dfu_check_answers_success_and_pushes_no_update(client, agent):
-    other = agent.client()
-    try:
-        other.subscribe("/dfu/update/available")
-        reply = client.call("SET", "/dfu/%s/check" % device_id(client), {})
-        assert reply["result"]["code"] == "SUCCESS"
-        assert reply["payload"]["@type"] == TYPE + "logi.protocol.dfu.Info"
-        assert not reply["payload"].get("requireFwUpdate")
-        push = other.recv()
-        assert push["path"] == "/dfu/update/available"
-        # a Device.Info naming the device, the shape that clears the UI's "checking" state
-        assert push["payload"]["@type"] == TYPE + "logi.protocol.devices.Device.Info"
-        assert push["payload"]["id"] == device_id(client)
-        assert push["payload"]["state"] == "ACTIVE"
-        assert push["payload"]["fwUpdate"]["requireFwUpdate"] is False
-        # the whole record, so a UI that merges the push does not blank the device
-        assert push["payload"]["connected"] is True
-        assert push["payload"]["firmwareVersion"] == "RBM 12.34.B0567"
-        (iface,) = push["payload"]["activeInterfaces"]
-        assert iface["type"] == "DEVIO"
-    finally:
-        other.close()
+def test_dfu_check_answers_success_and_pushes_no_update(client):
+    client.subscribe("/dfu/update/available")
+    mid = client.send("SET", "/dfu/%s/check" % device_id(client), {})
+    # the reply is out before the push, so the UI has its answer when the push lands
+    reply = client.recv()
+    assert reply["msgId"] == mid and reply["result"]["code"] == "SUCCESS"
+    assert reply["payload"]["@type"] == TYPE + "logi.protocol.dfu.Info"
+    assert not reply["payload"].get("requireFwUpdate")
+    push = client.recv()
+    assert push["verb"] == "BROADCAST" and push["path"] == "/dfu/update/available"
+    # a Device.Info naming the device, the shape that clears the UI's "checking" state
+    assert push["payload"]["@type"] == TYPE + "logi.protocol.devices.Device.Info"
+    assert push["payload"]["id"] == device_id(client)
+    assert push["payload"]["state"] == "ACTIVE"
+    assert push["payload"]["fwUpdate"]["requireFwUpdate"] is False
+    # the whole record, so a UI that merges the push does not blank the device
+    assert push["payload"]["connected"] is True
+    assert push["payload"]["firmwareVersion"] == "RBM 12.34.B0567"
+    assert "batteryStatus" in push["payload"]
+    (iface,) = push["payload"]["activeInterfaces"]
+    assert iface["type"] == "DEVIO"
 
 
 def test_dfu_check_for_unknown_device_is_rejected(client):
