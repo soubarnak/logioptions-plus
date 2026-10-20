@@ -138,7 +138,7 @@ def test_second_subscribed_client_receives_profiles_update(agent, client):
         put(client, dir="NATURAL")
         push = other.recv()
         assert push["path"] == "/v2/profiles/update"
-        assert settings(assignment(push["payload"]["profiles"][0]))["dir"] == "NATURAL"
+        assert settings(assignment(push["payload"]["updatedProfiles"][0]))["dir"] == "NATURAL"
     finally:
         other.close()
 

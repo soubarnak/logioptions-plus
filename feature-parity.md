@@ -254,7 +254,7 @@ Findings 3–6. All three panels are **profile assignments** on the slots listed
 - Reapply device settings on connect, on wake (`0x1d4b` wireless status event), and on
   receiver re-plug, since Logitech mice keep DPI but drop diverts and some wheel modes on
   power cycle. Also honour `0x0020` config-change events.
-- Broadcast `/v2/profiles/update` after each change so a second UI window stays in sync.
+- Broadcast `/v2/profiles/update` after each change so a second UI window stays in sync. The payload must be a `profiles_v2.Update` (`updatedProfiles`, plus `removedProfileIds` for removals): the UI reducer ignores a `Profiles` shape (`profiles`) there. GET `/v2/profiles` still replies with `Profiles`.
 
 ### 4.4 Acceptance
 

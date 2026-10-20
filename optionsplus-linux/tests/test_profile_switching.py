@@ -51,7 +51,7 @@ def test_a_focus_switch_is_broadcast_to_the_ui(tracked, client, bolt, windows):
             if msg.get("path") == "/v2/profiles/update":
                 seen = msg
         assert seen is not None
-        active = [p for p in seen["payload"]["profiles"] if p.get("activeForApplication")]
+        active = [p for p in seen["payload"]["updatedProfiles"] if p.get("activeForApplication")]
         assert any(p["applicationId"] == FIREFOX for p in active)
     finally:
         sub.close()

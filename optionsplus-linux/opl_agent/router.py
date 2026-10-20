@@ -328,9 +328,15 @@ class Router:
             await self._scan_applications(announce=False)
         return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app, self.apps)
 
-    async def _broadcast_profiles(self):
+    async def _broadcast_profiles(self, removed=()):
+        """Push the profiles as a profiles_v2.Update, the shape the UI's UPDATE_PROFILES reducer
+        applies (a Profiles message is ignored). `removed` are profile ids the UI must drop."""
         if self.server is not None:
-            self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
+            update = {"@type": TYPE + "logi.protocol.profiles_v2.Update",
+                      "updatedProfiles": (await self._profiles_payload()).get("profiles", [])}
+            if removed:
+                update["removedProfileIds"] = list(removed)
+            self.server.broadcast("/v2/profiles/update", update)
 
     def _broadcast_after_reply(self):
         """Push the profiles once the current reply is out. The UI drops a profiles push for a
@@ -516,6 +522,7 @@ class Router:
             await self._scan_applications(announce=False)
         installed = {a.get("applicationId") for a in self.apps}
         changed = False
+        removed = []
         for prof in update.get("updatedProfiles") or []:
             pid = prof.get("id") or ""
             app = prof.get("applicationId") or pid
@@ -537,11 +544,12 @@ class Router:
             code, _, msg = await self._app_profile_reset(app, {}, unlink=pid, broadcast=False)
             if code != "SUCCESS":
                 if changed:
-                    await self._broadcast_profiles()
+                    await self._broadcast_profiles(removed)
                 return code, None, msg
+            removed.append(pid)
             changed = True
         if changed:
-            await self._broadcast_profiles()
+            await self._broadcast_profiles(removed)
         return "SUCCESS", update, ""
 
     async def _profiles_set(self, path, payload):
@@ -758,7 +766,7 @@ class Router:
         except Exception as exc:
             return "FAULTED", None, "device write failed: %s" % exc
         if broadcast:
-            await self._broadcast_profiles()
+            await self._broadcast_profiles([unlink] if unlink else ())
         return "SUCCESS", info, ""
 
     def _reset_app(self, app, devices, unlink=None):

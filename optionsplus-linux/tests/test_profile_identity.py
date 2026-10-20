@@ -69,6 +69,21 @@ def test_removing_a_profile_drops_its_buttons(client, bolt, windows):
     assert wait_for(lambda: bolt.mouse.diverted == set())
 
 
+def test_removing_a_profile_broadcasts_a_profiles_update_that_drops_its_id(tracked, client):
+    create(client, UUID, FIREFOX)
+    sub = tracked.client()
+    try:
+        sub.subscribe("/v2/profiles/update")
+        assert update(client, removedProfileIds=[UUID])["result"]["code"] == "SUCCESS"
+        msg = sub.recv()
+        assert msg["path"] == "/v2/profiles/update" and msg["verb"] == "BROADCAST"
+        assert msg["payload"]["@type"] == "type.googleapis.com/logi.protocol.profiles_v2.Update"
+        assert msg["payload"]["removedProfileIds"] == [UUID]
+        assert "updatedProfiles" in msg["payload"] and "profiles" not in msg["payload"]
+    finally:
+        sub.close()
+
+
 def test_resetting_a_profile_by_the_ui_id(client):
     create(client, UUID, FIREFOX)
     assign_to(client, UUID, BACK, RELOAD)

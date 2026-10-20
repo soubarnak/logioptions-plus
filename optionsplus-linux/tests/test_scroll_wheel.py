@@ -210,7 +210,7 @@ def test_second_subscribed_client_receives_profiles_update(agent, client):
         change(client, smartshift={"isEnabled": False})
         push = other.recv()
         assert push["path"] == "/v2/profiles/update" and push["verb"] == "BROADCAST"
-        assert wheel(assignment(push["payload"]["profiles"][0]))["smartshift"]["isEnabled"] is False
+        assert wheel(assignment(push["payload"]["updatedProfiles"][0]))["smartshift"]["isEnabled"] is False
     finally:
         other.close()
 

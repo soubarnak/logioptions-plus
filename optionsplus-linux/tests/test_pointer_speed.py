@@ -107,7 +107,7 @@ def test_second_subscribed_client_receives_profiles_update(agent, client):
         slider(client, 0.5)
         push = other.recv()
         assert push["path"] == "/v2/profiles/update" and push["verb"] == "BROADCAST"
-        assert pointer_value(_assignment(push["payload"]["profiles"][0])) == pytest.approx(0.5, abs=0.01)
+        assert pointer_value(_assignment(push["payload"]["updatedProfiles"][0])) == pytest.approx(0.5, abs=0.01)
     finally:
         other.close()
 
