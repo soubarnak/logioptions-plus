@@ -43,7 +43,7 @@ shell.openExternal = async (url, ...rest) => {
 // wrap the setter: a listener the frontend installs later runs after ours instead of
 // replacing it.
 const { BrowserWindow } = require('electron');
-let mainWindow = null;
+const { guardWebRequest, isOwnPage } = require('./guard');
 let lastNotice = 0;
 const notifyBlocked = () => {
   const now = Date.now();
@@ -55,12 +55,17 @@ const logLoad = (url, verdict) => {
   if (!process.env.OPL_LINK_LOG) return;
   try { require('fs').appendFileSync(process.env.OPL_LINK_LOG, `${url}\t${verdict}\t\n`); } catch (_) { /* best effort */ }
 };
-function blockLoad(url, contents) {
+// Only a blocked main-frame load closes the window (a blocked subframe is just cancelled),
+// and never the UI's own window: that is the one showing the app's file:// page.
+function blockLoad(url, contents, mainFrame) {
   logLoad(url, 'blocked-load');
   notifyBlocked();
+  if (!mainFrame) return;
   try {
     const win = contents && BrowserWindow.fromWebContents(contents.hostWebContents || contents);
-    if (win && win !== mainWindow && !win.isDestroyed()) setImmediate(() => { if (!win.isDestroyed()) win.close(); });
+    if (win && !win.isDestroyed() && !isOwnPage(win.webContents.getURL())) {
+      setImmediate(() => { if (!win.isDestroyed()) win.close(); });
+    }
   } catch (_) { /* the window is already gone */ }
 }
 
@@ -68,31 +73,18 @@ const guarded = new WeakSet();
 function guardSession(ses) {
   if (!ses || guarded.has(ses)) return;
   guarded.add(ses);
-  const wr = ses.webRequest;
-  const setNext = wr.onBeforeRequest.bind(wr);
-  let theirs = null;
-  const ours = (details, callback) => {
-    if ((details.resourceType === 'mainFrame' || details.resourceType === 'subFrame') && isBlockedLoad(details.url)) {
-      blockLoad(details.url, details.webContents);
-      return callback({ cancel: true });
-    }
-    return theirs ? theirs(details, callback) : callback({});
-  };
-  setNext(ours);
-  wr.onBeforeRequest = (...args) => {
-    // (filter?, listener) or (null) to clear
-    const listener = args.find((a) => typeof a === 'function');
-    theirs = listener || null;
-  };
+  guardWebRequest(ses.webRequest, {
+    isBlockedLoad,
+    onBlocked: (details) => blockLoad(details.url, details.webContents, details.resourceType === 'mainFrame'),
+  });
 }
 
 app.on('session-created', guardSession);
-app.on('browser-window-created', (_e, win) => { if (!mainWindow) mainWindow = win; });
 app.on('web-contents-created', (_e, contents) => {
   guardSession(contents.session); // covers sessions created before this handler ran
   // Belt and braces for navigations the network hook would see too late to close the window.
   const guard = (event, url) => {
-    if (isBlockedLoad(url)) { event.preventDefault(); blockLoad(url, contents); }
+    if (isBlockedLoad(url)) { event.preventDefault(); blockLoad(url, contents, event.isMainFrame !== false); }
   };
   contents.on('will-navigate', guard);
   contents.on('will-redirect', guard);

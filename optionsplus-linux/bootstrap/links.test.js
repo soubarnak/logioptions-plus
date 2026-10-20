@@ -104,3 +104,13 @@ test('isBlockedLoad agrees with rewrite on every http(s) URL', () => {
     'https://github.com/x', 'https://support.logi.com/hc/',
   ]) assert.equal(isBlockedLoad(u), rewrite(u).action === 'block', u);
 });
+
+test('logitech.com EULA and privacy pages are not blocked, even on a cloud-looking host', () => {
+  for (const u of [
+    'https://www.logitech.com/en-us/legal/eula.html',
+    'https://www.logitech.com/legal/privacy-policy',
+    'https://recommendations.logitech.com/legal/privacy',
+  ]) assert.equal(isBlockedLoad(u), false, u);
+  // the exemption is for logitech.com only
+  assert.equal(isBlockedLoad('https://recommendations.logi.com/privacy'), true);
+});
