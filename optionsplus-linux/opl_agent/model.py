@@ -34,6 +34,9 @@ def _dtype(raw):
         return HIDPP_TYPE.get(raw.lower(), "MOUSE")
     return "MOUSE"
 
+# Features whose events mean the mouse lost state: wireless status (wake), config change.
+RESUME_FEATURES = (0x1D4B, 0x0020)
+
 # Connection enum names (logi.protocol.devices.Device.Interface.Connection).
 CONN_BOLT = "BLE_PRO"
 CONN_USB = "USB"
@@ -63,7 +66,10 @@ class Device:
         self.first_connected = int(time.time())
         self.serial = ""
         self.fw = ""
+        self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
+        self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
         self.battery_cache = None    # last {percent, charging, status} from HID++
+        self.scroll_caps = {"smartshift": False, "highResolution": False}   # features present
         self.catalogue = resources.catalogue_entry(pid) or {}
 
     @property
@@ -91,7 +97,7 @@ class Device:
     # ---- payload builders -------------------------------------------------
     def info(self):
         """logi.protocol.devices.Device.Info for /devices/list and /devices/<id>/info."""
-        return {
+        out = {
             "id": self.id,
             "pid": self.pid,
             "state": "ACTIVE" if self.connected else "ABSENT",
@@ -115,7 +121,30 @@ class Device:
             "resourcesAvailable": resources.depot_installed(self.depot),
             "fetchResource": False,
             "firstConnectedTimestamp": str(self.first_connected),
+            **self._battery_fields(),
         }
+        out.setdefault("capabilities", {})["scrollWheelCapabilities"] = self._scroll_capabilities()
+        return out
+
+    def _scroll_capabilities(self):
+        return {"highResolution": self.scroll_caps["highResolution"],
+                "smartshift": self.scroll_caps["smartshift"],
+                "adjustableSpeed": False}       # needs the wheel relay (not built yet)
+
+    def _battery_fields(self):
+        """Capability flags and level that make the UI show the battery indicator."""
+        bc = self.battery_caps
+        if bc is None and not self.battery_cache:
+            return {}
+        out = {"capabilities": {"hasBatteryStatus": True}}
+        if bc is not None:
+            out["capabilities"].update({
+                "unifiedBattery": True,
+                "battery": {"rechargeable": bc["rechargeable"], "stateOfCharge": bc["soc"],
+                            "showBatteryStatus": False, "supportedLevels": bc["levels"]}})
+        if self.battery_cache and self.battery_cache.get("percent") is not None:
+            out["batteryDischargeLevel"] = int(self.battery_cache["percent"])
+        return out
 
     def permanent(self):
         """logi.protocol.devices.DevicePermanentData for /devices/ever_connected/list."""
@@ -139,24 +168,41 @@ class Registry:
         self.transport = transport or hidpp.HIDRAW   # node discovery + open
         self.devices = {}          # id -> Device
         self._fds = {}             # node.path -> fd
-        self._receivers = []
+        self.absent = {}           # id -> Device that went away; a returning one keeps its id
+        self._next_id = 0
+        self.on_discovered = []    # callables(dev_id), run in scan() for each new device
+        self.on_resumed = []       # callables(dev_id), after a wake or config-change event
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
-            fd = self.transport.open(node.path)
+            fd = hidpp.Reader(self.transport.open(node.path))
+            fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx))
             self._fds[node.path] = fd
         return fd
 
-    def scan(self):
-        """Discover receivers/devices and (re)build the device table."""
-        self.devices.clear()
-        n = 0
+    @staticmethod
+    def _identity(info, node):
+        """Hardware identity that survives a replug (hidraw node and index may change)."""
+        wpid = info.get("wpid")
+        pid = int(wpid, 16) if isinstance(wpid, str) else (wpid or getattr(node, "pid", 0))
+        return (pid, info.get("name") or "Logitech Device")
+
+    def _probe(self):
+        """Blocking: ask every node what is behind it -> [(node, info)], or None when
+        discovery itself failed (leave the device table alone)."""
         try:
             nodes = self.transport.list_nodes()
         except Exception:
             log.exception("HID++ discovery failed")
-            return
+            return None
+        live = {n.path for n in nodes}
+        for path in [p for p in self._fds if p not in live]:
+            try:
+                hidpp.close_node(self._fds.pop(path))
+            except OSError:
+                pass
+        out = []
         for node in nodes:
             try:
                 fd = self._fd(node)
@@ -164,36 +210,133 @@ class Registry:
                 log.warning("cannot open %s: %s", node.path, exc)
                 continue
             bolt = getattr(node, "is_bolt", False)
-            if node.is_receiver:
-                found = hidpp.get_paired_devices(fd, bolt=bolt)
-            else:
-                # corded / directly-attached device at the fixed index 0xFF
-                try:
+            try:
+                if node.is_receiver:
+                    found = hidpp.get_paired_devices(fd, bolt=bolt)
+                else:
+                    # corded / directly-attached device at the fixed index 0xFF
                     proto = hidpp.root_ping(fd, 0xFF)
                     found = [{"index": 0xFF, "protocol": proto, "wpid": None,
                               "name": hidpp.get_device_name(fd, 0xFF),
                               "type": hidpp.get_device_type(fd, 0xFF)}]
-                except hidpp.HidppError:
-                    found = []
-            for info in found:
-                idx = info["index"]
-                name = info.get("name") or "Logitech Device"
-                dtype = _dtype(info.get("type"))
-                wpid = info.get("wpid")
-                pid = int(wpid, 16) if isinstance(wpid, str) else (wpid or getattr(node, "pid", 0))
-                dev_id = "dev%08d" % n
-                n += 1
-                d = Device(dev_id, node, idx, name, dtype, pid)
+            except hidpp.HidppError:
+                found = []
+            out += [(node, info) for info in found]
+        return out
+
+    def _build(self, dev_id, node, info, previous=None):
+        fd = self._fds[node.path]
+        idx = info["index"]
+        name = info.get("name") or "Logitech Device"
+        wpid = info.get("wpid")
+        pid = int(wpid, 16) if isinstance(wpid, str) else (wpid or getattr(node, "pid", 0))
+        d = Device(dev_id, node, idx, name, _dtype(info.get("type")), pid)
+        if previous is not None:
+            d.first_connected = previous.first_connected
+        try:
+            d.fw = hidpp.get_fw_info(fd, idx) or ""
+        except Exception:
+            pass
+        try:
+            d.battery_caps = hidpp.get_battery_caps(fd, idx)
+        except Exception:
+            pass
+        try:
+            d.battery_cache = hidpp.get_battery(fd, idx)
+        except Exception:
+            pass
+        for fid in RESUME_FEATURES:
+            try:
+                d.event_features[hidpp.feature_index(fd, idx, fid)] = fid
+            except hidpp.HidppError:
+                pass
+        try:
+            d.scroll_caps = {
+                "smartshift": (hidpp.has_feature(fd, idx, hidpp.F_SMART_SHIFT)
+                               or hidpp.has_feature(fd, idx, hidpp.F_SMART_SHIFT_ENH)),
+                "highResolution": hidpp.has_feature(fd, idx, hidpp.F_HIRES_WHEEL)}
+        except Exception:
+            pass
+        return d
+
+    def scan(self):
+        """Discover receivers/devices; every device found counts as (re)discovered."""
+        return self.rescan(force=True)
+
+    def rescan(self, force=False):
+        """Blocking: reconcile the device table with what is plugged in and on.
+
+        A device that returns keeps the id it had when its hardware identity
+        matches. Hooks in `on_discovered` run for each new or returned device.
+        Returns {"added": [...], "returned": [...], "removed": [...]} of device ids
+        (Device objects for removed ones, marked not connected)."""
+        probed = self._probe()
+        events = {"added": [], "returned": [], "removed": []}
+        if probed is None:
+            return events
+        by_key = {}
+        for node, info in probed:
+            by_key.setdefault(self._identity(info, node), (node, info))
+        new_devices = {}
+        for dev_id, d in list(self.devices.items()):
+            key = (d.pid, d.name)
+            hit = by_key.pop(key, None)
+            if hit is None:
+                continue
+            node, info = hit
+            if not force and d.node.path == node.path and d.index == info["index"]:
+                new_devices[dev_id] = d
+                continue
+            new_devices[dev_id] = self._build(dev_id, node, info, d)
+            events["returned"].append(dev_id)
+        for dev_id, d in list(self.devices.items()):
+            if dev_id not in new_devices:
+                d.connected = False
+                events["removed"].append(d)
+        for dev_id, d in list(self.absent.items()):
+            hit = by_key.pop((d.pid, d.name), None)
+            if hit is None:
+                continue
+            del self.absent[dev_id]
+            new_devices[dev_id] = self._build(dev_id, hit[0], hit[1], d)
+            events["returned"].append(dev_id)
+        for key, (node, info) in by_key.items():
+            dev_id = "dev%08d" % self._next_id
+            self._next_id += 1
+            new_devices[dev_id] = self._build(dev_id, node, info)
+            events["added"].append(dev_id)
+        for d in events["removed"]:
+            self.absent[d.id] = d
+            log.info("device %s (%s) went away", d.id, d.name)
+        self.devices = dict(sorted(new_devices.items()))
+        for dev_id in events["added"] + events["returned"]:
+            d = self.devices[dev_id]
+            log.info("device %s: %s (%s) index=%d on %s", dev_id, d.name, d.dtype, d.index, d.node.path)
+            for hook in list(self.on_discovered):
                 try:
-                    d.fw = hidpp.get_fw_info(fd, idx) or ""
+                    hook(dev_id)
                 except Exception:
-                    pass
-                self.devices[dev_id] = d
+                    log.exception("discovery hook failed for %s", dev_id)
+        return events
+
+    def _on_event(self, node, index, feature_index):
+        """Reader listener (own thread): the mouse woke or changed configuration."""
+        for dev_id, d in list(self.devices.items()):
+            if d.node.path != node.path or d.index != index:
+                continue
+            fid = d.event_features.get(feature_index)
+            if fid is None:
+                continue
+            log.info("device %s: event 0x%04x, reapplying settings", dev_id, fid)
+            try:
+                self.refresh_battery(dev_id)
+            except Exception as exc:
+                log.debug("battery refresh after event failed: %s", exc)
+            for hook in list(self.on_resumed):
                 try:
-                    self.refresh_battery(dev_id)
+                    hook(dev_id)
                 except Exception:
-                    pass
-                log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
+                    log.exception("resume hook failed for %s", dev_id)
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):
@@ -250,6 +393,45 @@ class Registry:
         d = self.devices.get(dev_id)
         fd = self._fds.get(d.node.path)
         hidpp.set_dpi(fd, d.index, int(dpi))
+
+    def dpi_range(self, dev_id):
+        """Blocking read of the sensor's DPI list: {values, min, max, step}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi_list(self._fds[d.node.path], d.index)
+
+    def read_dpi(self, dev_id):
+        """Blocking read of the current and default DPI: {dpi, default, ...}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi(self._fds[d.node.path], d.index)
+
+    def write_dpi(self, dev_id, dpi):
+        """Blocking 0x2201 write; returns the DPI read back from the device."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        hidpp.set_dpi(fd, d.index, int(dpi))
+        return hidpp.get_dpi(fd, d.index)["dpi"]
+
+    def read_scroll(self, dev_id):
+        """Blocking: {"smartshift": {...}|None, "wheel": {...}|None} as the mouse has it now."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        out = {"smartshift": None, "wheel": None}
+        if d.scroll_caps["smartshift"]:
+            out["smartshift"] = hidpp.get_smartshift(fd, d.index)
+        if d.scroll_caps["highResolution"]:
+            out["wheel"] = hidpp.get_wheel(fd, d.index)
+        return out
+
+    def write_scroll(self, dev_id, ratchet=None, threshold=None, hires=None, invert=None):
+        """Blocking 0x2110 / 0x2121 writes; None leaves a setting alone. Returns read_scroll()."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        if d.scroll_caps["smartshift"] and (ratchet is not None or threshold is not None):
+            mode = None if ratchet is None else ("ratchet" if ratchet else "freespin")
+            hidpp.set_smartshift(fd, d.index, mode=mode, threshold=threshold)
+        if d.scroll_caps["highResolution"] and (hires is not None or invert is not None):
+            hidpp.set_wheel(fd, d.index, hires=hires, invert=invert)
+        return self.read_scroll(dev_id)
 
     def close(self):
         for fd in self._fds.values():

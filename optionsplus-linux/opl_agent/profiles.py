@@ -7,6 +7,7 @@ the device depot's default_configurations.json; this module does the same,
 reading the Logitech-supplied depot at runtime (see resources.py).
 """
 
+import copy
 import json
 import logging
 import os
@@ -45,10 +46,152 @@ def default_assignments(slot_prefix, depot):
     return out
 
 
-def profiles(devices):
+MOUSE_SETTINGS_SUFFIX = "_mouse_settings"
+
+
+def mouse_settings_slot(slot_prefix):
+    return slot_prefix + MOUSE_SETTINGS_SUFFIX
+
+
+def dpi_from_value(value, rng):
+    """Map a 0..1 slider position onto the sensor's DPI range/list."""
+    value = min(1.0, max(0.0, float(value)))
+    step = rng.get("step")
+    if step:
+        lo, hi = rng["min"], rng["max"]
+        return lo + int(round(value * (hi - lo) / step)) * step
+    values = rng["values"]
+    return values[int(round(value * (len(values) - 1)))]
+
+
+def value_from_dpi(dpi, rng):
+    lo, hi = rng["min"], rng["max"]
+    return 0.0 if hi == lo else min(1.0, max(0.0, (dpi - lo) / float(hi - lo)))
+
+
+def pointer_value(card):
+    """The slider position (0..1) in a MOUSE_SETTINGS card, or None."""
+    try:
+        return float(card["mouseSettings"]["pointerSpeed"]["active"]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def mouse_settings_card(value, dpi):
+    return {"id": "MOUSE_SETTINGS", "attribute": "MOUSE_SETTINGS",
+            "mouseSettings": {"pointerSpeed": {"active": {"value": value, "dpiLevel": int(dpi)}}}}
+
+
+def default_pointer_value(depot):
+    """Pointer speed (0..1) from the depot's default configuration, or None."""
+    for conf in _default_configurations(depot):
+        card = (conf.get("settings") or {}).get("mouseSettings")
+        v = pointer_value({"mouseSettings": card}) if card else None
+        if v is not None:
+            return v
+    return None
+
+
+SCROLL_SUFFIX = "_mouse_scroll_wheel_settings"
+SCROLL_ATTRIBUTE = "MOUSE_SCROLL_WHEEL_SETTINGS"
+SENSITIVITY_MIN, SENSITIVITY_MAX = 1, 50       # the panel's SmartShift slider; the 0x2110 threshold
+
+
+def scroll_slot(slot_prefix):
+    return slot_prefix + SCROLL_SUFFIX
+
+
+def scroll_card(state):
+    """The scroll wheel card for what the mouse reports ({"smartshift", "wheel"} from
+    Registry.read_scroll), or None when it has neither feature."""
+    settings = {}
+    ss, wheel = state.get("smartshift"), state.get("wheel")
+    if ss is not None:
+        settings["smartshift"] = {
+            "isEnabled": ss["mode"] == "ratchet",
+            "sensitivity": min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["threshold"])))}
+    if wheel is not None:
+        settings["isSmooth"] = wheel["hires"]
+        settings["dir"] = "INVERTED" if wheel["invert"] else "NORMAL"
+    if not settings:
+        return None
+    return {"id": SCROLL_ATTRIBUTE, "attribute": SCROLL_ATTRIBUTE, "mouseScrollWheelSettings": settings}
+
+
+def scroll_request(card):
+    """What a scroll wheel card asks for: {ratchet, threshold, hires, invert}, each None
+    when the card leaves it alone; None when it is not a scroll wheel card at all."""
+    try:
+        s = card["mouseScrollWheelSettings"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(s, dict):
+        return None
+    ss = s.get("smartshift") or {}
+    req = {"ratchet": ss.get("isEnabled"), "threshold": None,
+           "hires": s.get("isSmooth"), "invert": None}
+    if ss.get("sensitivity") is not None:
+        req["threshold"] = min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["sensitivity"])))
+    if s.get("dir") in ("NORMAL", "INVERTED"):
+        req["invert"] = s["dir"] == "INVERTED"
+    return req
+
+
+class ProfileStore:
+    """User settings that override the depot defaults, persisted as profiles.json.
+
+    Maps slot id -> card. Written atomically on every change."""
+
+    def __init__(self, state_dir):
+        self.path = os.path.join(state_dir, "profiles.json")
+        self.cards = {}
+        try:
+            with open(self.path) as fh:
+                self.cards = dict(json.load(fh).get("assignments") or {})
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log.warning("ignoring unreadable %s: %s", self.path, exc)
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"assignments": self.cards}, fh, indent=1)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("cannot save profiles: %s", exc)
+
+    def get(self, slot_id):
+        return self.cards.get(slot_id)
+
+    def set(self, slot_id, card):
+        self.cards[slot_id] = copy.deepcopy(card)
+        self._save()
+
+    def remove(self, slot_id):
+        if self.cards.pop(slot_id, None) is not None:
+            self._save()
+
+
+def profiles(devices, store=None, live=None):
+    """The default profile. `live` maps device id -> {"dpi", "range"} from the device."""
+    live = live or {}
     assignments = []
     for dev in devices:
         assignments += default_assignments(dev.slot_prefix, dev.depot)
+        slot = mouse_settings_slot(dev.slot_prefix)
+        card = store.get(slot) if store else None
+        if card is None and dev.id in live:
+            rd = live[dev.id]
+            card = mouse_settings_card(value_from_dpi(rd["dpi"], rd["range"]), rd["dpi"])
+        if card is not None:
+            assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
+        slot = scroll_slot(dev.slot_prefix)
+        card = (store.get(slot) if store else None) or (live.get(dev.id) or {}).get("scroll")
+        if card is not None:
+            assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
     return {
         "@type": TYPE + "logi.protocol.profiles_v2.Profiles",
         "profiles": [{

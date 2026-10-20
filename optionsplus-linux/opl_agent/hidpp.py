@@ -11,15 +11,16 @@ Report layout (Logitech HID++ 2.0):
 
 Errors: HID++ 2.0 -> byte2 == 0xFF, byte3 = feature idx, byte4 = fn|swid,
 byte5 = code.  HID++ 1.0 -> byte2 == 0x8F, byte3 = sub id, byte4 = address,
-byte5 = code.  Notifications (unsolicited) never carry our software id and are
-dropped while waiting for a reply.
+byte5 = code.  Notifications (unsolicited) carry software id 0, never ours:
+the Reader sends them to listeners and replies to the waiting request.
 
-All functions block (select timeouts); call them from a thread executor.
+All functions block; call them from a thread executor.
 """
 
 import errno
 import logging
 import os
+import queue
 import select
 import struct
 import threading
@@ -54,6 +55,7 @@ F_UNIFIED_BATTERY = 0x1004
 F_ADJUSTABLE_DPI = 0x2201
 F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
+F_HIRES_WHEEL = 0x2121
 
 DEVICE_TYPES = [
     "keyboard", "remote control", "numpad", "mouse", "trackpad", "trackball",
@@ -186,28 +188,18 @@ def list_receivers_and_devices():
 # raw I/O
 # --------------------------------------------------------------------------
 
-_lock = threading.RLock()
 _feat_cache = {}
 
 
 class HidrawHandle:
     """One open /dev/hidrawN node. The I/O surface hidpp needs from any
-    transport handle: ``write``, ``read``, ``drain`` and ``close``."""
+    transport handle: ``write``, ``read`` and ``close``."""
 
     def __init__(self, fd):
         self.fd = fd
 
     def write(self, data):
         os.write(self.fd, data)
-
-    def drain(self):
-        """Drop stale input so old replies/notifications cannot match."""
-        while select.select([self.fd], [], [], 0)[0]:
-            try:
-                if not os.read(self.fd, 64):
-                    break
-            except BlockingIOError:
-                break
 
     def read(self, timeout):
         """One report, b"" for a spurious wakeup, None when `timeout` expires."""
@@ -226,11 +218,224 @@ class HidrawHandle:
         os.close(self.fd)
 
 
+IN_CREATE, IN_DELETE = 0x100, 0x200
+
+
+def _inotify_fd(path):
+    """A non-blocking inotify fd watching `path` for create/delete, or None."""
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            return None
+        if libc.inotify_add_watch(fd, os.fsencode(path), IN_CREATE | IN_DELETE) < 0:
+            os.close(fd)
+            return None
+        return fd
+    except (OSError, AttributeError):
+        return None
+
+
+class NodeWatcher:
+    """Wakes when a hidraw node appears or disappears.
+
+    inotify on /dev when available; otherwise (or when `use_inotify` is off)
+    polls the /sys/class/hidraw listing every `poll_seconds`."""
+
+    def __init__(self, dev_dir="/dev", sysfs_dir="/sys/class/hidraw", use_inotify=True,
+                 poll_seconds=0.5):
+        self.sysfs_dir = sysfs_dir
+        self.poll_seconds = poll_seconds
+        self._fd = _inotify_fd(dev_dir) if use_inotify else None
+        self._seen = self._snapshot()
+
+    def _snapshot(self):
+        try:
+            return frozenset(n for n in os.listdir(self.sysfs_dir) if n.startswith("hidraw"))
+        except OSError:
+            return frozenset()
+
+    def _inotify_hit(self, timeout):
+        if not select.select([self._fd], [], [], timeout)[0]:
+            return False
+        try:
+            data = os.read(self._fd, 4096)
+        except BlockingIOError:
+            return False
+        off = 0
+        hit = False
+        while off + 16 <= len(data):
+            _wd, _mask, _cookie, nlen = struct.unpack_from("iIII", data, off)
+            name = data[off + 16:off + 16 + nlen].rstrip(b"\0")
+            hit = hit or name.startswith(b"hidraw")
+            off += 16 + nlen
+        return hit
+
+    def wait(self, timeout):
+        """Block up to `timeout`; True if a hidraw node was added or removed."""
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            if self._fd is not None:
+                if self._inotify_hit(left):
+                    self._seen = self._snapshot()
+                    return True
+                continue
+            time.sleep(min(self.poll_seconds, left))
+            now = self._snapshot()
+            if now != self._seen:
+                self._seen = now
+                return True
+
+    def close(self):
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+
+class Reader:
+    """The single reader of one HID++ node.
+
+    A thread owns every read from the transport handle. A report that answers
+    a waiting request (same device index, feature index and function/software
+    id, or an error report naming them) goes to that request. Any other report
+    with software id 0 is an event and goes to the listeners; the rest is
+    dropped. Listeners run on their own thread, so they may send requests.
+    Concurrent requests are safe: each waits on its own reply.
+    """
+
+    POLL = 0.1
+
+    def __init__(self, handle):
+        self.handle = handle
+        self._lock = threading.Lock()
+        self._waiting = []              # [(key, slot)] in request order
+        self._listeners = []
+        self._events = queue.Queue()
+        self._stop = threading.Event()
+        self._threads = [threading.Thread(target=self._read_loop, daemon=True, name="hidpp-reader"),
+                         threading.Thread(target=self._dispatch_loop, daemon=True, name="hidpp-events")]
+        for t in self._threads:
+            t.start()
+
+    # ---- events ----------------------------------------------------------
+    def add_listener(self, fn):
+        """fn(device_index, feature_index, function, params) for each event."""
+        self._listeners.append(fn)
+
+    def _dispatch_loop(self):
+        while True:
+            ev = self._events.get()
+            if ev is None:
+                return
+            for fn in list(self._listeners):
+                try:
+                    fn(*ev)
+                except Exception:
+                    log.exception("HID++ event listener failed")
+
+    # ---- reading ---------------------------------------------------------
+    def _read_loop(self):
+        while not self._stop.is_set():
+            try:
+                r = self.handle.read(self.POLL)
+            except OSError as exc:
+                if not self._stop.is_set():
+                    log.warning("HID++ read failed, reader stopped: %s", exc)
+                    self._fail_all(exc)
+                return
+            if r:
+                self._route(r)
+
+    def _fail_all(self, exc):
+        with self._lock:
+            waiting, self._waiting = self._waiting, []
+        for _key, slot in waiting:
+            slot["error"] = exc
+            slot["done"].set()
+
+    def _route(self, r):
+        log.debug("rx %s", r.hex())
+        if len(r) < 4 or r[0] not in (SHORT, LONG, 0x12):
+            return
+        idx = r[1]
+        if r[2] in (0xFF, 0x8F):
+            if len(r) < 6:
+                return
+            key = (idx, r[3], r[4])
+            version = 2 if r[2] == 0xFF else 1
+        else:
+            key = (idx, r[2], r[3])
+            version = None
+        with self._lock:
+            for i, (k, slot) in enumerate(self._waiting):
+                if k == key:
+                    del self._waiting[i]
+                    break
+            else:
+                slot = None
+        if slot is not None:
+            slot["reply"], slot["version"] = r, version
+            slot["done"].set()
+        elif version is None and r[3] & 0x0F == 0:
+            self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
+
+    # ---- requests --------------------------------------------------------
+    def request(self, msg, timeout):
+        """Write one report; return the reply report or raise HidppError."""
+        idx, b2, b3 = msg[1], msg[2], msg[3]
+        fn = b3 >> 4
+        key = (idx, b2, b3)
+        slot = {"done": threading.Event()}
+        with self._lock:
+            self._waiting.append((key, slot))
+        try:
+            log.debug("tx %s", msg.hex())
+            self.handle.write(msg)
+            if not slot["done"].wait(timeout):
+                raise HidppTimeout(b2, fn)
+        finally:
+            with self._lock:
+                try:
+                    self._waiting.remove((key, slot))
+                except ValueError:
+                    pass
+        if "error" in slot:
+            raise slot["error"]
+        r = slot["reply"]
+        if slot["version"] == 2:
+            raise HidppError(b2, fn, r[5], 2)
+        if slot["version"] == 1:
+            raise HidppError(b2, None, r[5], 1)
+        return r
+
+    def close(self):
+        self._stop.set()
+        self._events.put(None)
+        for t in self._threads:
+            if t is not threading.current_thread():
+                t.join(2)
+        self.handle.close()
+
+
 class HidrawTransport:
     """The production transport: discovery through sysfs, I/O through hidraw."""
 
+    def __init__(self):
+        self._watcher = None
+
     def list_nodes(self):
         return list_receivers_and_devices()
+
+    def wait_change(self, timeout):
+        """Block until a hidraw node is added or removed; True if one was."""
+        if self._watcher is None:
+            self._watcher = NodeWatcher()
+        return self._watcher.wait(timeout)
 
     def open(self, path):
         return HidrawHandle(os.open(path, os.O_RDWR | os.O_NONBLOCK))
@@ -240,7 +445,7 @@ HIDRAW = HidrawTransport()
 
 
 def open_node(path):
-    return HIDRAW.open(path)
+    return Reader(HIDRAW.open(path))
 
 
 def close_node(fd):
@@ -267,30 +472,7 @@ def _transact(fd, idx, b2, b3, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
     if len(params) > size - 4:
         raise ValueError("too many parameters")
     msg = bytes([LONG if long else SHORT, idx, b2, b3]) + params
-    msg = msg.ljust(size, b"\0")
-    fn = b3 >> 4
-    with _lock:
-        fd.drain()
-        log.debug("tx %s", msg.hex())
-        fd.write(msg)
-        deadline = time.monotonic() + timeout
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise HidppTimeout(b2, fn)
-            r = fd.read(left)
-            if r is None:
-                raise HidppTimeout(b2, fn)
-            log.debug("rx %s", r.hex())
-            if len(r) < 4 or r[0] not in (SHORT, LONG, 0x12) or r[1] != idx:
-                continue
-            if r[2] in (0xFF, 0x8F) and len(r) >= 6 and r[3] == b2 and r[4] == b3:
-                if r[2] == 0xFF:
-                    raise HidppError(b2, fn, r[5], 2)
-                raise HidppError(b2, None, r[5], 1)
-            if r[2] == b2 and r[3] == b3:
-                return r
-            # else: notification / unrelated report -> discard
+    return fd.request(msg.ljust(size, b"\0"), timeout)
 
 
 def call(fd, dev_index, feature_index, funcid, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
@@ -415,6 +597,22 @@ _B1000_STATUS = {0: "discharging", 1: "recharging", 2: "charge in final stage",
                  5: "invalid battery", 6: "thermal error", 7: "other charging error"}
 
 
+_UB_LEVEL_NAMES = ((1, "critical"), (2, "low"), (4, "good"), (8, "full"))
+
+
+def get_battery_caps(fd, idx):
+    """0x1004 fn0 -> {levels, rechargeable, soc}; None when the device lacks 0x1004.
+
+    levels: names of the supported level bits; rechargeable: flags bit0;
+    soc: flags bit1 (device reports a state-of-charge percentage).
+    """
+    if not has_feature(fd, idx, F_UNIFIED_BATTERY):
+        return None
+    caps = _fcall(fd, idx, F_UNIFIED_BATTERY, 0)
+    return {"levels": [n for b, n in _UB_LEVEL_NAMES if caps[0] & b],
+            "rechargeable": bool(caps[1] & 0x01), "soc": bool(caps[1] & 0x02)}
+
+
 def get_battery(fd, idx):
     """-> {percent, charging, next_level, status}.
 
@@ -502,6 +700,38 @@ def set_smartshift(fd, idx, mode=None, threshold=None, torque=None):
     else:
         _fcall(fd, idx, F_SMART_SHIFT, 1, params)
     return get_smartshift(fd, idx)
+
+
+# --------------------------------------------------------------------------
+# High resolution wheel (0x2121)
+# --------------------------------------------------------------------------
+
+WHEEL_MODE_TARGET = 0x01        # 1: wheel events go to HID++ (diverted), 0: HID
+WHEEL_MODE_HIRES = 0x02
+WHEEL_MODE_INVERT = 0x04
+WHEEL_CAP_INVERT = 0x08
+
+
+def get_wheel(fd, idx):
+    """fn0 getWheelCapability, fn1 getWheelMode
+    -> {multiplier, can_invert, target, hires, invert, mode}."""
+    cap = _fcall(fd, idx, F_HIRES_WHEEL, 0)
+    mode = _fcall(fd, idx, F_HIRES_WHEEL, 1)[0]
+    return {"multiplier": cap[0], "can_invert": bool(cap[1] & WHEEL_CAP_INVERT), "mode": mode,
+            "target": bool(mode & WHEEL_MODE_TARGET), "hires": bool(mode & WHEEL_MODE_HIRES),
+            "invert": bool(mode & WHEEL_MODE_INVERT)}
+
+
+def set_wheel(fd, idx, hires=None, invert=None):
+    """fn2 setWheelMode. Starts from the mode the device reports, so bits the
+    kernel driver set (including the diversion target) survive. Returns the
+    state read back."""
+    mode = get_wheel(fd, idx)["mode"]
+    for flag, want in ((WHEEL_MODE_HIRES, hires), (WHEEL_MODE_INVERT, invert)):
+        if want is not None:
+            mode = (mode | flag) if want else (mode & ~flag)
+    _fcall(fd, idx, F_HIRES_WHEEL, 2, bytes([mode]))
+    return get_wheel(fd, idx)
 
 
 # --------------------------------------------------------------------------

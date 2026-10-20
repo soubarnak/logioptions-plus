@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import struct
 
 from opl_agent import hidpp, ipc, main
@@ -131,7 +132,8 @@ def test_device_resources_come_from_the_depot(client):
 def test_default_profile_assignments_come_from_the_depot(client):
     reply = client.call("GET", "/v2/profiles")
     slots = {a["slotId"] for a in reply["payload"]["profiles"][0]["assignments"]}
-    assert slots == {"046d_4242_c82", "046d_4242_c83", "046d_4242_thumb_wheel_adapter"}
+    assert slots == {"046d_4242_c82", "046d_4242_c83", "046d_4242_thumb_wheel_adapter",
+                     "046d_4242_mouse_settings", "046d_4242_mouse_scroll_wheel_settings"}
 
 
 def test_localized_strings_come_from_the_depot(client):
@@ -148,17 +150,23 @@ def test_agent_talked_hidpp_to_the_simulated_device(client, bolt):
 
 
 def test_simulated_device_answers_long_requests_and_records_them(bolt):
-    h = bolt.open(bolt.PATH)
+    h = hidpp.Reader(bolt.open(bolt.PATH))
     reply = hidpp.call(h, 1, 0, 1, bytes([0, 0, 0xA5]), long=True)    # Root ping, long report
     assert reply[:3] == bytes([4, 2, 0xA5])
     assert bolt.writes[-1][0] == hidpp.LONG and len(bolt.writes[-1]) == hidpp.LONG_LEN
 
 
 def test_simulated_device_emits_events_on_demand_and_they_are_ignored_by_replies(bolt):
-    h = bolt.open(bolt.PATH)
+    h = hidpp.Reader(bolt.open(bolt.PATH))
+    events = []
+    h.add_listener(lambda idx, fidx, fn, params: events.append(params[0]))
     bolt.emit(bytes([hidpp.LONG, 1, 0x04, 0x00, 55]).ljust(hidpp.LONG_LEN, b"\0"))
-    assert h.read(1)[4] == 55
     assert hidpp.root_ping(h, 1) == (4, 2)
+    for _ in range(100):
+        if events:
+            break
+        time.sleep(0.02)
+    assert events == [55]
 
 
 def test_simulated_mouse_name_is_the_fallback_without_a_catalogue(bolt, workdir, agent_factory):

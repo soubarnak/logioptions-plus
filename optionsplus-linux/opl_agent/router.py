@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import applications, model, profiles, resources, responses, stubs
+from . import applications, model, profiles, resources, responses, stubs, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -33,13 +33,19 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None):
+    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None,
+                 updater=None, os_release_path=None):
         self.reg = registry
+        self.updater = updater or updates.Updater()
+        self.os_release_path = os_release_path or updates.OS_RELEASE
         self.runner = runner or SubprocessRunner()
         self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
         self.apps = None                 # last scan result; None until first scan
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
+        self.store = profiles.ProfileStore(_state_dir(state_dir))
+        self.reg.on_discovered.append(self.apply_stored)
+        self.reg.on_resumed.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
         try:
             with open(self.config_path) as fh:
@@ -67,6 +73,8 @@ class Router:
             return [("/configuration", self.config)]
         if path == "/permissions":
             return [("/permissions", responses.BOOT["/permissions"])]
+        if path == "/updates/status":
+            return [("/updates/status", self.updater.status())]
         if path == "/lps/endpoint/info_changed":
             return [("/lps/endpoint/info_changed",
                      {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"})]
@@ -82,6 +90,13 @@ class Router:
                 info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
                 out.append(("/devices/state/changed", info))
             return out
+        if path == "/battery/state/changed":
+            return [(path, self.reg.battery(i)[0]) for i in self.reg.devices
+                    if self.reg.devices[i].battery_cache]
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "battery" and parts[2:] == ["state", "changed"]:
+            if parts[1] in self.reg.devices and self.reg.devices[parts[1]].battery_cache:
+                return [(path, self.reg.battery(parts[1])[0])]
         return []
 
     async def handle(self, verb, path, payload):
@@ -103,7 +118,34 @@ class Router:
             return "SUCCESS", applications.payload(self.apps), ""
 
         if verb == "GET" and path == "/v2/profiles":
-            return "SUCCESS", profiles.profiles(self.reg.devices.values()), ""
+            return "SUCCESS", await self._profiles_payload(), ""
+
+        if verb == "SET" and path.startswith("/v2/profiles/"):
+            r = await self._profiles_set(path, payload)
+            if r is not None:
+                return r
+
+        if verb == "GET" and path == "/system/info":
+            return "SUCCESS", updates.system_info(self.os_release_path), ""
+        if verb == "GET" and path == "/updates/info":
+            return "SUCCESS", self.updater.info(), ""
+        if verb == "GET" and path == "/updates/status":
+            return "SUCCESS", self.updater.status(), ""
+        if path == "/updates/periodic_check" and verb in ("GET", "SET"):
+            if verb == "SET":
+                code = self.updater.set_periodic_check(payload)
+                if code != "SUCCESS":
+                    return code, None, "intervalInSeconds must be a positive integer, checkPeriodically a boolean"
+            return "SUCCESS", self.updater.periodic_check(), ""
+        if path == "/updates/channel" and verb in ("GET", "SET"):
+            if verb == "SET":
+                code = self.updater.set_channel(payload)
+                if code != "SUCCESS":
+                    return code, None, "channel must be stable or testing"
+            return "SUCCESS", self.updater.channel(), ""
+        if verb == "SET" and path == "/updates/check_now":
+            self.updater.request_check()
+            return "SUCCESS", payload, ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
@@ -143,6 +185,131 @@ class Router:
             log.warning("unhandled SET %s accepted (feature not implemented)", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    # ---- profiles / pointer speed ---------------------------------------
+    def _read_live(self):
+        """Blocking: current DPI and range per device, for seeding cards."""
+        live = {}
+        for dev_id in list(self.reg.devices):
+            try:
+                live[dev_id] = {"dpi": self.reg.read_dpi(dev_id)["dpi"],
+                                "range": self.reg.dpi_range(dev_id)}
+            except Exception as exc:
+                log.debug("no live DPI for %s: %s", dev_id, exc)
+            try:
+                live.setdefault(dev_id, {})["scroll"] = profiles.scroll_card(self.reg.read_scroll(dev_id))
+            except Exception as exc:
+                log.debug("no live scroll state for %s: %s", dev_id, exc)
+        return live
+
+    async def _profiles_payload(self):
+        live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
+        return profiles.profiles(self.reg.devices.values(), self.store, live)
+
+    async def _broadcast_profiles(self):
+        if self.server is not None:
+            self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
+
+    def _device_for_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if slot_id == profiles.mouse_settings_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_pointer(self, dev, value):
+        """Blocking: write DPI for slider `value`; returns the card read back."""
+        rng = self.reg.dpi_range(dev.id)
+        dpi = self.reg.write_dpi(dev.id, profiles.dpi_from_value(value, rng))
+        return profiles.mouse_settings_card(profiles.value_from_dpi(dpi, rng), dpi)
+
+    def _device_for_scroll_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if slot_id == profiles.scroll_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_scroll(self, dev, req):
+        """Blocking: write the requested wheel settings; returns the card read back."""
+        state = self.reg.write_scroll(dev.id, ratchet=req["ratchet"], threshold=req["threshold"],
+                                      hires=req["hires"], invert=req["invert"])
+        return profiles.scroll_card(state)
+
+    def apply_stored(self, dev_id):
+        """Blocking: reapply stored settings to a device (discovery, reconnect)."""
+        dev = self.reg.devices.get(dev_id)
+        if dev is None:
+            return
+        card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix))
+        value = profiles.pointer_value(card) if card else None
+        if value is not None:
+            self._apply_pointer(dev, value)
+        card = self.store.get(profiles.scroll_slot(dev.slot_prefix))
+        req = profiles.scroll_request(card) if card else None
+        if req is not None:
+            try:
+                self._apply_scroll(dev, req)
+            except Exception as exc:
+                log.warning("reapplying scroll wheel settings failed: %s", exc)
+
+    async def _profiles_set(self, path, payload):
+        loop = asyncio.get_event_loop()
+        if path == "/v2/profiles/reset":
+            return await self._profiles_reset(payload or {})
+        payload = payload or {}
+        entries = [op.get("set") for op in payload.get("ops") or [] if op.get("set")]
+        if "assignment" in payload:
+            entries.append(payload)
+        handled = None
+        for entry in entries:
+            asg = entry.get("assignment") or {}
+            slot_id = asg.get("slotId", "")
+            requested = asg.get("card") or entry.get("card") or {}
+            dev = self._device_for_slot(slot_id)
+            value = profiles.pointer_value(requested)
+            if dev is not None and value is not None:
+                apply_fn, arg, what = self._apply_pointer, value, "pointer speed"
+            else:
+                dev = self._device_for_scroll_slot(slot_id)
+                req = profiles.scroll_request(requested)
+                if dev is None or req is None:
+                    continue
+                apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
+            try:
+                card = await loop.run_in_executor(None, apply_fn, dev, arg)
+            except Exception as exc:
+                log.warning("%s write failed: %s", what, exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+            if card is None:
+                continue
+            self.store.set(asg["slotId"], card)
+            asg["card"], asg["cardId"] = card, card["id"]
+            handled = payload
+        if handled is None:
+            return None
+        await self._broadcast_profiles()
+        return "SUCCESS", handled, ""
+
+    async def _profiles_reset(self, info):
+        loop = asyncio.get_event_loop()
+        for dev in list(self.reg.devices.values()):
+            if info.get("deviceId") and info["deviceId"] != dev.id:
+                continue
+            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            self.store.remove(profiles.scroll_slot(dev.slot_prefix))
+            try:
+                await loop.run_in_executor(None, self._apply_defaults, dev)
+            except Exception as exc:
+                log.warning("applying defaults failed: %s", exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+        await self._broadcast_profiles()
+        return "SUCCESS", info, ""
+
+    def _apply_defaults(self, dev):
+        value = profiles.default_pointer_value(dev.depot)
+        if value is not None:
+            self._apply_pointer(dev, value)
+        else:
+            self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
 
     def _open_settings(self):
         """Open the desktop's mouse settings if a known tool is installed."""
