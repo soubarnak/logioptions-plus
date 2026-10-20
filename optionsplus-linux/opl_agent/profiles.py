@@ -224,9 +224,12 @@ class ProfileStore:
     def __init__(self, state_dir):
         self.path = os.path.join(state_dir, "profiles.json")
         self.cards = {}
+        self.apps = {}                  # application id -> {slot id: card}: that application's buttons
         try:
             with open(self.path) as fh:
-                self.cards = dict(json.load(fh).get("assignments") or {})
+                data = json.load(fh)
+            self.cards = dict(data.get("assignments") or {})
+            self.apps = {a: dict(c) for a, c in (data.get("applications") or {}).items()}
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -237,7 +240,7 @@ class ProfileStore:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w") as fh:
-                json.dump({"assignments": self.cards}, fh, indent=1)
+                json.dump({"assignments": self.cards, "applications": self.apps}, fh, indent=1)
             os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("cannot save profiles: %s", exc)
@@ -245,9 +248,30 @@ class ProfileStore:
     def get(self, slot_id):
         return self.cards.get(slot_id)
 
-    def set(self, slot_id, card):
-        self.cards[slot_id] = copy.deepcopy(card)
+    def set(self, slot_id, card, app_id=None):
+        """Keep `card` for a slot, in the default profile or in application `app_id`'s."""
+        (self.apps.setdefault(app_id, {}) if app_id else self.cards)[slot_id] = copy.deepcopy(card)
         self._save()
+
+    def app_cards(self, app_id):
+        return self.apps.get(app_id) or {}
+
+    def effective_cards(self, app_id=None):
+        """Slot -> card in force while application `app_id` has the focus: the default
+        profile's, with the application's own over them."""
+        return {**self.cards, **self.app_cards(app_id)}
+
+    def remove_app_buttons(self, app_id, predicate):
+        """Forget the application's cards for the slots `predicate` accepts; an application
+        left with none has no profile any more."""
+        cards = self.apps.get(app_id) or {}
+        gone = [s for s in cards if predicate(s)]
+        for s in gone:
+            del cards[s]
+        if not cards:
+            self.apps.pop(app_id, None)
+        if gone:
+            self._save()
 
     def remove(self, slot_id):
         if self.cards.pop(slot_id, None) is not None:
@@ -261,8 +285,8 @@ class ProfileStore:
             self._save()
 
 
-def profiles(devices, store=None, live=None):
-    """The default profile. `live` maps device id -> {"dpi", "range"} from the device."""
+def profiles(devices, store=None, live=None, active_app=None):
+    """The default profile and one per application. `live` maps device id -> {"dpi", "range"} from the device."""
     live = live or {}
     assignments = []
     for dev in devices:
@@ -285,11 +309,26 @@ def profiles(devices, store=None, live=None):
             tcard = thumb_wheel_card(rd["thumb"]["invert"], rd["thumb"]["smooth"], rd["thumb"].get("speed", 0))
         if tcard is not None:
             assignments.append({"slotId": tslot, "cardId": tcard.get("id", ""), "card": tcard})
-    return {
-        "@type": TYPE + "logi.protocol.profiles_v2.Profiles",
-        "profiles": [{
-            "id": DEFAULT_PROFILE_ID, "name": "PROFILE_NAME_DEFAULT",
-            "applicationId": DEFAULT_PROFILE_ID, "activeForApplication": True,
-            "assignments": assignments, "baseProfileId": "",
-        }],
-    }
+    active = active_app if store and active_app in store.apps else None
+    out = [{
+        "id": DEFAULT_PROFILE_ID, "name": "PROFILE_NAME_DEFAULT",
+        "applicationId": DEFAULT_PROFILE_ID, "activeForApplication": active is None,
+        "assignments": assignments, "baseProfileId": "",
+    }]
+    for app_id in sorted(store.apps if store else ()):
+        out.append({
+            "id": app_id, "name": app_id, "applicationId": app_id,
+            "activeForApplication": app_id == active,
+            "assignments": _app_assignments(assignments, store.apps[app_id]), "baseProfileId": DEFAULT_PROFILE_ID,
+        })
+    return {"@type": TYPE + "logi.protocol.profiles_v2.Profiles", "profiles": out}
+
+
+def _app_assignments(base, cards):
+    """The default profile's assignments with an application's own cards over its buttons."""
+    cards = dict(cards)
+    out = []
+    for a in base:
+        card = cards.pop(a["slotId"], None)
+        out.append(a if card is None else {"slotId": a["slotId"], "cardId": card.get("id", ""), "card": card})
+    return out + [{"slotId": s, "cardId": c.get("id", ""), "card": c} for s, c in cards.items()]

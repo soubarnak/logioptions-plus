@@ -136,6 +136,18 @@ Manual check (GNOME, hardware needed): assign "Next track" and the "next virtual
 action to two buttons, press them, and confirm the player skips and the workspace changes. Then put
 your compositor's own binding in `actions.toml` and press again.
 
+## Per-application profiles
+
+Add an application in Options+ and give it its own button assignments; a button the application
+does not change keeps the default profile's card. The active profile follows the focused window.
+On X11 the agent reads it with `xprop` (install it; nothing else is needed) and matches the window's
+WM_CLASS or program to the application's id, program or name. Without X11 or `xprop`, or on Wayland,
+the default profile stays active. Only button assignments differ per application; pointer speed and
+wheel settings stay global. A button is re-diverted only when the set of diverted buttons changes.
+
+Manual check (X11, hardware needed): add Firefox, assign Back to a "Reload" keystroke (F5), focus
+Firefox and press Back (the page reloads), then focus a terminal and press Back (it goes back).
+
 ## Support
 
 Links in the Options+ UI (support, device support, release notes, feedback) open this

@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 
-from . import resources, updates
+from . import focus, resources, updates
 from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
@@ -27,6 +27,7 @@ log = logging.getLogger("opl.main")
 TYPE = "type.googleapis.com/"
 
 POLL_SECONDS = 30
+FOCUS_SECONDS = 0.5      # how often the focused window is looked at
 RESCAN_SECONDS = 2.0     # also the longest a switched-off mouse can stay on screen
 
 
@@ -99,6 +100,26 @@ async def _poll(server, reg, interval=POLL_SECONDS):
                 _broadcast_battery(server, reg, dev_id)
 
 
+async def _track_focus(router, source, interval=FOCUS_SECONDS):
+    """Poll the window source; hand each change of the focused window to the router."""
+    loop = asyncio.get_event_loop()
+    last = object()
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            window = await loop.run_in_executor(None, source.active)
+        except Exception as exc:
+            log.debug("cannot tell the focused window: %s", exc)
+            continue
+        if window == last:
+            continue
+        last = window
+        try:
+            await loop.run_in_executor(None, router.on_focus, window)
+        except Exception:
+            log.exception("switching profile failed")
+
+
 class Agent:
     """One agent instance: registry, router, IPC server and battery poller.
 
@@ -114,7 +135,7 @@ class Agent:
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
                  release_base_url=None, clock=None, manifest_path=None,
-                 input_factory=None):
+                 input_factory=None, window_source=None, focus_seconds=FOCUS_SECONDS):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
@@ -132,6 +153,9 @@ class Agent:
         updater.on_restart = self._request_restart
         self.poll_seconds = poll_seconds
         self.rescan_seconds = rescan_seconds
+        self.window_source = window_source if window_source is not None else focus.default_source()
+        self.focus_seconds = focus_seconds
+        self._tracker = None
         self._watcher = None
         self._srv = None
         self._poller = None
@@ -148,6 +172,8 @@ class Agent:
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
         self._updates = asyncio.ensure_future(self.router.updater.run())
         self._watcher = asyncio.ensure_future(_watch(self.server, self.reg, self.rescan_seconds))
+        if self.window_source is not None:
+            self._tracker = asyncio.ensure_future(_track_focus(self.router, self.window_source, self.focus_seconds))
 
     def _battery_after_resume(self, dev_id):
         """Registry hook (reader thread): push the battery read taken after wake."""
@@ -192,6 +218,8 @@ class Agent:
             self._updates.cancel()
         if self._watcher:
             self._watcher.cancel()
+        if self._tracker:
+            self._tracker.cancel()
         if self._srv:
             self._srv.close()
             await self._srv.wait_closed()

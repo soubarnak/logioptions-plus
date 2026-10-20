@@ -145,6 +145,7 @@ class InputEngine:
         self._lock = threading.RLock()
         self._active = {}               # dev_id -> {control key: events | Gesture | Thumb}
         self._held = {}                 # dev_id -> set of cids held down now
+        self.active_app = None          # application id whose profile is in force; None: the default
         self._swipes = {}               # dev_id -> (cid, Swipe) of the gesture button press in progress
         registry.on_button_event.append(self.on_event)
         registry.on_thumb_event.append(self.on_thumb_event)
@@ -193,11 +194,8 @@ class InputEngine:
         raw = isinstance(binding, gestures.Gesture)
         self.reg.set_divert(dev.id, key, binding is not None, raw if info["raw_xy"] else None)
 
-    def assign(self, dev, key, card):
-        """Make control `key` (a control id, or profiles.THUMB_KEY) run `card`. Blocking. Raises
-        Unsupported for a card or control that cannot, any other error when the device write
-        fails; nothing changes then."""
-        binding = compile_binding(card, self.table)
+    def _check(self, dev, key, binding):
+        """Raise Unsupported unless control `key` of `dev` can run `binding`."""
         if key == profiles.THUMB_KEY:
             if not dev.thumb_wheel:
                 raise Unsupported("this device has no thumb wheel")
@@ -209,10 +207,22 @@ class InputEngine:
                 raise Unsupported("a two-way action can only be assigned to the thumb wheel")
             if isinstance(binding, gestures.Gesture) and not info["raw_xy"]:
                 raise Unsupported("this button cannot do gestures")
+
+    def assign(self, dev, key, card):
+        """Make control `key` (a control id, or profiles.THUMB_KEY) run `card`. Blocking. Raises
+        Unsupported for a card or control that cannot, any other error when the device write
+        fails; nothing changes then."""
+        binding = compile_binding(card, self.table)
+        self._check(dev, key, binding)
         self.sink()                     # never divert a control that could not be injected for
         self._write(dev, key, binding)
         with self._lock:
             self._active.setdefault(dev.id, {})[key] = binding
+
+    def validate(self, dev, key, card):
+        """Raise Unsupported unless control `key` could run `card`; touches nothing."""
+        self._check(dev, key, compile_binding(card, self.table))
+        self.sink()
 
     def release(self, dev, key):
         """Hand control `key` back to the mouse. Blocking; raises when the device write fails,
@@ -234,7 +244,7 @@ class InputEngine:
         defaults = {a["slotId"]: a["cardId"]
                     for a in profiles.default_assignments(dev.slot_prefix, dev.depot)}
         out = {}
-        for slot_id, card in self.store.cards.items():
+        for slot_id, card in self.store.effective_cards(self.active_app).items():
             key = profiles.control_key(slot_id, dev.slot_prefix)
             if key is None or card.get("id") == defaults.get(slot_id):
                 continue
@@ -243,6 +253,60 @@ class InputEngine:
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
         return out
+
+    def activate(self, app_id, devices):
+        """Blocking: put application `app_id`'s profile in force (None: the default one). Per
+        device, only the controls whose diversion differs are written; a control that stays
+        diverted the same way just runs its new card. The first error is raised after every
+        device is tried."""
+        self.active_app = app_id
+        first_error = None
+        for dev in devices:
+            try:
+                self._rebase(dev)
+            except Exception as exc:
+                log.warning("switching %s to the profile of %s failed: %s", dev.id, app_id or "the default", exc)
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+
+    @staticmethod
+    def _diversion(binding):
+        """What the mouse must be told for `binding`: nothing differs between plain cards."""
+        return None if binding is None else isinstance(binding, gestures.Gesture)
+
+    def _rebase(self, dev):
+        try:
+            self.reg.controls(dev.id)
+        except hidpp.FeatureNotSupported:
+            return
+        desired = self._desired(dev)
+        with self._lock:
+            current = dict(self._active.get(dev.id, {}))
+        first_error = None
+        for key in sorted(set(current) | set(desired), key=str):
+            old, new = current.get(key), desired.get(key)
+            if self._diversion(old) == self._diversion(new):
+                if new is not None:
+                    current[key] = new
+                continue
+            try:
+                if new is not None:
+                    self.sink()
+                self._write(dev, key, new)
+            except Exception as exc:
+                first_error = first_error or exc
+                if isinstance(exc, hidpp.HidppTimeout):
+                    break
+                continue
+            if new is not None:
+                current[key] = new
+            else:
+                del current[key]
+        with self._lock:
+            self._active[dev.id] = current
+        if first_error is not None:
+            raise first_error
 
     def sync(self, dev):
         """Blocking: bring the mouse's diversions in line with the store. Reads each divertable

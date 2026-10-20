@@ -76,6 +76,7 @@ class SimulatedMouse:
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
         self.diverted = set()
+        self.divert_writes = []                     # cids software asked to divert or undivert, in order
         self.raw_xy = set()                         # controls whose motion is reported as raw XY
         self.held = []
         self.fail_divert_write = False              # answer setCidReporting with an error
@@ -210,6 +211,7 @@ class SimulatedMouse:
                 else:
                     self.remap.pop(cid, None)
                 if params[2] & (DIVERT << 1):
+                    self.divert_writes.append(cid)
                     if not next(c for c in CONTROLS if c[0] == cid)[2] & 0x20:
                         return 2                      # not divertable
                     if not self.ignore_divert:
