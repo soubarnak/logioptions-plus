@@ -17,7 +17,7 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150]
 F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
 
 
@@ -40,6 +40,9 @@ class SimulatedMouse:
         self.wheel_caps = 0x08 | 0x04               # invert supported, ratchet switch
         self.wheel_mode = 0x02                      # as the kernel driver leaves it: HID++ target off,
                                                     # high resolution on, invert off
+        # 0x2150 thumb wheel: reporting mode 1 native / 2 diverted, direction inverted, smooth
+        self.thumb = {"mode": 1, "invert": 0, "smooth": 0}
+        self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
         self.wpid = MOUSE_WPID                      # hardware identity behind the receiver
         self.powered = True
 
@@ -120,6 +123,17 @@ class SimulatedMouse:
                     return 5
                 self.wheel_mode = params[0]
                 return bytes([self.wheel_mode])
+        elif fid == 0x2150:
+            t = self.thumb
+            if fn == 0:                               # info: native res, diverted res, default dir, caps
+                return struct.pack(">HHBB", 120, 14, 0, 0x03)
+            if fn == 1:
+                return bytes([t["mode"], t["invert"], t["smooth"]])
+            if fn == 2:
+                if self.fail_thumb_write:
+                    return 5                          # ERR_BUSY
+                t.update(mode=params[0], invert=params[1] & 1, smooth=params[2] & 1)
+                return bytes([t["mode"], t["invert"], t["smooth"]])
         return 7                                      # INVALID_FUNCTION_ID
 
 

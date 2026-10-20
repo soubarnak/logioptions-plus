@@ -133,7 +133,8 @@ def test_default_profile_assignments_come_from_the_depot(client):
     reply = client.call("GET", "/v2/profiles")
     slots = {a["slotId"] for a in reply["payload"]["profiles"][0]["assignments"]}
     assert slots == {"046d_4242_c82", "046d_4242_c83", "046d_4242_thumb_wheel_adapter",
-                     "046d_4242_mouse_settings", "046d_4242_mouse_scroll_wheel_settings"}
+                     "046d_4242_mouse_settings", "046d_4242_mouse_scroll_wheel_settings",
+                     "046d_4242_mouse_thumb_wheel_settings"}
 
 
 def test_localized_strings_come_from_the_depot(client):
