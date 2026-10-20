@@ -12,7 +12,7 @@ import json
 import logging
 import os
 
-from . import resources
+from . import resources, wheel_relay
 
 log = logging.getLogger("opl.profiles")
 
@@ -118,9 +118,17 @@ def scroll_slot(slot_prefix):
     return slot_prefix + SCROLL_SUFFIX
 
 
-def scroll_card(state):
+def shown_speed(speed, adjustable):
+    """The speed a card shows: 0 while the relay cannot apply one, else the value, neutral when unset."""
+    if not adjustable:
+        return 0
+    return speed if isinstance(speed, (int, float)) and speed > 0 else wheel_relay.NEUTRAL_SPEED
+
+
+def scroll_card(state, speed=0):
     """The scroll wheel card for what the mouse reports ({"smartshift", "wheel"} from
-    Registry.read_scroll), or None when it has neither feature."""
+    Registry.read_scroll), or None when it has neither feature. `speed` is the wheel speed
+    in force, 0 when it cannot be adjusted."""
     settings = {}
     ss, wheel = state.get("smartshift"), state.get("wheel")
     if ss is not None:
@@ -130,13 +138,14 @@ def scroll_card(state):
     if wheel is not None:
         settings["isSmooth"] = wheel["hires"]
         settings["dir"] = "INVERTED" if wheel["invert"] else "NORMAL"
+        settings["speed"] = speed
     if not settings:
         return None
     return {"id": SCROLL_ATTRIBUTE, "attribute": SCROLL_ATTRIBUTE, "mouseScrollWheelSettings": settings}
 
 
 def scroll_request(card):
-    """What a scroll wheel card asks for: {ratchet, threshold, hires, invert}, each None
+    """What a scroll wheel card asks for: {ratchet, threshold, hires, invert, speed}, each None
     when the card leaves it alone; None when it is not a scroll wheel card at all."""
     try:
         s = card["mouseScrollWheelSettings"]
@@ -146,7 +155,7 @@ def scroll_request(card):
         return None
     ss = s.get("smartshift") or {}
     req = {"ratchet": ss.get("isEnabled"), "threshold": None,
-           "hires": s.get("isSmooth"), "invert": None}
+           "hires": s.get("isSmooth"), "invert": None, "speed": _speed(s.get("speed"))}
     if ss.get("sensitivity") is not None:
         req["threshold"] = min(SENSITIVITY_MAX, max(SENSITIVITY_MIN, int(ss["sensitivity"])))
     if s.get("dir") in ("NORMAL", "INVERTED"):
@@ -162,11 +171,24 @@ def thumb_wheel_slot(slot_prefix):
     return slot_prefix + THUMB_WHEEL_SUFFIX
 
 
-def thumb_wheel_card(invert, smooth):
-    """Thumb wheel card; speed stays 0 (not adjustable) until the relay exists."""
+def _speed(value):
+    """A card's speed value as a number, or None when it carries none."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def thumb_wheel_card(invert, smooth, speed=0):
+    """Thumb wheel card; speed is 0 while the wheel relay cannot apply one."""
     return {"id": THUMB_ATTRIBUTE, "attribute": THUMB_ATTRIBUTE,
             "mouseThumbWheelSettings": {"dir": DIR_INVERTED if invert else DIR_STANDARD,
-                                        "isSmooth": bool(smooth), "speed": 0}}
+                                        "isSmooth": bool(smooth), "speed": speed}}
+
+
+def thumb_speed(card):
+    """The speed a thumb wheel card asks for, None where it says nothing."""
+    try:
+        return _speed(card["mouseThumbWheelSettings"].get("speed"))
+    except (KeyError, TypeError, AttributeError):
+        return None
 
 
 def thumb_wheel_fields(card):
@@ -248,7 +270,7 @@ def profiles(devices, store=None, live=None):
         tslot = thumb_wheel_slot(dev.slot_prefix)
         tcard = store.get(tslot) if store else None
         if tcard is None and "thumb" in rd:
-            tcard = thumb_wheel_card(rd["thumb"]["invert"], rd["thumb"]["smooth"])
+            tcard = thumb_wheel_card(rd["thumb"]["invert"], rd["thumb"]["smooth"], rd["thumb"].get("speed", 0))
         if tcard is not None:
             assignments.append({"slotId": tslot, "cardId": tcard.get("id", ""), "card": tcard})
     return {

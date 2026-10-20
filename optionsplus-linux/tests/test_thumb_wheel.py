@@ -40,7 +40,8 @@ def test_thumb_wheel_slot_is_seeded_from_the_live_status(client):
     assert asg is not None, "hotspot would say MISSING ASSIGNMENT"
     assert asg["card"]["attribute"] == "MOUSE_THUMB_WHEEL_SETTINGS"
     s = settings(asg)
-    assert s["dir"] == "STANDARD" and s["isSmooth"] is False and s["speed"] == 0
+    assert s["dir"] == "STANDARD" and s["isSmooth"] is False
+    assert s["speed"] == 0.5                      # neutral: the wheel relay can apply a speed (ticket #25)
 
 
 def test_seed_reflects_a_mouse_that_is_already_inverted_and_smooth(agent_factory, bolt):
@@ -74,15 +75,20 @@ def test_smooth_writes_through_2150_and_keeps_direction(client, bolt):
 
 def test_write_never_diverts_the_wheel(client, bolt):
     put(client, dir="NATURAL", isSmooth=True)
-    assert bolt.mouse.thumb["mode"] == 1          # native HID reporting, no relay yet
+    assert bolt.mouse.thumb["mode"] == 0          # native HID reporting: no speed asked, nothing relayed
 
 
-def test_speed_is_not_adjustable_without_the_relay(client):
-    reply = put(client, speed=0.8, dir="NATURAL")
-    assert settings(reply["payload"]["assignment"])["speed"] == 0
-    assert settings(assignment(get_profile(client)))["speed"] == 0
-    caps = device_info(client)["capabilities"]
-    assert caps["mouseThumbWheelOverride"]["speed"] == 0
+def test_speed_is_not_adjustable_without_the_relay(agent_factory, uinput):
+    uinput.fail_create = True                     # no virtual device: no relay
+    c = agent_factory().client()
+    try:
+        reply = put(c, speed=0.8, dir="NATURAL")
+        assert settings(reply["payload"]["assignment"])["speed"] == 0
+        assert settings(assignment(get_profile(c)))["speed"] == 0
+        caps = device_info(c)["capabilities"]
+        assert caps["mouseThumbWheelOverride"]["speed"] == 0
+    finally:
+        c.close()
 
 
 def test_failed_device_write_is_a_failure_and_keeps_the_old_value(client, bolt):

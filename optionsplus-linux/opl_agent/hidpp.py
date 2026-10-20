@@ -740,27 +740,44 @@ def get_wheel(fd, idx):
             "invert": bool(mode & WHEEL_MODE_INVERT)}
 
 
-def set_wheel(fd, idx, hires=None, invert=None):
+def set_wheel(fd, idx, hires=None, invert=None, target=None):
     """fn2 setWheelMode. Starts from the mode the device reports, so bits the
-    kernel driver set (including the diversion target) survive. Returns the
-    state read back."""
+    kernel driver set (including the diversion target) survive unless asked
+    for. `target` diverts the wheel to software (True) or hands it back.
+    Returns the state read back."""
     mode = get_wheel(fd, idx)["mode"]
-    for flag, want in ((WHEEL_MODE_HIRES, hires), (WHEEL_MODE_INVERT, invert)):
+    for flag, want in ((WHEEL_MODE_TARGET, target), (WHEEL_MODE_HIRES, hires), (WHEEL_MODE_INVERT, invert)):
         if want is not None:
             mode = (mode | flag) if want else (mode & ~flag)
     _fcall(fd, idx, F_HIRES_WHEEL, 2, bytes([mode]))
     return get_wheel(fd, idx)
 
+
+def parse_wheel_event(params):
+    """0x2121 event 0 (wheel movement) -> (hires, delta). The delta is signed, positive scrolling
+    up; in 1/multiplier notches when hires, else in whole notches. None when too short."""
+    if len(params) < 3:
+        return None
+    return bool(params[0] & 0x10), struct.unpack(">h", bytes(params[1:3]))[0]
+
+
 # ThumbWheel (0x2150)
 # --------------------------------------------------------------------------
 
-THUMB_NATIVE, THUMB_DIVERTED = 1, 2     # reporting modes: HID native / sent to software
+THUMB_NATIVE, THUMB_DIVERTED = 0, 1     # reporting mode byte: HID native / sent to software
+
+
+def get_thumbwheel_info(fd, idx):
+    """fn0 getThumbwheelInfo -> {native, diverted}: rotation units per notch-equivalent in each mode."""
+    p = _fcall(fd, idx, F_THUMB_WHEEL, 0)
+    native, diverted = struct.unpack(">HH", bytes(p[:4]))
+    return {"native": native, "diverted": diverted}
 
 
 def get_thumbwheel(fd, idx):
     """fn1 getThumbwheelStatus -> {mode, invert, smooth}.
 
-    mode is 1 (native HID) or 2 (diverted), invert is the direction flag.
+    mode is 0 (native HID) or 1 (diverted), invert is the direction flag.
     The smooth byte follows invert; not confirmed on hardware, see
     feature-parity.md section 4."""
     p = _fcall(fd, idx, F_THUMB_WHEEL, 1)
@@ -771,6 +788,14 @@ def set_thumbwheel(fd, idx, invert, smooth, mode=THUMB_NATIVE):
     """fn2 setThumbwheelReporting(mode, invert, smooth) -> status read back."""
     _fcall(fd, idx, F_THUMB_WHEEL, 2, bytes([mode, 1 if invert else 0, 1 if smooth else 0]))
     return get_thumbwheel(fd, idx)
+
+
+def parse_thumb_event(params):
+    """0x2150 event 0 (thumb wheel movement) -> the signed rotation, positive to the right;
+    None when too short."""
+    if len(params) < 2:
+        return None
+    return struct.unpack(">h", bytes(params[:2]))[0]
 
 
 # --------------------------------------------------------------------------
