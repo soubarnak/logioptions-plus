@@ -970,11 +970,13 @@ def get_host_name(fd, idx, host, length):
 
 
 def get_host_os(fd, idx, host):
-    """0x1815 fn5 getHostOsVersion(host) -> OS type byte (0 unknown); 0 when the read fails."""
+    """0x1815 fn7 getHostOsVersion(host) -> reply [host, os type, major, minor, patch];
+    -> the OS type, 0 (unknown) on an error reply, a timeout or a reply for another host."""
     try:
-        return _fcall(fd, idx, F_HOSTS_INFO, 5, bytes([host]))[0]
+        p = _fcall(fd, idx, F_HOSTS_INFO, 7, bytes([host]))
     except HidppError:
         return 0
+    return p[1] if p[0] == host else 0
 
 
 def get_hosts(fd, idx):
@@ -982,9 +984,13 @@ def get_hosts(fd, idx):
     "hosts": [{index, paired, bus, os, name, max_name}]}.
 
     0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
-    [host, status, bus type, pages, name length, max name length], fn5 getHostOsVersion(host)
-    [os type, major, minor, build]. A host whose OS cannot be read (error reply or timeout)
-    gets type 0, unknown."""
+    [host, status, bus type, pages, name length, max name length], fn3 getHostFriendlyName,
+    fn7 getHostOsVersion(host) [host, os type, major, minor, patch], read for paired hosts only.
+    The other 0x1815 functions are fn2 getHostDescriptor, fn4 setHostFriendlyName, fn5 moveHost,
+    fn6 deleteHost and fn8 setHostOsVersion; this reader never sends fn5, fn6 or fn8 (writes).
+    Sources: the Logitech agent log string Feature1815HostsInfos::GetHostOSVersion and the
+    OpenLogi function table (AprilNEA/OpenLogi PR 1824). A host whose OS cannot be read, or whose
+    reply names another host, gets type 0, unknown."""
     count, current = get_current_host(fd, idx)
     flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
     can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
@@ -993,7 +999,7 @@ def get_hosts(fd, idx):
         d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
         name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": get_host_os(fd, idx, i), "name": name,
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": get_host_os(fd, idx, i) if paired else 0, "name": name,
                       "max_name": d[5] or 32})
     return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
             "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}

@@ -12,8 +12,8 @@ BUS_TYPES = ["INVALID", "UNIFYING", "USB", "BT", "BLE", "BLEPRO"]
 # getHostOsVersion osType 1..9 (0 is unknown). The spelling the UI renders is still to be
 # confirmed live: bare proto names or the strings file keys, which carry OS_ in front.
 OS_PREFIX = ""
-_OS_BASE = ["WINDOWS", "MACOS", "LINUX", "ANDROID", "IOS", "CHROME", "WEBOS", "TIZEN",
-            "WINDOWS_EMBEDDED"]
+_OS_BASE = ["WINDOWS", "WINDOWS_EMBEDDED", "LINUX", "CHROME", "ANDROID", "MACOS", "IOS",
+            "WEBOS", "TIZEN"]
 
 
 def os_names(prefix):

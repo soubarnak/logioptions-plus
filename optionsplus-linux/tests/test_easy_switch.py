@@ -39,17 +39,18 @@ def test_lists_the_host_slots_with_names_and_the_current_host(client):
 
 
 def test_a_host_os_the_mouse_reports_is_named_with_the_chosen_spelling(agent_factory, bolt):
-    bolt.mouse.hosts[0]["os"] = 5
+    bolt.mouse.hosts[0]["os"] = 7
     c = agent_factory().client()
     try:
-        assert hosts(c)["hosts"][0]["os"]["type"] == easy_switch.OS_NAMES[5]
-        assert easy_switch.OS_NAMES[5].endswith("IOS")
+        assert hosts(c)["hosts"][0]["os"]["type"] == easy_switch.OS_NAMES[7]
+        assert easy_switch.OS_NAMES[7].endswith("IOS")
     finally:
         c.close()
 
 
 def test_the_os_names_can_be_switched_to_the_prefixed_strings_keys():
     assert easy_switch.os_names("OS_")[3] == "OS_LINUX"
+    assert easy_switch.os_names("OS_")[2] == "OS_WINDOWS_EMBEDDED"
     assert easy_switch.os_names("")[3] == "LINUX"
 
 
@@ -60,6 +61,22 @@ def test_an_unknown_or_out_of_range_host_os_is_omitted(agent_factory, bolt):
         assert "os" not in hosts(c)["hosts"][0]
     finally:
         c.close()
+
+
+def test_a_host_os_reply_for_another_host_is_ignored(agent_factory, bolt):
+    bolt.mouse.host_os_echo = 1
+    c = agent_factory().client()
+    try:
+        assert "os" not in hosts(c)["hosts"][0]
+    finally:
+        c.close()
+
+
+def test_the_os_is_only_read_for_paired_hosts(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1815)
+    os_reads = [w for w in bolt.writes if w[2] == index and w[3] >> 4 == 7]
+    assert len(os_reads) == 2
 
 
 def test_a_failing_host_os_read_omits_os_and_keeps_the_rest(agent_factory, bolt):
@@ -277,4 +294,5 @@ def test_reading_the_hosts_only_uses_known_0x1815_functions(client, bolt):
     hosts(client)
     index = bolt.mouse.features.index(0x1815)
     used = {w[3] >> 4 for w in bolt.writes if w[2] == index}
-    assert used <= {0, 1, 3, 5}     # an unconfirmed function number could move or delete a host
+    assert not bolt.mouse.host_writes               # never moveHost (5), deleteHost (6), setHostOsVersion (8)
+    assert used <= {0, 1, 3, 7}     # an unconfirmed function number could move or delete a host
