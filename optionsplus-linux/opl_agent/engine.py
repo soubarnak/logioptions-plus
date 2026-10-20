@@ -259,6 +259,28 @@ class InputEngine:
             except Exception:
                 log.debug("closing the virtual device failed", exc_info=True)
 
+    def release_all(self):
+        """Blocking, best effort at shutdown: hand every control this engine diverted (the thumb
+        wheel included) back to its mouse, so none stays dead after the agent is gone. A mouse
+        that stops answering is given up on; the others still get their turn."""
+        with self._lock:
+            held = {dev_id: list(keys) for dev_id, keys in self._active.items() if keys}
+        for dev_id, keys in held.items():
+            dev = self.reg.devices.get(dev_id)
+            if dev is None:
+                continue
+            with self._dev_lock(dev_id):
+                for key in keys:
+                    try:
+                        self._write(dev, key, None)
+                    except Exception as exc:
+                        log.warning("handing control %s of %s back failed: %s", key, dev_id, exc)
+                        if isinstance(exc, hidpp.HidppTimeout):
+                            break
+                        continue
+                    with self._lock:
+                        self._active.get(dev_id, {}).pop(key, None)
+
     def owns_thumb(self, dev_id):
         """Whether a thumb action card is bound on `dev_id`: the engine then owns the thumb wheel."""
         with self._lock:

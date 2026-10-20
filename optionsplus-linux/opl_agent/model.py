@@ -339,6 +339,7 @@ class Registry:
         self.on_discovery = []     # callables(rcv_id, Discovery payload, Advertise payload or None)
         self.on_locking = []       # callables(rcv_id, Locking payload): the Unifying lock opened or closed
         self._jobs = CoalescingJobs()   # work an event starts, off the Reader's dispatch thread
+        self.closed = False        # set when shutting down: nothing is opened or rescanned any more
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
@@ -351,6 +352,8 @@ class Registry:
                 pass
             fd = None
         if fd is None:
+            if self.closed:
+                raise OSError("the registry is closed")
             fd = hidpp.Reader(self.transport.open(node.path),
                               long_only=getattr(node, "long_only", False))
             fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx, fn, params))
@@ -528,6 +531,9 @@ class Registry:
         (Device objects for removed ones, marked not connected). Receivers report as
         "receiver_added" (ids, new or returned) and "receiver_removed" (Receiver objects)."""
         with self._scan_lock:
+            if self.closed:
+                return {"added": [], "returned": [], "removed": [],
+                        "receiver_added": [], "receiver_removed": []}
             return self._rescan(force)
 
     def _rescan(self, force):
@@ -1217,15 +1223,17 @@ class Registry:
         return self.read_scroll(dev_id)
 
     def close(self):
+        self.closed = True
         self._jobs.close()
-        for r in list(self.receivers.values()) + list(self.absent_receivers.values()):
-            self._disarm(r)
-        for fd in self._fds.values():
-            try:
-                hidpp.close_node(fd)
-            except OSError:
-                pass
-        self._fds.clear()
+        with self._scan_lock:           # a rescan in flight finishes before the descriptors go
+            for r in list(self.receivers.values()) + list(self.absent_receivers.values()):
+                self._disarm(r)
+            for fd in self._fds.values():
+                try:
+                    hidpp.close_node(fd)
+                except OSError:
+                    pass
+            self._fds.clear()
 
 
 def _warn_level(pct):

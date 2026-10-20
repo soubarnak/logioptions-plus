@@ -13,9 +13,11 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import logging.handlers
 import os
+import signal
 import sys
 
 from . import focus, resources, updates
@@ -29,6 +31,7 @@ TYPE = "type.googleapis.com/"
 
 POLL_SECONDS = 30
 FOCUS_SECONDS = 0.5      # how often the focused window is looked at
+SHUTDOWN_SECONDS = 5.0   # longest each step of a stop (work in flight, handing the mouse back) may take
 RESCAN_SECONDS = 2.0     # also the longest a switched-off mouse can stay on screen
 
 
@@ -304,9 +307,29 @@ class Agent:
             except Exception as exc:
                 log.debug("closing the window source failed: %s", exc)
         await self._close_server()
-        self.router.relay.close()           # hand the wheels back while the transport is still open
-        self.reg.close()
+        self.reg.closed = True              # no rescan or reopen from here on
+        loop = asyncio.get_running_loop()
+        try:                                # let work already running finish before the hand-back
+            await asyncio.wait_for(loop.shutdown_default_executor(), SHUTDOWN_SECONDS)
+        except asyncio.TimeoutError:
+            log.warning("work in progress did not finish in time")
+        # hand everything back while the transport is still open, off the loop and on a deadline
+        pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="opl-stop")
+        try:
+            await asyncio.wait_for(loop.run_in_executor(pool, self._hand_back), SHUTDOWN_SECONDS)
+        except asyncio.TimeoutError:
+            log.warning("handing the mouse back timed out")
+        finally:
+            pool.shutdown(wait=False)
         self.router.engine.close()
+
+    def _hand_back(self):
+        """Blocking: wheels and diverted buttons go back to the mouse, then the transport closes."""
+        try:
+            self.router.relay.close()
+            self.router.engine.release_all()
+        finally:
+            self.reg.close()
 
 
 LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -338,6 +361,27 @@ def setup_logging(environ=None):
     return path
 
 
+def handle_termination(loop, stop):
+    """SIGTERM / SIGHUP (logout, session teardown) take the same graceful path as a restart."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            loop.add_signal_handler(sig, stop)
+        except (NotImplementedError, RuntimeError, ValueError):
+            log.debug("cannot handle %s here", sig)
+
+
+async def run(agent, ready=None):
+    """Serve until stopped, then hand every diverted control back to the mouse. `ready` is
+    called once the signal handlers are in place."""
+    handle_termination(asyncio.get_running_loop(), agent.restart_requested.set)
+    if ready is not None:
+        ready()
+    try:
+        await agent.serve_forever()
+    finally:
+        await agent.stop()
+
+
 async def main():
     setup_logging()
     if socket_alive(socket_path()):
@@ -345,10 +389,7 @@ async def main():
         return
     agent = Agent()
     await agent.start()
-    try:
-        await agent.serve_forever()
-    finally:
-        await agent.stop()
+    await run(agent)
 
 
 if __name__ == "__main__":

@@ -195,7 +195,8 @@ class WheelRelay:
         if ax is None or ax.diverted or is_neutral(ax.speed) or self.thumb_owned(dev.id):
             return
         if self.available(dev, THUMB):
-            self.set_thumb(dev)
+            # the device's own invert bit was cleared while diverted: restate the user's
+            self.set_thumb(dev, invert=ax.invert, smooth=ax.smooth)
 
     def _commit(self, ax, new, units):
         with self._lock:

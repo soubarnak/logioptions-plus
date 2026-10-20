@@ -448,3 +448,12 @@ def test_reset_hands_the_thumb_wheel_back_whoever_held_it(client, bolt):
     assign_thumb(client)
     reset(client)
     assert bolt.mouse.thumb["mode"] == 0
+
+
+def test_thumb_direction_survives_a_card_being_added_and_removed(client, bolt, uinput):
+    thumb(client, speed=FAST, dir="NATURAL")
+    assign_thumb(client)
+    assign_thumb(client, THUMB_DEFAULT)
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES))
+    assert uinput.rels(REL_HWHEEL_HI_RES) == [-480]
