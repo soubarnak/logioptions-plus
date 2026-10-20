@@ -809,7 +809,8 @@ REPORT_RAW_XY = 0x10            # same byte: divert raw XY motion; the change bi
 
 
 def get_controls(fd, idx):
-    """fn0 getControlCount, fn1 getControlInfo(i) -> {cid: {"reprogrammable", "divertable"}}."""
+    """fn0 getControlCount, fn1 getControlInfo(i) -> {cid: {"reprogrammable", "divertable", "raw_xy",
+    "group", "group_mask"}}. The group mask says which control groups the control may be remapped to."""
     count = _fcall(fd, idx, F_REPROG_CONTROLS, 0)[0]
     out = {}
     for i in range(count):
@@ -817,8 +818,18 @@ def get_controls(fd, idx):
         cid, flags = struct.unpack(">H", p[:2])[0], p[4]
         out[cid] = {"reprogrammable": bool(flags & CTRL_REPROGRAMMABLE),
                     "divertable": bool(flags & CTRL_DIVERTABLE),
-                    "raw_xy": bool(len(p) > 8 and p[8] & CTRL_RAW_XY)}
+                    "raw_xy": bool(len(p) > 8 and p[8] & CTRL_RAW_XY),
+                    "group": p[6] if len(p) > 6 else 0, "group_mask": p[7] if len(p) > 7 else 0}
     return out
+
+
+def can_remap(controls, source, target):
+    """True when control `source` may be remapped to control `target`: it is reprogrammable
+    and `target`'s group is one its group mask allows."""
+    src, dst = controls.get(source), controls.get(target)
+    if not src or not dst or not src["reprogrammable"] or not dst["group"]:
+        return False
+    return bool(src["group_mask"] & (1 << (dst["group"] - 1)))
 
 
 def get_cid_reporting(fd, idx, cid):
@@ -853,9 +864,8 @@ def set_cid_diverted(fd, idx, cid, divert, raw_xy=None):
     flags = (REPORT_DIVERT << 1) | (REPORT_DIVERT if divert else 0)
     if raw_xy is not None:
         flags |= (REPORT_RAW_XY << 1) | (REPORT_RAW_XY if raw_xy else 0)
-    # a request that names no target resets the remap, so say the one the control has now
-    remap = get_cid_remap(fd, idx, cid)
-    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, remap))
+    # target 0 means "keep the current mapping" (a swap survives a divert change)
+    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, 0))
     got_divert, got_raw, _ = get_cid_reporting(fd, idx, cid)
     if got_divert != bool(divert) or (raw_xy is not None and got_raw != bool(raw_xy)):
         raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request

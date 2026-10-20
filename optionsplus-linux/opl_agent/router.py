@@ -149,7 +149,7 @@ class Router:
 
         parts = path.strip("/").split("/")
         if verb in ("GET", "SET") and parts[0] == "mouse" and parts[-1] == "swap" \
-                and (len(parts) == 2 or len(parts) == 3 and (parts[1] == "global" or parts[1] in self.reg.devices)):
+                and (len(parts) == 2 or len(parts) == 3 and parts[1] == "global"):
             return await self._swap_route(verb, payload)
 
         if verb == "GET" and path == "/system/info":
@@ -701,9 +701,5 @@ class Router:
                 return "NO_SUCH_PATH", None, ""
             pl, _ = reg.battery(dev_id)
             return "SUCCESS", pl, ""
-
-        # /mouse/<id>/swap  (per-device button swap mirrors the global default)
-        if parts[0] == "mouse" and len(parts) >= 3 and parts[1] in reg.devices:
-            return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap", "state": "LEFT"}, ""
 
         return None

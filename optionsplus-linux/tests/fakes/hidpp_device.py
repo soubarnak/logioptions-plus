@@ -82,8 +82,10 @@ class SimulatedMouse:
         self.fail_divert_write = False              # answer setCidReporting with an error
         self.ignore_divert = False                  # accept setCidReporting but change nothing
         # 0x1b04 remap: cid -> cid it acts as. Left and right (80, 81) are remappable only when
-        # this is set; a setCidReporting that names no target (0) resets that control's remap.
+        # this is set; a setCidReporting that names no target (0) keeps that control's remap (as
+        # real mice do), and naming the control itself undoes the remap.
         self.remappable_primary = False
+        self.primary_group_mask = 1                 # 0x1b04 group mask of left/right: the groups they may become
         self.remap = {}
         self.fail_remap_write = False               # answer a remapping setCidReporting with an error
         self.fail_remap_write_after = None          # ... but only after this many accepted remaps
@@ -187,6 +189,7 @@ class SimulatedMouse:
                 cid, task, flags1, *rest = CONTROLS[params[0]]
                 if self.remappable_primary and cid in (80, 81):
                     flags1 |= 0x10
+                    rest[2] = self.primary_group_mask
                 return struct.pack(">HHBBBBB", cid, task, flags1, *rest)
             cid = struct.unpack(">H", params[:2])[0]
             if cid not in [c[0] for c in CONTROLS]:
@@ -199,6 +202,7 @@ class SimulatedMouse:
                     return 5
                 target = struct.unpack(">H", params[3:5])[0]
                 remapping = target not in (0, cid)
+                undoing = target == cid
                 if remapping and (self.fail_remap_write or (
                         self.fail_remap_write_after is not None
                         and len(self.remap) >= self.fail_remap_write_after)):
@@ -208,8 +212,8 @@ class SimulatedMouse:
                             or next(c for c in CONTROLS if c[0] == cid)[2] & 0x10):
                         return 2                      # not remappable
                     self.remap[cid] = target
-                else:
-                    self.remap.pop(cid, None)
+                elif undoing:
+                    self.remap.pop(cid, None)          # target 0 keeps whatever mapping there is
                 if params[2] & (DIVERT << 1):
                     self.divert_writes.append(cid)
                     if not next(c for c in CONTROLS if c[0] == cid)[2] & 0x20:

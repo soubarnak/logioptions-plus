@@ -327,11 +327,18 @@ a remap do something.
   `configuration.json`, reapply on connect.
   **Implemented (#24, `opl_agent/swap.py`):** the choice is kept in `button_swap.json` in the
   state directory and reapplied on every connect (the device remap does not survive a power
-  cycle). Order: device remap (when controls 0x50 and 0x51 are reprogrammable) > X11
-  `xmodmap -e "pointer = 3 2 1"` (needs `DISPLAY`, no Wayland session, `xmodmap` installed) >
-  `NOT_SUPPORTED` with a message pointing at the desktop's mouse settings. **Wayland without
-  device support cannot swap from an app; use the desktop's own setting.** The X11 swap is
-  reapplied only when a mouse connects, not at login without one.
+  cycle). ONE method is used system-wide: the device remap when every connected pointer
+  allows it (controls 0x50 and 0x51 reprogrammable and each in the other's group mask);
+  otherwise, in an X11 session (`DISPLAY`, `XDG_SESSION_TYPE` x11 or tty, no
+  `WAYLAND_DISPLAY`, `xinput` installed), `xinput set-button-map <id> 3 2 1` on the Logitech
+  pointers only, with every device remap cleared (the agent's own uinput device is left alone,
+  so injected clicks are not swapped); otherwise `NOT_SUPPORTED` with a message pointing at the
+  desktop's mouse settings. A mouse that rejects the remap falls back to X11 too. The method in
+  use is kept in `button_swap.json`. **Wayland without device support cannot swap from an app;
+  use the desktop's own setting.** With no mouse connected the choice is kept and applied on
+  connect. Only the global route `/mouse/global/swap` (and `/mouse/swap`) exists. Unverified on
+  hardware: the group-mask rule (taken from Solaar) and that 0x50/0x51 are remappable at all
+  (on many mice they are not, so X11 is the usual path).
 
 #### 5.2.1 Gesture and thumb wheel cards (ticket #23) - what is assumed
 
