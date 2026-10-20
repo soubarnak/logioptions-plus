@@ -100,10 +100,4 @@ SET_ECHO = {"/scarif/event", "/system/settings", "/mouse/global/swap",
 
 # Routes the real agent rejects; the UI treats the code as "feature absent".
 ERRORS = {
-    "/beta_testing/features": "NO_SUCH_PATH",
-    "/get_secure_input_app_name": "NO_SUCH_PATH",
-    "/accounts/user_info": "NOT_READY",
-    "/accounts/email_subscription": "NOT_READY",
-    "/migration/reports": "NOT_READY",
-    "/unified_profiles/activities": "INVALID_ARG",
 }

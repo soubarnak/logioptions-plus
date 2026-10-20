@@ -49,15 +49,16 @@ class Agent:
 
     Everything environment-specific is injectable so tests can run it in
     process: `transport` (HID++ node discovery and I/O, default real hidraw),
-    `socket_path`, `state_dir`, `depot_dir` and `data_dir`. With no arguments it
+    `socket_path`, `state_dir`, `depot_dir`, `data_dir` and `runner` (launches
+    desktop tools). With no arguments it
     is the production wiring."""
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
-                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS):
+                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS, runner=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
-        self.router = Router(self.reg, state_dir=state_dir)
+        self.router = Router(self.reg, state_dir=state_dir, runner=runner)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         self.poll_seconds = poll_seconds
