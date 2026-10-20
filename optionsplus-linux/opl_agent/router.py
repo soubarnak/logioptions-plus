@@ -142,6 +142,9 @@ class Router:
         if verb == "GET" and path == "/v2/profiles":
             return "SUCCESS", await self._profiles_payload(), ""
 
+        if verb == "SET" and path == "/v2/profiles":
+            return await self._profiles_update(payload or {})
+
         if verb == "SET" and path.startswith("/v2/profiles/"):
             r = await self._profiles_set(path, payload)
             if r is not None:
@@ -265,8 +268,10 @@ class Router:
         return live
 
     async def _profiles_payload(self):
-        live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
-        return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app)
+        live = await asyncio.get_running_loop().run_in_executor(None, self._read_live)
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app, self.apps)
 
     async def _broadcast_profiles(self):
         if self.server is not None:
@@ -387,8 +392,52 @@ class Router:
         return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
                            "state": self.button_swap.state}, ""
 
+    async def _app_for(self, profile_id):
+        """The installed application a non-default profile id is for, else "" (a stale or made-up id)."""
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        app = self.store.app_of(profile_id)
+        if self.store.has_profile(app) or any(a.get("applicationId") == app for a in self.apps):
+            return app
+        return ""
+
+    async def _profiles_update(self, update):
+        """SET /v2/profiles: the UI creates profiles (each for an application, under an id of its
+        own) and removes them."""
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        installed = {a.get("applicationId") for a in self.apps}
+        changed = False
+        for prof in update.get("updatedProfiles") or []:
+            pid = prof.get("id") or ""
+            app = prof.get("applicationId") or pid
+            if DEFAULT_PROFILE in (pid, app):
+                continue
+            if not pid or (app not in installed and not self.store.has_profile(app)):
+                return "INVALID_ARG", None, "no installed application %r" % app
+            try:
+                self.store.link(pid, app)
+            except OSError as exc:
+                return "FAULTED", None, "cannot save the profile: %s" % exc
+            changed = True
+        for pid in update.get("removedProfileIds") or []:
+            if pid == DEFAULT_PROFILE:
+                continue
+            app = self.store.app_of(pid)
+            if not self.store.has_profile(app):
+                continue
+            code, _, msg = await self._app_profile_reset(app, {}, unlink=pid, broadcast=False)
+            if code != "SUCCESS":
+                if changed:
+                    await self._broadcast_profiles()
+                return code, None, msg
+            changed = True
+        if changed:
+            await self._broadcast_profiles()
+        return "SUCCESS", update, ""
+
     async def _profiles_set(self, path, payload):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if path == "/v2/profiles/reset":
             return await self._profiles_reset(payload or {})
         payload = payload or {}
@@ -401,7 +450,12 @@ class Router:
             slot_id = asg.get("slotId", "")
             requested = asg.get("card") or entry.get("card") or {}
             app = entry.get("profileId") or DEFAULT_PROFILE
-            app = None if app == DEFAULT_PROFILE else app
+            if app == DEFAULT_PROFILE:
+                app = None
+            else:
+                app = await self._app_for(app)
+                if not app:
+                    return await self._profiles_failed(handled, "INVALID_ARG", "no such profile")
             dev = self._device_for_slot(slot_id)
             value = profiles.pointer_value(requested)
             if app is not None or dev is None or value is None:
@@ -483,9 +537,26 @@ class Router:
                 self.engine.assign(dev, cid, card)
             if cid == profiles.THUMB_KEY:
                 self._settle_thumb(dev)
+            before = self.store.snapshot()
             self.store.set(slot_id, card, app)
             if app is not None:
-                self._refocus()               # the focused window may belong to a profile just made
+                try:
+                    self._refocus()           # the focused window may belong to a profile just made
+                except Exception:
+                    self._undo(before)        # not stored: the reply is a failure
+                    raise
+
+    def _undo(self, snapshot):
+        """Blocking, under the switch lock: put the store back as `snapshot` held it and bring the
+        mouse in line with it again. Best effort: the failure that called for it is the one reported."""
+        try:
+            self.store.restore(snapshot)
+        except OSError as exc:
+            log.warning("could not put the saved profiles back: %s", exc)
+        try:
+            self._refocus()
+        except Exception as exc:
+            log.warning("could not put the profile back in force: %s", exc)
 
     def _settle_thumb(self, dev):
         """Blocking: the thumb wheel has one owner. A bound thumb action card gives it to the
@@ -516,10 +587,10 @@ class Router:
                 self.apply_stored(dev.id)
 
     async def _profiles_reset(self, info):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         app = info.get("profileId")
         if app and app != DEFAULT_PROFILE:
-            return await self._app_profile_reset(app, info)
+            return await self._app_profile_reset(self.store.app_of(app), info)
         for dev in list(self.reg.devices.values()):
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
@@ -535,20 +606,37 @@ class Router:
         await self._broadcast_profiles()
         return "SUCCESS", info, ""
 
-    async def _app_profile_reset(self, app, info):
-        """Reset an application's profile: it forgets its buttons and follows the default again."""
+    async def _app_profile_reset(self, app, info, unlink=None, broadcast=True):
+        """Reset an application's profile: it forgets its buttons and follows the default again.
+        Nothing is forgotten when the mouse cannot be brought in line."""
         devices = [d for d in self.reg.devices.values() if not info.get("deviceId") or info["deviceId"] == d.id]
-        self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
-                                                              for d in devices))
-        if self.engine.active_app == app:
-            try:
-                await asyncio.get_event_loop().run_in_executor(None, self.engine.activate, app, devices)
-                for dev in devices:
-                    await asyncio.get_event_loop().run_in_executor(None, self._settle_thumb, dev)
-            except Exception as exc:
-                return "FAULTED", None, "device write failed: %s" % exc
-        await self._broadcast_profiles()
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, self._reset_app, app, devices, unlink)
+        except OSError as exc:
+            return "FAULTED", None, "cannot save the profile: %s" % exc
+        except Exception as exc:
+            return "FAULTED", None, "device write failed: %s" % exc
+        if broadcast:
+            await self._broadcast_profiles()
         return "SUCCESS", info, ""
+
+    def _reset_app(self, app, devices, unlink):
+        """Blocking: forget the application's buttons for `devices` (and the UI's id `unlink`), and
+        change the mouse when that application's profile is in force."""
+        with self._switch_lock:
+            before = self.store.snapshot()
+            try:
+                self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
+                                                                      for d in devices))
+                if unlink:
+                    self.store.unlink(unlink)
+                if self.engine.active_app == app:
+                    self.engine.activate(app if self.store.apps.get(app) else None, devices)
+                    for dev in devices:
+                        self._settle_thumb(dev)
+            except Exception:
+                self._undo(before)
+                raise
 
     def on_focus(self, window):
         """Blocking: the focused window changed; put the profile of its application (else the
