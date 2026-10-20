@@ -10,7 +10,7 @@ maintainer="soubarnak <soubarna@live.in>"
 license="Apache-2.0"
 homepage="https://github.com/soubarnak/logioptions-plus"
 distfiles="${homepage}/archive/refs/tags/optionsplus-linux-v${version}.tar.gz"
-checksum=0000000000000000000000000000000000000000000000000000000000000000
+checksum=e76be882b1d6a4d5251abf827113a6b18bea460be4b56bb18c11f0e458c26b43
 # GitHub unpacks the tag archive to logioptions-plus-<tag>.
 wrksrc="logioptions-plus-optionsplus-linux-v${version}"
 
