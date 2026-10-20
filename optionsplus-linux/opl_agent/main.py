@@ -306,6 +306,7 @@ class Agent:
         self._srv = None
 
     async def stop(self):
+        self.router.cancel_pushes()
         if self._poller:
             self._poller.cancel()
         if self._updates:

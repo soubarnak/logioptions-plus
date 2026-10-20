@@ -53,6 +53,7 @@ class Router:
         self.window_probe = None         # set while the tracker idles (no profile): reads the focused window on demand
         self.server = None          # set by main; used for change broadcasts
         self._pushes = set()             # broadcasts queued behind a reply (kept so they are not collected)
+        self._push_lock = None           # serialises snapshot+send, so pushes reach the UI in order
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
         self.engine = input_engine.InputEngine(self.reg, self.store, input_factory,
@@ -331,12 +332,26 @@ class Router:
     async def _broadcast_profiles(self, removed=()):
         """Push the profiles as a profiles_v2.Update, the shape the UI's UPDATE_PROFILES reducer
         applies (a Profiles message is ignored). `removed` are profile ids the UI must drop."""
-        if self.server is not None:
+        if self.server is None:
+            return
+        if self._push_lock is None:
+            self._push_lock = asyncio.Lock()
+        async with self._push_lock:
             update = {"@type": TYPE + "logi.protocol.profiles_v2.Update",
                       "updatedProfiles": (await self._profiles_payload()).get("profiles", [])}
             if removed:
                 update["removedProfileIds"] = list(removed)
             self.server.broadcast("/v2/profiles/update", update)
+
+    def _push_done(self, task):
+        self._pushes.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("profile push failed: %s", task.exception())
+
+    def cancel_pushes(self):
+        """Event loop: cancel broadcasts still queued behind a reply (agent stopping)."""
+        for task in list(self._pushes):
+            task.cancel()
 
     def _broadcast_after_reply(self):
         """Push the profiles once the current reply is out. The UI drops a profiles push for a
@@ -344,7 +359,7 @@ class Router:
         picture one change behind."""
         task = asyncio.get_running_loop().create_task(self._broadcast_profiles())
         self._pushes.add(task)
-        task.add_done_callback(self._pushes.discard)
+        task.add_done_callback(self._push_done)
 
     def _schedule_broadcast(self):
         """Any thread: push the profiles to the UI from the event loop. Never waits."""
@@ -352,9 +367,15 @@ class Router:
         if loop is None or self.server is None:
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._broadcast_profiles(), loop)
+            fut = asyncio.run_coroutine_threadsafe(self._broadcast_profiles(), loop)
+            fut.add_done_callback(self._future_done)
         except RuntimeError:
             pass                         # the loop is closed: the agent is stopping
+
+    @staticmethod
+    def _future_done(fut):
+        if not fut.cancelled() and fut.exception() is not None:
+            log.warning("profile push failed: %s", fut.exception())
 
     def _card_gone(self, dev_id, slot_id, app, message):
         """Engine hook: a stored card cannot run any more. Forget it, so the mouse and what the UI

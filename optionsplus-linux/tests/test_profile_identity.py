@@ -1,7 +1,9 @@
 """Which application a profile is for: the UI's own profile ids, unknown ids, creating and removing
 profiles through SET /v2/profiles, and a switch that fails not leaving a half-saved choice."""
 
-from tests.test_app_profiles import (FIREFOX, RELOAD, assign_to, card_of, client, install_apps,  # noqa: F401
+import time
+
+from tests.test_app_profiles import (FIREFOX, RELOAD, TERMINAL, assign_to, card_of, client, install_apps,  # noqa: F401
                                      profile, settled, tracked, windows)
 from tests.test_button_remap import BACK
 from tests.harness import wait_for
@@ -75,11 +77,16 @@ def test_removing_a_profile_broadcasts_a_profiles_update_that_drops_its_id(track
     try:
         sub.subscribe("/v2/profiles/update")
         assert update(client, removedProfileIds=[UUID])["result"]["code"] == "SUCCESS"
-        msg = sub.recv()
-        assert msg["path"] == "/v2/profiles/update" and msg["verb"] == "BROADCAST"
+        deadline, msg = time.time() + 5, None
+        while time.time() < deadline and msg is None:
+            m = sub.recv()
+            if m.get("path") == "/v2/profiles/update" and "removedProfileIds" in m["payload"]:
+                msg = m
+        assert msg is not None and msg["verb"] == "BROADCAST"
         assert msg["payload"]["@type"] == "type.googleapis.com/logi.protocol.profiles_v2.Update"
         assert msg["payload"]["removedProfileIds"] == [UUID]
-        assert "updatedProfiles" in msg["payload"] and "profiles" not in msg["payload"]
+        assert "profiles" not in msg["payload"]
+        assert UUID not in [p.get("id") for p in msg["payload"]["updatedProfiles"]]
     finally:
         sub.close()
 
@@ -113,3 +120,34 @@ def test_a_failed_reset_leaves_the_profile_as_it_was(client, bolt, windows):
     assert reply["result"]["code"] == "FAULTED"
     assert card_of(profile(client, FIREFOX), BACK) == "card_reload"
     assert bolt.mouse.diverted == {BACK}
+
+
+def test_a_removal_that_fails_part_way_broadcasts_the_ids_removed_so_far(tracked, client):
+    other = "5b0e8c1a-2d4f-4f6a-9c3e-7a1b2d3c4e5f"
+    create(client, UUID, FIREFOX)
+    create(client, other, TERMINAL)
+    assign_to(client, UUID, BACK, RELOAD)
+    assign_to(client, other, BACK, RELOAD)
+    store = tracked.agent.router.store
+    real = store.unlink
+
+    def unlink(pid):
+        if pid == other:
+            raise OSError("disk full")
+        return real(pid)
+
+    store.unlink = unlink
+    sub = tracked.client()
+    try:
+        sub.subscribe("/v2/profiles/update")
+        reply = update(client, removedProfileIds=[UUID, other])
+        assert reply["result"]["code"] == "FAULTED"
+        deadline, msg = time.time() + 5, None
+        while time.time() < deadline and msg is None:
+            m = sub.recv()
+            if m.get("path") == "/v2/profiles/update" and "removedProfileIds" in m["payload"]:
+                msg = m
+        assert msg is not None and msg["payload"]["removedProfileIds"] == [UUID]
+    finally:
+        store.unlink = real
+        sub.close()
