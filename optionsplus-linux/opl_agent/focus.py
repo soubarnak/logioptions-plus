@@ -58,9 +58,26 @@ class X11Source:
         return window
 
 
-def default_source(environ=None, which=None):
-    """The X11 source when there is an X display and xprop, else None."""
+def default_source(environ=None, which=None, wayland=None):
+    """The source for this session, else None (the default profile then stays active).
+
+    A Wayland session (WAYLAND_DISPLAY) uses the wlroots foreign-toplevel source when the
+    compositor offers that protocol; GNOME (Mutter) and KWin without it get None, since X11
+    properties would only describe XWayland windows. `wayland(environ)` returns a transport
+    and is injectable. An X11 session uses xprop when there is a display and xprop."""
     env = os.environ if environ is None else environ
+    if env.get("WAYLAND_DISPLAY"):
+        from . import wayland_focus
+        src = wayland_focus.WaylandSource(lambda: (wayland or wayland_focus.connect_from_environment)(env))
+        try:
+            src.start()
+        except (wayland_focus.WaylandError, OSError) as exc:
+            log.info("no per-application profiles on this Wayland session (%s); "
+                     "the default profile stays active. wlroots compositors (sway, Hyprland, river) "
+                     "offer wlr-foreign-toplevel-management", exc)
+            return None
+        log.info("following the focused window through wlr-foreign-toplevel-management")
+        return src
     if not env.get("DISPLAY") or not (which or shutil.which)("xprop"):
         return None
     return X11Source()

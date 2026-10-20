@@ -141,12 +141,30 @@ your compositor's own binding in `actions.toml` and press again.
 Add an application in Options+ and give it its own button assignments; a button the application
 does not change keeps the default profile's card. The active profile follows the focused window.
 On X11 the agent reads it with `xprop` (install it; nothing else is needed) and matches the window's
-WM_CLASS or program to the application's id, program or name. Without X11 or `xprop`, or on Wayland,
-the default profile stays active. Only button assignments differ per application; pointer speed and
+WM_CLASS or program to the application's id, program or name. On Wayland the agent follows the
+focused window through the wlroots `wlr-foreign-toplevel-management` protocol and matches the
+window's app_id the same way (no program path is available, so name your profile by the app id).
+Without X11 or `xprop`, or on a Wayland compositor without that protocol, the default profile stays
+active and the agent log says why. Only button assignments differ per application; pointer speed and
 wheel settings stay global. A button is re-diverted only when the set of diverted buttons changes.
+
+| Session | Per-application profiles |
+|---|---|
+| X11 (any window manager, needs `xprop`) | supported |
+| sway, Hyprland, river, other wlroots compositors | supported (wlr-foreign-toplevel-management) |
+| GNOME (Mutter) on Wayland | not supported: no such protocol; default profile only |
+| KDE Plasma (KWin) on Wayland | not supported yet: KWin does not offer the protocol; default profile only |
+
+The Wayland client is a small pure-Python implementation of the wire protocol (no libwayland or
+extra packages).
 
 Manual check (X11, hardware needed): add Firefox, assign Back to a "Reload" keystroke (F5), focus
 Firefox and press Back (the page reloads), then focus a terminal and press Back (it goes back).
+
+Manual check (sway, Hyprland or river, hardware needed): same steps with Firefox and a terminal
+(`foot`, `kitty`). Start the agent from the session and look for "following the focused window
+through wlr-foreign-toplevel-management" in its log. On GNOME the log says per-application profiles
+are off and the default profile stays active.
 
 ## Support
 
