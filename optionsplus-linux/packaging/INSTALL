@@ -1,0 +1,12 @@
+#!/bin/sh
+# xbps INSTALL hook: make the new udev rule active without a reboot.
+# Usage: INSTALL <action> <pkgname> <version> <update> <arch>
+case "$1" in
+    post)
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload 2>/dev/null || true
+            udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --action=add 2>/dev/null || true
+        fi
+        ;;
+esac
+exit 0

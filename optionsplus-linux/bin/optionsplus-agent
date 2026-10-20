@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run the Options+ for Linux agent in the foreground.
+# Exits 0 at once when an agent already answers on the socket; replaces a stale socket.
+# `optionsplus-agent --is-running` exits 0 when an agent is up, 1 otherwise.
+LIB=${OPL_LIB_DIR:-/usr/lib/optionsplus-linux}
+PYTHONPATH=$LIB${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH
+exec python3 -m opl_agent.main "$@"

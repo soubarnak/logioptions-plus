@@ -15,9 +15,10 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 import asyncio
 import logging
 import os
+import sys
 
 from . import resources
-from .ipc import Server
+from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
 
@@ -59,15 +60,17 @@ class Agent:
 
     Everything environment-specific is injectable so tests can run it in
     process: `transport` (HID++ node discovery and I/O, default real hidraw),
-    `socket_path`, `state_dir`, `depot_dir` and `data_dir`. With no arguments it
+    `socket_path`, `state_dir`, `depot_dir`, `data_dir`, `runner` (launches
+    desktop tools) and `app_dirs` (.desktop directories). With no arguments it
     is the production wiring."""
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
-                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS):
+                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS,
+                 runner=None, app_dirs=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
-        self.router = Router(self.reg, state_dir=state_dir)
+        self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         self.poll_seconds = poll_seconds
@@ -101,6 +104,9 @@ async def main():
         level=os.environ.get("OPL_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if socket_alive(socket_path()):
+        log.info("agent already running on %s; exiting", socket_path())
+        return
     agent = Agent()
     await agent.start()
     try:
@@ -110,6 +116,8 @@ async def main():
 
 
 if __name__ == "__main__":
+    if "--is-running" in sys.argv[1:]:
+        sys.exit(0 if socket_alive(socket_path()) else 1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
