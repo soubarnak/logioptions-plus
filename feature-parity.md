@@ -427,12 +427,13 @@ Setting survives a receiver re-plug.
   `re/agent_routes.txt`: `SET /devices/<rcv>/pair` opens, `SET .../pair/cancel` closes,
   `GET .../pair` reads; broadcasts `.../pair/changed` (PairingState) and
   `.../pair/passkey/displayed` (PassKeyDisplay). A write the receiver rejects is FAULTED.
-  Unverified on hardware: the 0x1817 function layout (fn0 open lock + timeout, fn1 close;
-  events fn0 `[status, error, slot]`, fn1 passkey digits), the PairingState enum value names
-  (`STARTED`, `PASSKEY_DISPLAYED`, `PAIRED`, `FAILED`, `CANCELLED`) and the pairing error
-  names. Not done: `.../pair/passkey/entry`, `/receivers/<id>/unpair`.
-  Review of #18 found the Bolt side wrong for real hardware (it uses HID++ 1.0 registers
-  `0xC0`/`0x2C1`, not feature `0x1817`) and its state names not in the schema; it needs a rework.
+  Reworked after the #18 review: Bolt pairs through HID++ 1.0 receiver registers (discovery
+  `0xC0`, pairing `0x2C1`), not feature `0x1817`; the Reader delivers 1.0 notifications; the
+  state and error names follow `devices.proto`; the rescan runs as a coalesced job off the
+  Reader thread; each receiver has a state lock and a watchdog and is keyed by hidraw node.
+  Unverified on hardware: the register layouts, notification fields and device-kind byte map
+  (taken from Solaar, not from a device). Not done: `.../pair/passkey/entry`,
+  `/receivers/<id>/unpair`.
 - Done (ticket #19): Unifying receivers pair through register `0xB2` (write `[1 open | 2 close,
   device 0, timeout]`, Solaar layout) on the same `/devices/<rcv>/pair` routes and
   broadcasts. Progress comes from the HID++ 1.0 `0x4A` lock-status notification (the Reader
