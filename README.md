@@ -70,10 +70,28 @@ Tests: `python3 -m pytest optionsplus-linux/tests`.
 
 ## Packaging and updates
 
-Releases will be signed xbps packages attached to GitHub releases, installable with
-`xbps-install` from `https://github.com/soubarnak/logioptions-plus/releases/latest/download`,
-with the in-app "Check for update" wired to the same releases. See feature-parity.md §3
-and §8 for the design; nothing is published yet.
+Each release is a signed xbps repository attached to a GitHub release, containing
+`optionsplus-linux-0.1.0_1.noarch.xbps`, its `.sig2` and signed repodata for x86_64, i686, aarch64,
+armv7l and armv6l (glibc and musl). Add it once, then install and update like any package:
+
+```bash
+echo 'repository=https://github.com/soubarnak/logioptions-plus/releases/latest/download' | sudo tee /etc/xbps.d/20-optionsplus-linux.conf
+sudo xbps-install -S optionsplus-linux
+```
+
+The first sync asks you to accept the repository key; check that the fingerprint is
+
+`fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25`
+
+before accepting (do not use `-y`). Later updates arrive with `sudo xbps-install -Su`.
+
+Releases are tag-driven: bump `__version__` in `optionsplus-linux/opl_agent/__init__.py`, commit,
+then push the tag `optionsplus-linux-v<version>`. The workflow in `.github/workflows/release.yml`
+fails if the tag differs from the source version, if tests fail or if the package holds anything
+outside the allow-list, and only then signs and publishes (with the `XBPS_PRIVKEY` Actions
+secret). Afterwards it commits the new version and checksum to `srcpkgs/optionsplus-linux/template`
+and the package name above to main. The workflow never contacts Logitech. The in-app "Check for
+update" is wired to the same releases; see feature-parity.md §3 and §8 for the design.
 
 ## Support
 

@@ -227,11 +227,99 @@ class HidrawHandle:
         os.close(self.fd)
 
 
+IN_CREATE, IN_DELETE = 0x100, 0x200
+
+
+def _inotify_fd(path):
+    """A non-blocking inotify fd watching `path` for create/delete, or None."""
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            return None
+        if libc.inotify_add_watch(fd, os.fsencode(path), IN_CREATE | IN_DELETE) < 0:
+            os.close(fd)
+            return None
+        return fd
+    except (OSError, AttributeError):
+        return None
+
+
+class NodeWatcher:
+    """Wakes when a hidraw node appears or disappears.
+
+    inotify on /dev when available; otherwise (or when `use_inotify` is off)
+    polls the /sys/class/hidraw listing every `poll_seconds`."""
+
+    def __init__(self, dev_dir="/dev", sysfs_dir="/sys/class/hidraw", use_inotify=True,
+                 poll_seconds=0.5):
+        self.sysfs_dir = sysfs_dir
+        self.poll_seconds = poll_seconds
+        self._fd = _inotify_fd(dev_dir) if use_inotify else None
+        self._seen = self._snapshot()
+
+    def _snapshot(self):
+        try:
+            return frozenset(n for n in os.listdir(self.sysfs_dir) if n.startswith("hidraw"))
+        except OSError:
+            return frozenset()
+
+    def _inotify_hit(self, timeout):
+        if not select.select([self._fd], [], [], timeout)[0]:
+            return False
+        try:
+            data = os.read(self._fd, 4096)
+        except BlockingIOError:
+            return False
+        off = 0
+        hit = False
+        while off + 16 <= len(data):
+            _wd, _mask, _cookie, nlen = struct.unpack_from("iIII", data, off)
+            name = data[off + 16:off + 16 + nlen].rstrip(b"\0")
+            hit = hit or name.startswith(b"hidraw")
+            off += 16 + nlen
+        return hit
+
+    def wait(self, timeout):
+        """Block up to `timeout`; True if a hidraw node was added or removed."""
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            if self._fd is not None:
+                if self._inotify_hit(left):
+                    self._seen = self._snapshot()
+                    return True
+                continue
+            time.sleep(min(self.poll_seconds, left))
+            now = self._snapshot()
+            if now != self._seen:
+                self._seen = now
+                return True
+
+    def close(self):
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+
 class HidrawTransport:
     """The production transport: discovery through sysfs, I/O through hidraw."""
 
+    def __init__(self):
+        self._watcher = None
+
     def list_nodes(self):
         return list_receivers_and_devices()
+
+    def wait_change(self, timeout):
+        """Block until a hidraw node is added or removed; True if one was."""
+        if self._watcher is None:
+            self._watcher = NodeWatcher()
+        return self._watcher.wait(timeout)
 
     def open(self, path):
         return HidrawHandle(os.open(path, os.O_RDWR | os.O_NONBLOCK))

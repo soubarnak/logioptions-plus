@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import applications, model, profiles, resources, responses, stubs
+from . import applications, model, profiles, resources, responses, stubs, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -33,8 +33,11 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None):
+    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None,
+                 updater=None, os_release_path=None):
         self.reg = registry
+        self.updater = updater or updates.Updater()
+        self.os_release_path = os_release_path or updates.OS_RELEASE
         self.runner = runner or SubprocessRunner()
         self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
         self.apps = None                 # last scan result; None until first scan
@@ -69,6 +72,8 @@ class Router:
             return [("/configuration", self.config)]
         if path == "/permissions":
             return [("/permissions", responses.BOOT["/permissions"])]
+        if path == "/updates/status":
+            return [("/updates/status", self.updater.status())]
         if path == "/lps/endpoint/info_changed":
             return [("/lps/endpoint/info_changed",
                      {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"})]
@@ -118,6 +123,28 @@ class Router:
             r = await self._profiles_set(path, payload)
             if r is not None:
                 return r
+
+        if verb == "GET" and path == "/system/info":
+            return "SUCCESS", updates.system_info(self.os_release_path), ""
+        if verb == "GET" and path == "/updates/info":
+            return "SUCCESS", self.updater.info(), ""
+        if verb == "GET" and path == "/updates/status":
+            return "SUCCESS", self.updater.status(), ""
+        if path == "/updates/periodic_check" and verb in ("GET", "SET"):
+            if verb == "SET":
+                code = self.updater.set_periodic_check(payload)
+                if code != "SUCCESS":
+                    return code, None, "intervalInSeconds must be a positive integer, checkPeriodically a boolean"
+            return "SUCCESS", self.updater.periodic_check(), ""
+        if path == "/updates/channel" and verb in ("GET", "SET"):
+            if verb == "SET":
+                code = self.updater.set_channel(payload)
+                if code != "SUCCESS":
+                    return code, None, "channel must be stable or testing"
+            return "SUCCESS", self.updater.channel(), ""
+        if verb == "SET" and path == "/updates/check_now":
+            self.updater.request_check()
+            return "SUCCESS", payload, ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
