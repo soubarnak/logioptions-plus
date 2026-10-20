@@ -200,6 +200,11 @@ class Router:
                 live.setdefault(dev_id, {})["scroll"] = profiles.scroll_card(self.reg.read_scroll(dev_id))
             except Exception as exc:
                 log.debug("no live scroll state for %s: %s", dev_id, exc)
+            if self.reg.devices[dev_id].thumb_wheel:
+                try:
+                    live.setdefault(dev_id, {})["thumb"] = self.reg.read_thumb(dev_id)
+                except Exception as exc:
+                    log.debug("no live thumb wheel status for %s: %s", dev_id, exc)
         return live
 
     async def _profiles_payload(self):
@@ -234,6 +239,21 @@ class Router:
                                       hires=req["hires"], invert=req["invert"])
         return profiles.scroll_card(state)
 
+    def _thumb_device_for_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if dev.thumb_wheel and slot_id == profiles.thumb_wheel_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_thumb(self, dev, card):
+        """Blocking: write thumb wheel direction/smooth from `card` over what the
+        device reports now; returns the card read back (speed is not adjustable)."""
+        invert, smooth = profiles.thumb_wheel_fields(card)
+        cur = self.reg.read_thumb(dev.id)
+        st = self.reg.write_thumb(dev.id, cur["invert"] if invert is None else invert,
+                                  cur["smooth"] if smooth is None else smooth)
+        return profiles.thumb_wheel_card(st["invert"], st["smooth"])
+
     def apply_stored(self, dev_id):
         """Blocking: reapply stored settings to a device (discovery, reconnect)."""
         dev = self.reg.devices.get(dev_id)
@@ -250,6 +270,12 @@ class Router:
                 self._apply_scroll(dev, req)
             except Exception as exc:
                 log.warning("reapplying scroll wheel settings failed: %s", exc)
+        tcard = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix)) if dev and dev.thumb_wheel else None
+        if tcard is not None:
+            try:
+                self._apply_thumb(dev, tcard)
+            except Exception as exc:
+                log.warning("reapplying thumb wheel settings failed: %s", exc)
 
     async def _profiles_set(self, path, payload):
         loop = asyncio.get_event_loop()
@@ -271,9 +297,13 @@ class Router:
             else:
                 dev = self._device_for_scroll_slot(slot_id)
                 req = profiles.scroll_request(requested)
-                if dev is None or req is None:
-                    continue
-                apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
+                if dev is not None and req is not None:
+                    apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
+                else:
+                    dev = self._thumb_device_for_slot(slot_id)
+                    if dev is None:
+                        continue
+                    apply_fn, arg, what = self._apply_thumb, requested, "thumb wheel"
             try:
                 card = await loop.run_in_executor(None, apply_fn, dev, arg)
             except Exception as exc:
@@ -296,6 +326,7 @@ class Router:
                 continue
             self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
             self.store.remove(profiles.scroll_slot(dev.slot_prefix))
+            self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
             try:
                 await loop.run_in_executor(None, self._apply_defaults, dev)
             except Exception as exc:
@@ -305,6 +336,8 @@ class Router:
         return "SUCCESS", info, ""
 
     def _apply_defaults(self, dev):
+        if dev.thumb_wheel:
+            self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)
         if value is not None:
             self._apply_pointer(dev, value)

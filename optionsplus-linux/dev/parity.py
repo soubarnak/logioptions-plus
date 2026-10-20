@@ -49,7 +49,37 @@ def pointer_speed(args):
     print("4. Confirm by eye the slider shows %d percent." % args.percent)
 
 
-FLOWS = {"pointer-speed": pointer_speed}
+def read_thumb():
+    """-> {mode, invert, smooth} of the first HID++ device with a 0x2150 thumb wheel."""
+    for node in hidpp.HIDRAW.list_nodes():
+        fd = hidpp.HIDRAW.open(node.path)
+        if node.is_receiver:
+            devices = hidpp.get_paired_devices(fd, bolt=getattr(node, "is_bolt", False))
+            indexes = [d["index"] for d in devices]
+        else:
+            indexes = [0xFF]
+        for idx in indexes:
+            try:
+                return hidpp.get_thumbwheel(fd, idx)
+            except hidpp.HidppError:
+                continue
+    raise SystemExit("no mouse with a thumb wheel (0x2150) found")
+
+
+def thumb_wheel(args):
+    print("Mouse thumb wheel state: %s" % read_thumb())
+    input("1. Start the agent and the UI. Open POINT AND SCROLL, thumb wheel panel. Enter. ")
+    input("2. Switch the direction to inverted (turn smooth on too). Enter. ")
+    st = read_thumb()
+    print("   hardware read-back %s: %s" % (st, "PASS" if st["invert"] and st["smooth"] else "FAIL"))
+    input("3. In a browser, scroll sideways with the thumb wheel: it must go the other way. Enter. ")
+    input("4. Quit and relaunch the UI and agent. Enter. ")
+    st = read_thumb()
+    print("   still inverted after relaunch: %s" % ("PASS" if st["invert"] else "FAIL"))
+    print("5. Confirm by eye the panel shows inverted, and the speed control is disabled.")
+
+
+FLOWS = {"pointer-speed": pointer_speed, "thumb-wheel": thumb_wheel}
 
 
 def main():

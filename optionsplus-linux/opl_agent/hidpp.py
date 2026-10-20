@@ -56,6 +56,7 @@ F_ADJUSTABLE_DPI = 0x2201
 F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
+F_THUMB_WHEEL = 0x2150
 
 DEVICE_TYPES = [
     "keyboard", "remote control", "numpad", "mouse", "trackpad", "trackball",
@@ -732,6 +733,27 @@ def set_wheel(fd, idx, hires=None, invert=None):
             mode = (mode | flag) if want else (mode & ~flag)
     _fcall(fd, idx, F_HIRES_WHEEL, 2, bytes([mode]))
     return get_wheel(fd, idx)
+
+# ThumbWheel (0x2150)
+# --------------------------------------------------------------------------
+
+THUMB_NATIVE, THUMB_DIVERTED = 1, 2     # reporting modes: HID native / sent to software
+
+
+def get_thumbwheel(fd, idx):
+    """fn1 getThumbwheelStatus -> {mode, invert, smooth}.
+
+    mode is 1 (native HID) or 2 (diverted), invert is the direction flag.
+    The smooth byte follows invert; not confirmed on hardware, see
+    feature-parity.md section 4."""
+    p = _fcall(fd, idx, F_THUMB_WHEEL, 1)
+    return {"mode": p[0], "invert": bool(p[1] & 1), "smooth": bool(p[2] & 1)}
+
+
+def set_thumbwheel(fd, idx, invert, smooth, mode=THUMB_NATIVE):
+    """fn2 setThumbwheelReporting(mode, invert, smooth) -> status read back."""
+    _fcall(fd, idx, F_THUMB_WHEEL, 2, bytes([mode, 1 if invert else 0, 1 if smooth else 0]))
+    return get_thumbwheel(fd, idx)
 
 
 # --------------------------------------------------------------------------
