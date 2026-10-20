@@ -52,6 +52,7 @@ class Router:
         self._focused = None             # the window that has the focus, when known
         self.window_probe = None         # set while the tracker idles (no profile): reads the focused window on demand
         self.server = None          # set by main; used for change broadcasts
+        self._pushes = set()             # broadcasts queued behind a reply (kept so they are not collected)
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
         self.engine = input_engine.InputEngine(self.reg, self.store, input_factory,
@@ -331,6 +332,14 @@ class Router:
         if self.server is not None:
             self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
 
+    def _broadcast_after_reply(self):
+        """Push the profiles once the current reply is out. The UI drops a profiles push for a
+        slot whose own SET is still pending, so a push sent before the reply leaves the device
+        picture one change behind."""
+        task = asyncio.get_running_loop().create_task(self._broadcast_profiles())
+        self._pushes.add(task)
+        task.add_done_callback(self._pushes.discard)
+
     def _schedule_broadcast(self):
         """Any thread: push the profiles to the UI from the event loop. Never waits."""
         loop = self.loop
@@ -604,7 +613,7 @@ class Router:
             if not entries:
                 return None
             return "INVALID_ARG", None, "nothing to apply"
-        await self._broadcast_profiles()
+        self._broadcast_after_reply()
         return "SUCCESS", handled, ""
 
     async def _profiles_failed(self, stored, code, what):

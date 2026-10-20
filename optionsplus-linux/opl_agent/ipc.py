@@ -205,5 +205,5 @@ class Server:
         msg = broadcast_msg(path, payload)
         for c in list(self.connections):
             if path in c.subscriptions:
-                log.debug("=> BROADCAST %s %s", path, json.dumps(payload)[:300] if payload else "")
+                log.debug("=> BROADCAST %s %s", path, _clip(payload))
                 c.send(msg)
