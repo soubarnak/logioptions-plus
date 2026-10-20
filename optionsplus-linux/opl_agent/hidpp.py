@@ -57,6 +57,8 @@ F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
+F_CHANGE_HOST = 0x1814
+F_HOSTS_INFO = 0x1815
 
 DEVICE_TYPES = [
     "keyboard", "remote control", "numpad", "mouse", "trackpad", "trackball",
@@ -754,6 +756,64 @@ def set_thumbwheel(fd, idx, invert, smooth, mode=THUMB_NATIVE):
     """fn2 setThumbwheelReporting(mode, invert, smooth) -> status read back."""
     _fcall(fd, idx, F_THUMB_WHEEL, 2, bytes([mode, 1 if invert else 0, 1 if smooth else 0]))
     return get_thumbwheel(fd, idx)
+
+
+# --------------------------------------------------------------------------
+# Easy-Switch: ChangeHost (0x1814) and HostsInfo (0x1815)
+# --------------------------------------------------------------------------
+
+NAME_READ_CHUNK = 13        # name bytes in one getHostFriendlyName reply
+NAME_WRITE_CHUNK = 14       # name bytes in one setHostFriendlyName request
+
+
+def get_current_host(fd, idx):
+    """0x1814 fn0 getHostInfo -> (host count, current host index, 0-based)."""
+    p = _fcall(fd, idx, F_CHANGE_HOST, 0)
+    return p[0], p[1]
+
+
+def set_current_host(fd, idx, host):
+    """0x1814 fn1 setCurrentHost. The mouse moves to the other computer, so
+    nothing is read back afterwards; a device error raises."""
+    _fcall(fd, idx, F_CHANGE_HOST, 1, bytes([host]))
+
+
+def get_host_name(fd, idx, host):
+    """0x1815 fn3 getHostFriendlyName, read in chunks -> (name, max length)."""
+    raw, pos, limit = b"", 0, 0
+    while True:
+        p = _fcall(fd, idx, F_HOSTS_INFO, 3, bytes([host, pos]))
+        limit = p[2] or 32
+        chunk = bytes(p[3:3 + NAME_READ_CHUNK])
+        end = chunk.find(b"\0")
+        raw += chunk if end < 0 else chunk[:end]
+        pos += NAME_READ_CHUNK
+        if end >= 0 or pos >= limit:
+            break
+    return raw[:limit].decode("utf-8", "replace"), limit
+
+
+def get_hosts(fd, idx):
+    """0x1814 + 0x1815 -> {"current", "max_name", "hosts": [{index, paired, bus, os, name}]}."""
+    count, current = get_current_host(fd, idx)
+    hosts, max_name = [], 0
+    for i in range(count):
+        d = _fcall(fd, idx, F_HOSTS_INFO, 2, bytes([i]))
+        paired = bool(d[1])
+        name = ""
+        if paired:
+            name, max_name = get_host_name(fd, idx, i)
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": d[3], "name": name})
+    if not max_name:
+        max_name = 32
+    return {"current": current, "max_name": max_name, "hosts": hosts}
+
+
+def set_host_name(fd, idx, host, name):
+    """0x1815 fn4 setHostFriendlyName, in chunks; the last chunk carries a NUL."""
+    raw = name.encode("utf-8") + b"\0"
+    for pos in range(0, len(raw), NAME_WRITE_CHUNK):
+        _fcall(fd, idx, F_HOSTS_INFO, 4, bytes([host, pos]) + raw[pos:pos + NAME_WRITE_CHUNK], long=True)
 
 
 # --------------------------------------------------------------------------

@@ -17,7 +17,7 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150, 0x1814, 0x1815]
 F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
 
 
@@ -43,6 +43,15 @@ class SimulatedMouse:
         # 0x2150 thumb wheel: reporting mode 1 native / 2 diverted, direction inverted, smooth
         self.thumb = {"mode": 1, "invert": 0, "smooth": 0}
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
+        # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
+        self.hosts = [
+            {"name": b"Desk PC", "paired": True, "bus": 5, "os": 1},
+            {"name": b"Laptop", "paired": True, "bus": 5, "os": 6},
+            {"name": b"", "paired": False, "bus": 0, "os": 0}]
+        self.current_host = 0
+        self.max_host_name = 32
+        self.fail_host_switch = False               # answer setCurrentHost with an error
+        self.fail_host_name_write = False           # answer setHostFriendlyName with an error
         self.wpid = MOUSE_WPID                      # hardware identity behind the receiver
         self.powered = True
 
@@ -134,6 +143,37 @@ class SimulatedMouse:
                     return 5                          # ERR_BUSY
                 t.update(mode=params[0], invert=params[1] & 1, smooth=params[2] & 1)
                 return bytes([t["mode"], t["invert"], t["smooth"]])
+        elif fid == 0x1814:
+            if fn == 0:                               # getHostInfo: host count, current host
+                return bytes([len(self.hosts), self.current_host])
+            if fn == 1:                               # setCurrentHost
+                if self.fail_host_switch:
+                    return 5
+                if params[0] >= len(self.hosts):
+                    return 2                          # INVALID_ARGUMENT
+                self.current_host = params[0]
+                return b""
+        elif fid == 0x1815:
+            if fn == 0:                               # capabilities: bit0 get name, bit1 set name
+                return bytes([0x03])
+            if fn == 1:
+                return bytes([len(self.hosts), self.current_host])
+            if fn == 2 and params[0] < len(self.hosts):          # getHostDescriptor
+                h = self.hosts[params[0]]
+                return bytes([params[0], 1 if h["paired"] else 0, h["bus"], h["os"]])
+            if fn == 3 and params[0] < len(self.hosts):          # getHostFriendlyName chunk
+                chunk = self.hosts[params[0]]["name"][params[1]:params[1] + 13]
+                return bytes([params[0], params[1], self.max_host_name]) + chunk
+            if fn == 4 and params[0] < len(self.hosts):          # setHostFriendlyName chunk
+                if self.fail_host_name_write:
+                    return 5
+                h = self.hosts[params[0]]
+                chunk = bytes(params[2:16]).split(b"\0")[0]
+                h["name"] = (h["name"][:params[1]] + chunk)[:self.max_host_name]
+                h["paired"] = True
+                return bytes([params[0], params[1]])
+            if fn in (2, 3, 4):
+                return 2
         return 7                                      # INVALID_FUNCTION_ID
 
 

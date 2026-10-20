@@ -8,6 +8,7 @@ MODEL_ID = "2test-x1"
 SLOT_PREFIX = "046d_4242"
 DISPLAY_NAME = "Test Mouse X1"
 THUMB_BYTES = b"not-a-real-image"
+EASYSWITCH_BYTES = b"not-a-real-easyswitch-image"
 
 
 def _write(path, data):
@@ -29,11 +30,13 @@ def build_depot(root):
            'HELLO_KEY: "Hello"\nBYE_KEY: Bye\n')
     dev = os.path.join(root, DEPOT)
     _write(os.path.join(dev, "thumb.png"), THUMB_BYTES)
+    _write(os.path.join(dev, "easyswitch.png"), EASYSWITCH_BYTES)
     _write(os.path.join(dev, "layout.json"), json.dumps({"buttons": []}))
     _write(os.path.join(dev, "manifest.json"), json.dumps({"devices": [{
         "modelId": MODEL_ID, "resources": [
             {"key": "thumbnail", "src": "thumb.png"},
-            {"key": "layout", "src": "layout.json"}]}]}))
+            {"key": "layout", "src": "layout.json"},
+            {"key": "device_easyswitch_image", "src": "easyswitch.png"}]}]}))
     _write(os.path.join(dev, "default_configurations.json"), json.dumps({"defaultConfigurations": [{
         "settings": {"control_id_mappings": {"82": {"id": "card-back"}, "83": {"id": "card-forward"}},
                      "mouseThumbWheelAction": {"id": "card-wheel"},

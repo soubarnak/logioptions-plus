@@ -67,6 +67,7 @@ class Device:
         self.serial = ""
         self.fw = ""
         self.thumb_wheel = False     # has 0x2150
+        self.easy_switch = False     # has 0x1814 and 0x1815
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
         self.battery_cache = None    # last {percent, charging, status} from HID++
@@ -126,6 +127,8 @@ class Device:
         }
         caps = out.setdefault("capabilities", {})
         caps["scrollWheelCapabilities"] = self._scroll_capabilities()
+        if self.easy_switch:
+            caps["hostInfos"] = True
         if self.thumb_wheel:
             # speed 0: the thumb wheel speed control stays disabled until the relay exists
             caps["mouseThumbWheelOverride"] = {"speed": 0}
@@ -244,6 +247,11 @@ class Registry:
             pass
         try:
             d.thumb_wheel = hidpp.has_feature(fd, idx, hidpp.F_THUMB_WHEEL)
+        except Exception:
+            pass
+        try:
+            d.easy_switch = (hidpp.has_feature(fd, idx, hidpp.F_CHANGE_HOST)
+                             and hidpp.has_feature(fd, idx, hidpp.F_HOSTS_INFO))
         except Exception:
             pass
         try:
@@ -424,6 +432,21 @@ class Registry:
         fd = self._fds[d.node.path]
         mode = hidpp.get_thumbwheel(fd, d.index)["mode"]
         return hidpp.set_thumbwheel(fd, d.index, invert, smooth, mode)
+
+    def read_hosts(self, dev_id):
+        """Blocking 0x1814 / 0x1815 read: {current, max_name, hosts}."""
+        d = self.devices[dev_id]
+        return hidpp.get_hosts(self._fds[d.node.path], d.index)
+
+    def switch_host(self, dev_id, host):
+        """Blocking 0x1814 setCurrentHost; raises on a device error."""
+        d = self.devices[dev_id]
+        hidpp.set_current_host(self._fds[d.node.path], d.index, host)
+
+    def write_host_name(self, dev_id, host, name):
+        """Blocking 0x1815 setHostFriendlyName; raises on a device error."""
+        d = self.devices[dev_id]
+        hidpp.set_host_name(self._fds[d.node.path], d.index, host, name)
 
     def write_dpi(self, dev_id, dpi):
         """Blocking 0x2201 write; returns the DPI read back from the device."""

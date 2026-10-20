@@ -125,7 +125,7 @@ def test_battery_reflects_mouse_state_at_agent_start(bolt, agent_factory):
 def test_device_resources_come_from_the_depot(client):
     reply = client.call("GET", "/devices/resources", {"id": device_id(client)})
     keys = {r["key"]: r for r in reply["payload"]["resources"]}
-    assert set(keys) == {"thumbnail", "layout"}
+    assert set(keys) == {"thumbnail", "layout", "device_easyswitch_image"}
     assert keys["layout"]["asDataUri"] is True and keys["layout"]["url"].startswith("data:application/json")
 
 
