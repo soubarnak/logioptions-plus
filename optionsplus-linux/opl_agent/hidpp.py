@@ -1026,6 +1026,15 @@ def _device_gone(err):
     return isinstance(err, HidppTimeout) or (err.version == 1 and err.name == "UNKNOWN_DEVICE")
 
 
+def _once_more_on_timeout(fn, *args):
+    """fn(*args); one HidppTimeout is retried once, since a busy reader makes a live device
+    miss a single answer."""
+    try:
+        return fn(*args)
+    except HidppTimeout:
+        return fn(*args)
+
+
 def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
     """Ping device indices 1..max_devices; return those that answer.
 
@@ -1044,7 +1053,7 @@ def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
         if proto[0] >= 2:
             for key, fn in (("name", get_device_name), ("type", get_device_type)):
                 try:
-                    d[key] = fn(fd, i)
+                    d[key] = _once_more_on_timeout(fn, fd, i)
                 except HidppError as e:
                     log.debug("%s idx %d: %s", key, i, e)
                     if _device_gone(e):

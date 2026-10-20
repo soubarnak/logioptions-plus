@@ -290,6 +290,7 @@ class SimulatedBolt:
         self.fail_pairing_open = False    # answer the open-lock request with an error
         self.fail_pairing_cancel = False
         self.writes = []                  # every raw report the agent wrote
+        self.drop_name_reads = 0          # leave this many device-name requests unanswered
         self._out = queue.Queue()
         self._lock = threading.Lock()
 
@@ -466,6 +467,9 @@ class SimulatedBolt:
             if not mouse.powered:
                 self._error(data, False, 8)           # nothing answers for a mouse that is off
                 return
+            if self.drop_name_reads and b2 < len(mouse.features) and mouse.features[b2] == 0x0005:
+                self.drop_name_reads -= 1
+                return                                # a busy reader: this request goes unanswered
             result = mouse.handle(b2, b3 >> 4, params)
             if isinstance(result, int):
                 self._error(data, True, result)

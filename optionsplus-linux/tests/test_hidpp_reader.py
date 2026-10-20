@@ -217,3 +217,22 @@ def test_open_node_keeps_the_long_only_flag(ble, monkeypatch):
         assert reader.long_only is True
     finally:
         reader.close()
+
+
+def test_one_timeout_reading_a_paired_devices_name_does_not_drop_it(bolt):
+    reader = open_reader(bolt)
+    bolt.drop_name_reads = 1
+    try:
+        found = hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.5)
+        assert [(d["index"], d["name"]) for d in found] == [(MOUSE_INDEX, "Test Mouse X1")]
+    finally:
+        reader.close()
+
+
+def test_two_timeouts_reading_a_paired_devices_name_mean_it_is_gone(bolt):
+    reader = open_reader(bolt)
+    bolt.drop_name_reads = 2
+    try:
+        assert hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.5) == []
+    finally:
+        reader.close()
