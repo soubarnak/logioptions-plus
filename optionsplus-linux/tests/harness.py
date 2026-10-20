@@ -6,8 +6,24 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 
 from opl_agent.main import Agent
+
+
+def wait_for(cond, timeout=5):
+    """Poll `cond` until it is true or `timeout` passes; returns its last value."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+def keys_down(uinput):
+    """The key codes the fake virtual device saw pressed, in order."""
+    return [c for c, v in uinput.keys() if v == 1]
 
 
 def short_tmpdir():
@@ -44,6 +60,7 @@ class RunningAgent:
         assert self._ready.wait(15), "agent did not start"
         if self._error:
             raise self._error
+        self.agent.reg.transport.settle = self.settle    # lets helpers holding only the fake mouse wait too
         return self
 
     def stop(self):
@@ -56,6 +73,30 @@ class RunningAgent:
 
     def client(self):
         return Client(self.path)
+
+    def _idle(self):
+        agent = self.agent
+        out = getattr(agent.reg.transport, "_out", None)
+        if out is not None and out.unfinished_tasks:
+            return False                # a report is queued or still being routed
+        if any(fd._events.unfinished_tasks for fd in list(agent.reg._fds.values())):
+            return False                # an event is queued or still in its listeners
+        if agent.reg._jobs._active:
+            return False                # a wake or rediscovery job is running
+        return not agent.router.engine._plays.unfinished_tasks     # a card is queued or playing
+
+    def settle(self, timeout=5):
+        """Barrier for "nothing happened" assertions: return once every report the fake mouse
+        sent has been routed, dispatched and acted on (events, jobs, injected cards). Replaces a
+        fixed sleep, which is slow when nothing is pending and racy when something is."""
+        end = time.monotonic() + timeout
+        quiet = 0
+        while time.monotonic() < end:
+            quiet = quiet + 1 if self._idle() else 0
+            if quiet >= 3:             # idle three looks in a row: no stage was handing over
+                return
+            time.sleep(0.005)
+        raise AssertionError("the agent did not settle")
 
 
 class Client:

@@ -66,7 +66,7 @@ def test_recommended_actions_are_served_and_filtered(client):
     payload = client.call("GET", "/rac", {"deviceId": "dev00000000"})["payload"]
     assert payload["@type"] == TYPE + "logi.protocol.rap.RACContainer"
     slot = payload["recommendedCards"]["racList"][0]["slotCardList"][0]
-    assert slot["slotId"] == "046d_4242_c82"
+    assert slot["slotId"] == "046d_4242_c83"
     assert ids(slot["cards"]) == ["card_play"]
 
 
@@ -79,7 +79,7 @@ def test_a_macro_with_any_hidden_step_is_dropped_whole(client):
 
 def test_macro_assignments_only_name_macros_that_are_served(client):
     vals = client.call("GET", "/macro_assignments/all")["payload"]["macroAssignmentVals"]
-    assert [(v["macroId"], v["slotId"]) for v in vals] == [("macros_preset_ok", "046d_4242_c83")]
+    assert [(v["macroId"], v["slotId"]) for v in vals] == [("macros_preset_ok", "046d_4242_c86")]
 
 
 def test_a_hidden_step_nested_at_any_depth_drops_the_macro(agent_factory, workdir):
@@ -142,7 +142,7 @@ def test_default_assignments_merge_control_and_slot_defaults(client):
     reply = client.call("GET", "/unified_profiles/assignment/default")
     assert reply["result"]["code"] == "SUCCESS"
     assert reply["payload"]["@type"] == TYPE + "logi.protocol.profiles_v2.Defaults"
-    assert [a["slotId"] for a in reply["payload"]["assignments"]] == ["046d_4242_c82", "046d_4242_c83"]
+    assert [a["slotId"] for a in reply["payload"]["assignments"]] == ["046d_4242_c83", "046d_4242_c86"]
 
 
 def test_nested_cards_are_filtered_and_an_empty_folder_disappears():
@@ -174,7 +174,7 @@ def test_catalogue_is_empty_not_an_error_when_the_depot_has_none(agent_factory, 
 
 # ---- choosing an action stores the assignment ----------------------------
 
-BACK = fx.SLOT_PREFIX + "_c82"
+BACK = fx.SLOT_PREFIX + "_c83"
 
 
 def choose(client, card, slot=BACK):
@@ -211,7 +211,7 @@ def test_chosen_action_survives_an_agent_restart(agent_factory):
 
 def test_choosing_in_an_ops_batch_also_stores(client):
     card = presets(client)[0]
-    slot = fx.SLOT_PREFIX + "_c83"
+    slot = fx.SLOT_PREFIX + "_c86"
     reply = client.call("SET", "/v2/profiles/assignment", {"profileId": DEFAULT_PROFILE, "ops": [
         {"set": {"assignment": {"slotId": slot, "cardId": card["id"], "card": card}}}]})
     assert reply["result"]["code"] == "SUCCESS"

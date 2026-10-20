@@ -9,7 +9,7 @@ from tests.test_action_catalogue import BACK, choose, presets
 from tests.test_button_remap import COPY, assign, assigned_card_id, slot
 
 TYPE = "type.googleapis.com/"
-FORWARD = 83
+FORWARD = 86
 
 
 def test_store_that_cannot_write_raises_and_keeps_its_old_state(tmp_path):
@@ -45,12 +45,12 @@ def test_a_batch_that_fails_part_way_still_broadcasts_what_was_stored(client, bo
     default_back = {"id": "card-back", "attribute": "MOUSE_BUTTON_ACTION"}
     bolt.mouse.fail_divert_write = True
     ops = [{"set": {"profileId": "420fd454-0c36-499d-bde4-146823b16147",
-                    "assignment": {"slotId": slot(82), "card": default_back}}},
+                    "assignment": {"slotId": slot(83), "card": default_back}}},
            {"set": {"profileId": "420fd454-0c36-499d-bde4-146823b16147",
                     "assignment": {"slotId": slot(FORWARD), "card": COPY}}}]
     reply = client.call("SET", "/v2/profiles/slice", {"@type": TYPE + "logi.protocol.profiles_v2.Batch", "ops": ops})
     assert reply["result"]["code"] == "FAULTED"
-    assert assigned_card_id(client, 82) == "card-back"                 # the first op did stick
+    assert assigned_card_id(client, 83) == "card-back"                 # the first op did stick
     m = listener.recv()
     assert (m["verb"], m["path"]) == ("BROADCAST", "/v2/profiles/update")
     listener.close()

@@ -67,6 +67,7 @@ class _Axis:
         self.units = 0              # device motion units per notch while diverted
         self.carry = 0.0            # scaled hi-res motion not yet emitted
         self.notch_carry = 0        # emitted hi-res motion not yet a whole notch
+        self.lock = threading.RLock()   # held across reading the mouse, writing it and recording the result
 
 
 class WheelRelay:
@@ -78,6 +79,7 @@ class WheelRelay:
         self.enabled = enabled
         self._lock = threading.RLock()
         self._axes = {}                 # (dev_id, axis) -> _Axis
+        self._timers = {}               # dev_id -> pending re-check of the diversions
         self.thumb_owned = lambda dev_id: False   # True while the action engine owns the thumb wheel
         registry.on_wheel_event.append(self.on_event)
 
@@ -112,59 +114,88 @@ class WheelRelay:
             return self._axes.setdefault((dev.id, axis), _Axis())
 
     # ---- applying settings ------------------------------------------------------------
+    # Every method below that reads the mouse, writes it and then records the outcome does so
+    # under the axis's lock, so two requests for one wheel (a UI change and a wake-up reapply)
+    # cannot interleave their reads and writes. Event handling never takes it: it must not wait
+    # on a device write.
     def set_wheel(self, dev, speed=None, invert=None, smooth=None):
         """Blocking: apply scroll wheel speed / direction / smoothness (None leaves one as it is).
         Diverts the wheel for a non-neutral speed, hands it back otherwise. Returns the settings
         in force as {"speed", "invert", "smooth"}; raises, changing nothing, when the device
         write fails or the virtual device is gone."""
         ax = self.axis(dev, WHEEL)
-        if not ax.diverted:
-            native = self.reg.read_scroll(dev.id)["wheel"]
-            cur = {"invert": native["invert"], "smooth": native["hires"]}
-        else:
-            cur = {"invert": ax.invert, "smooth": ax.smooth}
-        new = {"speed": ax.speed if speed is None else speed,
-               "invert": cur["invert"] if invert is None else bool(invert),
-               "smooth": cur["smooth"] if smooth is None else bool(smooth)}
-        if speed is None and invert is None and smooth is None:
-            return {"speed": ax.speed, **cur}
-        if not is_neutral(new["speed"]):
-            self._sink()                # a diverted wheel with nowhere to go would not scroll at all
-            units = self.reg.wheel_units_per_notch(dev.id)
-            self.reg.divert_wheel(dev.id, True, invert=False)
-        else:
-            units = 0
-            # only hand back what this relay took: another driver's target bit is not ours to clear
-            self.reg.divert_wheel(dev.id, False if ax.diverted else None,
-                                  invert=new["invert"], hires=new["smooth"])
-        self._commit(ax, new, units)
-        return new
+        with ax.lock:
+            if not ax.diverted:
+                native = self.reg.read_scroll(dev.id)["wheel"]
+                cur = {"invert": native["invert"], "smooth": native["hires"]}
+            else:
+                cur = {"invert": ax.invert, "smooth": ax.smooth}
+            if speed is None and invert is None and smooth is None:
+                return {"speed": ax.speed, **cur}
+            new = {"speed": ax.speed if speed is None else speed,
+                   "invert": cur["invert"] if invert is None else bool(invert),
+                   "smooth": cur["smooth"] if smooth is None else bool(smooth)}
+            try:
+                if not is_neutral(new["speed"]):
+                    self._sink()        # a diverted wheel with nowhere to go would not scroll at all
+                    units = self.reg.wheel_units_per_notch(dev.id)
+                    self._checked_wheel(dev, True, invert=False)
+                else:
+                    units = 0
+                    # only hand back what this relay took: another driver's target bit is not ours to clear
+                    self._checked_wheel(dev, False if ax.diverted else None,
+                                        invert=new["invert"], hires=new["smooth"])
+            except Exception:
+                self._reconcile(dev, ax, WHEEL)
+                raise
+            self._commit(ax, new, units)
+            return new
+
+    def _checked_wheel(self, dev, divert, **kw):
+        """divert_wheel, raising when the mouse did not keep the diversion asked for."""
+        state = self.reg.divert_wheel(dev.id, divert, **kw)
+        if divert is not None and isinstance(state, dict) and state.get("target") != divert:
+            raise hidpp.HidppError(hidpp.F_HIRES_WHEEL, 2, 4)      # HW_ERROR: the device ignored it
+        return state
+
+    def _checked_thumb(self, dev, invert, smooth, divert):
+        """write_thumb, raising when the mouse did not keep the reporting mode asked for."""
+        state = self.reg.write_thumb(dev.id, invert, smooth, divert=divert)
+        if divert is not None and isinstance(state, dict):
+            want = hidpp.THUMB_DIVERTED if divert else hidpp.THUMB_NATIVE
+            if state.get("mode") != want:
+                raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 2, 4)
+        return state
 
     def set_thumb(self, dev, speed=None, invert=None, smooth=None):
         """Blocking: as `set_wheel`, for the thumb wheel."""
         ax = self.axis(dev, THUMB)
-        if self.thumb_owned(dev.id):
-            return self._set_thumb_owned(dev, ax, speed, invert, smooth)
-        if not ax.diverted:
-            native = self.reg.read_thumb(dev.id)
-            cur = {"invert": native["invert"], "smooth": native["smooth"]}
-        else:
-            cur = {"invert": ax.invert, "smooth": ax.smooth}
-        new = {"speed": ax.speed if speed is None else speed,
-               "invert": cur["invert"] if invert is None else bool(invert),
-               "smooth": cur["smooth"] if smooth is None else bool(smooth)}
-        if not is_neutral(new["speed"]):
-            self._sink()
-            units = self.reg.thumb_units_per_notch(dev.id)
-            if units <= 0:
-                raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 0, 2)    # no scale to relay by
-            self.reg.write_thumb(dev.id, False, new["smooth"], divert=True)
-        else:
-            units = 0
-            self.reg.write_thumb(dev.id, new["invert"], new["smooth"],
-                                 divert=False if ax.diverted else None)
-        self._commit(ax, new, units)
-        return new
+        with ax.lock:
+            if self.thumb_owned(dev.id):
+                return self._set_thumb_owned(dev, ax, speed, invert, smooth)
+            if not ax.diverted:
+                native = self.reg.read_thumb(dev.id)
+                cur = {"invert": native["invert"], "smooth": native["smooth"]}
+            else:
+                cur = {"invert": ax.invert, "smooth": ax.smooth}
+            new = {"speed": ax.speed if speed is None else speed,
+                   "invert": cur["invert"] if invert is None else bool(invert),
+                   "smooth": cur["smooth"] if smooth is None else bool(smooth)}
+            try:
+                if not is_neutral(new["speed"]):
+                    self._sink()
+                    units = self.reg.thumb_units_per_notch(dev.id)
+                    if units <= 0:
+                        raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 0, 2)    # no scale to relay by
+                    self._checked_thumb(dev, False, new["smooth"], True)
+                else:
+                    units = 0
+                    self._checked_thumb(dev, new["invert"], new["smooth"], False if ax.diverted else None)
+            except Exception:
+                self._reconcile(dev, ax, THUMB)
+                raise
+            self._commit(ax, new, units)
+            return new
 
     def _set_thumb_owned(self, dev, ax, speed, invert, smooth):
         """The action engine has the thumb wheel diverted: remember the speed for later, write
@@ -176,6 +207,33 @@ class WheelRelay:
         self.reg.write_thumb(dev.id, new["invert"], new["smooth"], divert=None)
         self._commit(ax, new, 0)
         return new
+
+    def _reconcile(self, dev, ax, axis):
+        """After a failed write: if the mouse turns out not to be diverted, stop believing it is, so
+        a later settle or resume tries again instead of returning early. Best effort."""
+        if not ax.diverted:
+            return
+        try:
+            diverted = self._device_diverted(dev, axis)
+        except Exception:
+            return
+        if not diverted:
+            with self._lock:
+                ax.diverted = False
+                ax.units = 0
+                ax.carry, ax.notch_carry = 0.0, 0
+
+    def _device_diverted(self, dev, axis):
+        """Blocking: whether the mouse reports `axis` to software now."""
+        if axis == WHEEL:
+            return bool(self.reg.read_scroll(dev.id)["wheel"]["target"])
+        return self.reg.read_thumb(dev.id)["mode"] == hidpp.THUMB_DIVERTED
+
+    def holds(self, dev_id, axis):
+        """Whether the relay has the wheel diverted now."""
+        with self._lock:
+            ax = self._axes.get((dev_id, axis))
+            return ax is not None and ax.diverted
 
     def yield_thumb(self, dev):
         """The action engine took the thumb wheel: stop relaying it. Writes nothing to the mouse
@@ -195,7 +253,8 @@ class WheelRelay:
         if ax is None or ax.diverted or is_neutral(ax.speed) or self.thumb_owned(dev.id):
             return
         if self.available(dev, THUMB):
-            self.set_thumb(dev)
+            # the device's own invert bit was cleared while diverted: restate the user's
+            self.set_thumb(dev, invert=ax.invert, smooth=ax.smooth)
 
     def _commit(self, ax, new, units):
         with self._lock:
@@ -203,6 +262,78 @@ class WheelRelay:
             ax.diverted = not is_neutral(new["speed"])
             ax.units = units
             ax.carry, ax.notch_carry = 0.0, 0
+
+    # ---- a diversion nothing asked for ---------------------------------------------------------
+    def recover(self, dev, speeds):
+        """Blocking: hand back a wheel the mouse reports as diverted that this relay does not hold
+        and `speeds` ({axis: stored speed}) does not ask for: what a crashed agent left behind, or
+        what is still set when the relay was switched off. The thumb wheel of an action card is
+        the engine's and stays. The direction is not touched; the settings applied after this
+        restate it."""
+        for axis in (WHEEL, THUMB):
+            if not self.has(dev, axis):
+                continue
+            if self.available(dev, axis) and not is_neutral(speeds.get(axis) or 0):
+                continue                # wanted: applying the stored speed takes it
+            if axis == THUMB and self.thumb_owned(dev.id):
+                continue
+            ax = self.axis(dev, axis)
+            with ax.lock:
+                if ax.diverted:
+                    continue            # ours: `release` hands it back
+                try:
+                    if not self._device_diverted(dev, axis):
+                        continue
+                    log.info("%s wheel of %s was left diverted; handing it back", axis, dev.id)
+                    if axis == WHEEL:
+                        self.reg.divert_wheel(dev.id, False)
+                    else:
+                        st = self.reg.read_thumb(dev.id)
+                        self.reg.write_thumb(dev.id, st["invert"], st["smooth"], divert=False)
+                except Exception as exc:
+                    log.warning("handing the %s wheel of %s back failed: %s", axis, dev.id, exc)
+
+    REASSERT_DELAY = 2.0                # seconds after a reapply before the diversion is checked
+
+    def reassert_later(self, dev_id):
+        """After a reapply (wake, reconnect): the kernel's hid-logitech-hidpp driver rewrites the
+        wheel mode when it binds to a reconnected mouse, which may be after the reapply. Look again
+        shortly and divert once more what the mouse no longer reports as diverted."""
+        with self._lock:
+            old = self._timers.pop(dev_id, None)
+            if old is not None:
+                old.cancel()
+            if not any(self.holds(dev_id, a) for a in (WHEEL, THUMB)):
+                return
+            timer = threading.Timer(self.REASSERT_DELAY, self._reassert, (dev_id,))
+            timer.daemon = True
+            self._timers[dev_id] = timer
+            timer.start()
+
+    def _reassert(self, dev_id):
+        dev = self.reg.devices.get(dev_id)
+        if dev is None or getattr(self.reg, "closed", False):
+            return
+        for axis in (WHEEL, THUMB):
+            with self._lock:
+                ax = self._axes.get((dev_id, axis))
+            if ax is None or not ax.diverted or (axis == THUMB and self.thumb_owned(dev_id)):
+                continue
+            with ax.lock:
+                try:
+                    if not ax.diverted or self._device_diverted(dev, axis):
+                        continue
+                    log.info("%s wheel of %s lost its diversion; diverting it again", axis, dev_id)
+                    if axis == WHEEL:
+                        units = self.reg.wheel_units_per_notch(dev_id)
+                        self._checked_wheel(dev, True, invert=False)
+                    else:
+                        units = self.reg.thumb_units_per_notch(dev_id)
+                        self._checked_thumb(dev, False, ax.smooth, True)
+                    with self._lock:
+                        ax.units = units
+                except Exception as exc:
+                    log.warning("diverting the %s wheel of %s again failed: %s", axis, dev_id, exc)
 
     # ---- handing wheels back -----------------------------------------------------------------
     def release(self, dev, axis=None, reset=False):
@@ -215,30 +346,35 @@ class WheelRelay:
                 ax = self._axes.get((dev.id, name))
             if ax is None:
                 continue
-            if reset:
-                ax.invert = False
-                if name == THUMB:
-                    ax.smooth = False
-            # a thumb wheel the action engine holds is not ours to hand back
-            if ax.diverted and not (name == THUMB and self.thumb_owned(dev.id)):
-                try:
-                    if name == WHEEL:
-                        self.reg.divert_wheel(dev.id, False, invert=ax.invert, hires=ax.smooth)
-                    else:
-                        self.reg.write_thumb(dev.id, ax.invert, ax.smooth, divert=False)
-                except Exception as exc:
-                    log.warning("handing the %s wheel of %s back failed: %s", name, dev.id, exc)
-                    first_error = first_error or exc
-                    continue
-            with self._lock:
-                ax.diverted = False
+            with ax.lock:
                 if reset:
-                    ax.speed = 0.0
+                    ax.invert = False
+                    if name == THUMB:
+                        ax.smooth = False
+                # a thumb wheel the action engine holds is not ours to hand back
+                if ax.diverted and not (name == THUMB and self.thumb_owned(dev.id)):
+                    try:
+                        if name == WHEEL:
+                            self.reg.divert_wheel(dev.id, False, invert=ax.invert, hires=ax.smooth)
+                        else:
+                            self.reg.write_thumb(dev.id, ax.invert, ax.smooth, divert=False)
+                    except Exception as exc:
+                        log.warning("handing the %s wheel of %s back failed: %s", name, dev.id, exc)
+                        first_error = first_error or exc
+                        continue
+                with self._lock:
+                    ax.diverted = False
+                    if reset:
+                        ax.speed = 0.0
         if first_error is not None:
             raise first_error
 
     def close(self):
         """Best effort at shutdown: no wheel stays diverted to a process that is gone."""
+        with self._lock:
+            timers, self._timers = list(self._timers.values()), {}
+        for timer in timers:
+            timer.cancel()
         for dev in list(self.reg.devices.values()):
             try:
                 self.release(dev)
@@ -281,7 +417,10 @@ class WheelRelay:
     def _scale(ax, axis, motion):
         """Scaled hi-res and whole-notch events for `motion` (hi-res units, device direction);
         what does not amount to one yet stays in the axis for the next event."""
-        ax.carry += motion * multiplier(ax.speed) * (-1 if ax.invert else 1)
+        motion *= multiplier(ax.speed) * (-1 if ax.invert else 1)
+        if motion * ax.carry < 0:
+            ax.carry = 0.0              # turned back: what was held back the other way no longer counts
+        ax.carry += motion
         if ax.smooth:
             hires = _trunc(ax.carry)
             ax.carry -= hires

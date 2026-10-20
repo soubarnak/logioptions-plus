@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from tests.harness import wait_for
 from tests.test_battery import next_push
 from tests.test_pointer_speed import slider
 
@@ -24,15 +25,6 @@ def live(bolt, agent_factory):
 def device_ids(client):
     infos = client.call("GET", "/devices/list")["payload"].get("deviceInfos", [])
     return [d["id"] for d in infos if d["deviceType"] != "RECEIVER"]     # the receiver is covered in test_pairing
-
-
-def wait_for(cond, timeout=3):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return False
 
 
 # ---- receiver unplug / replug ----------------------------------------------

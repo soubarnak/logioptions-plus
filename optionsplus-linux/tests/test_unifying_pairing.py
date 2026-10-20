@@ -7,6 +7,7 @@ import time
 import pytest
 
 from opl_agent import model
+from tests.harness import wait_for
 from tests.fakes.hidpp_device import (F_WAKE, LOCK_DEVICE_TIMEOUT, LOCK_NOT_SUPPORTED, LOCK_SEQUENCE_TIMEOUT,
                                       LOCK_TOO_MANY_DEVICES, SimulatedUnifying)
 from tests.test_battery import next_push
@@ -197,15 +198,6 @@ def reg(unifying):
     r.scan()
     yield r
     r.close()
-
-
-def wait_for(cond, timeout=5):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return cond()
 
 
 def test_a_device_the_periodic_rescan_found_first_still_counts_as_the_one_paired(unifying, reg):

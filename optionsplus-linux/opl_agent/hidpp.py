@@ -373,6 +373,7 @@ class Reader:
                     fn(*ev)
                 except Exception:
                     log.exception("HID++ event listener failed")
+            self._events.task_done()        # tests wait on unfinished_tasks to know dispatch is idle
 
     # ---- reading ---------------------------------------------------------
     def _read_loop(self):
@@ -883,11 +884,6 @@ def get_cid_reporting(fd, idx, cid):
     return bool(flags & (REPORT_DIVERT | REPORT_PERSISTENT)), bool(flags & REPORT_RAW_XY), remap
 
 
-def get_cid_diverted(fd, idx, cid):
-    """fn2 getCidReporting(cid) -> True while the control is diverted to software."""
-    return get_cid_reporting(fd, idx, cid)[0]
-
-
 def get_cid_remap(fd, idx, cid):
     """The control id `cid` acts as: itself unless remapped."""
     return get_cid_reporting(fd, idx, cid)[2]
@@ -922,11 +918,6 @@ def set_cid_diverted(fd, idx, cid, divert, raw_xy=None):
 def parse_raw_xy(params):
     """Event 1 params (divertedRawXYEvent) -> (dx, dy), signed big-endian words."""
     return struct.unpack(">hh", bytes(params[:4]).ljust(4, b"\0"))
-
-
-def parse_thumb_rotation(params):
-    """0x2150 event 0 params -> the signed rotation, in the wheel's reporting units."""
-    return struct.unpack(">h", bytes(params[:2]).ljust(2, b"\0"))[0]
 
 
 def parse_diverted_buttons(params):

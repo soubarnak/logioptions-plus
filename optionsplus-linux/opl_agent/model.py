@@ -329,6 +329,7 @@ class Registry:
         self.on_thumb_event = []   # callables(dev_id, function, params): a 0x2150 event (the action engine)
         self.on_wheel_event = []   # callables(dev_id, feature_id, function, params): a 0x2121 / 0x2150 event (the wheel relay)
         self.on_resumed = []       # callables(dev_id), after a wake or config-change event
+        self.on_link_lost = []     # callables(dev_id): the mouse's link dropped (asleep, out of range, switched away)
         self.receivers = {}        # id -> Receiver
         self.absent_receivers = {}
         self._next_receiver = 0
@@ -339,6 +340,7 @@ class Registry:
         self.on_discovery = []     # callables(rcv_id, Discovery payload, Advertise payload or None)
         self.on_locking = []       # callables(rcv_id, Locking payload): the Unifying lock opened or closed
         self._jobs = CoalescingJobs()   # work an event starts, off the Reader's dispatch thread
+        self.closed = False        # set when shutting down: nothing is opened or rescanned any more
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
@@ -351,6 +353,8 @@ class Registry:
                 pass
             fd = None
         if fd is None:
+            if self.closed:
+                raise OSError("the registry is closed")
             fd = hidpp.Reader(self.transport.open(node.path),
                               long_only=getattr(node, "long_only", False))
             fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx, fn, params))
@@ -528,6 +532,9 @@ class Registry:
         (Device objects for removed ones, marked not connected). Receivers report as
         "receiver_added" (ids, new or returned) and "receiver_removed" (Receiver objects)."""
         with self._scan_lock:
+            if self.closed:
+                return {"added": [], "returned": [], "removed": [],
+                        "receiver_added": [], "receiver_removed": []}
             return self._rescan(force)
 
     def _rescan(self, force):
@@ -645,6 +652,13 @@ class Registry:
             return
         flags = data[0] if data else 0
         if flags & 0x40:                       # the link was lost, not made
+            for dev_id, d in list(self.devices.items()):
+                if d.node.path == node.path and d.index == index:
+                    for hook in list(self.on_link_lost):
+                        try:
+                            hook(dev_id)
+                        except Exception:
+                            log.exception("link-lost hook failed for %s", dev_id)
             return
         for dev_id, d in list(self.devices.items()):
             if d.node.path == node.path and d.index == index:
@@ -1057,27 +1071,6 @@ class Registry:
         return {"stateOfCharge": int(b.get("percent") or 0),
                 "chargingStatus": "CHARGING" if b.get("charging") else "DISCHARGING"}
 
-    def dpi_state(self, dev_id):
-        d = self.devices.get(dev_id)
-        fd = self._fds.get(d.node.path)
-        dpi = hidpp.get_dpi(fd, d.index)
-        return {"@type": TYPE + "logi.protocol.mouse.Dpi.State", "deviceId": dev_id, "dpi": int(dpi)}
-
-    def dpi_table(self, dev_id):
-        d = self.devices.get(dev_id)
-        fd = self._fds.get(d.node.path)
-        info = hidpp.get_dpi_list(fd, d.index)   # expect {levels, default, current}
-        levels = info.get("levels") if isinstance(info, dict) else list(info or [])
-        return {"@type": TYPE + "logi.protocol.mouse.Dpi.Table",
-                "levels": [int(x) for x in levels],
-                "defaultDpi": int(info.get("default", 0)) if isinstance(info, dict) else 0,
-                "activeDpi": int(info.get("current", 0)) if isinstance(info, dict) else 0}
-
-    def set_dpi(self, dev_id, dpi):
-        d = self.devices.get(dev_id)
-        fd = self._fds.get(d.node.path)
-        hidpp.set_dpi(fd, d.index, int(dpi))
-
     def dpi_range(self, dev_id):
         """Blocking read of the sensor's DPI list: {values, min, max, step}."""
         d = self.devices[dev_id]
@@ -1217,15 +1210,17 @@ class Registry:
         return self.read_scroll(dev_id)
 
     def close(self):
+        self.closed = True
         self._jobs.close()
-        for r in list(self.receivers.values()) + list(self.absent_receivers.values()):
-            self._disarm(r)
-        for fd in self._fds.values():
-            try:
-                hidpp.close_node(fd)
-            except OSError:
-                pass
-        self._fds.clear()
+        with self._scan_lock:           # a rescan in flight finishes before the descriptors go
+            for r in list(self.receivers.values()) + list(self.absent_receivers.values()):
+                self._disarm(r)
+            for fd in self._fds.values():
+                try:
+                    hidpp.close_node(fd)
+                except OSError:
+                    pass
+            self._fds.clear()
 
 
 def _warn_level(pct):

@@ -129,7 +129,7 @@ their own keys, so any action can be changed in `~/.config/optionsplus-linux/act
 A value is one chord, keys joined by `+` (`ctrl`, `shift`, `alt`, `super`, letters, digits,
 `f1`..`f24`, `page_up`, `left`, ..., or an `XF86...` media key). An entry that does not parse is
 ignored and the default stays. Defaults: switch apps Alt+Tab, show desktop Super+D, next/previous
-desktop Ctrl+Alt+Right/Left, lock Super+L, screenshot Print; brightness and media actions send the
+desktop Super+PageDown/PageUp, lock Super+L, screenshot Print; brightness and media actions send the
 XF86 keys. Holding a button does not auto-repeat (a volume hold fires once).
 
 Manual check (GNOME, hardware needed): assign "Next track" and the "next virtual desktop" system

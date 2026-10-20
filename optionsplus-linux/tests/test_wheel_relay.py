@@ -8,7 +8,7 @@ recording input sink."""
 import pytest
 
 from tests.fakes import depot as fx
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 TYPE = "type.googleapis.com/"
 DEFAULT_PROFILE = "420fd454-0c36-499d-bde4-146823b16147"
@@ -368,8 +368,8 @@ def test_neutral_values_never_divert(client, bolt, speed):
 # ---- the thumb wheel has one owner: a thumb action card outranks thumb speed (#23 vs #25) ------
 
 from tests.fakes.hidpp_device import F_WAKE                                     # noqa: E402
-from tests.test_gestures import (THUMB_DEFAULT, assign_thumb, keys_down,        # noqa: E402
-                                 settle, thumb_card)
+from tests.harness import keys_down                                             # noqa: E402
+from tests.test_gestures import THUMB_DEFAULT, assign_thumb, thumb_card         # noqa: E402
 
 KEY_RIGHT = 18                                                                  # thumb_card's right action
 
@@ -381,7 +381,7 @@ def test_a_thumb_action_card_wins_over_thumb_speed(client, bolt, uinput):
     assert bolt.mouse.thumb["mode"] == 1
     assert bolt.turn_thumb(DIVERTED_RESOLUTION)
     assert wait_for(lambda: keys_down(uinput) == [KEY_RIGHT])
-    settle()
+    bolt.settle()
     assert uinput.rels(REL_HWHEEL) == [] and uinput.rels(REL_HWHEEL_HI_RES) == []   # not scaled as well
     assert keys_down(uinput) == [KEY_RIGHT]                                         # not run twice
     assert thumb_settings(client)["speed"] == FAST                                  # the choice is kept
@@ -395,7 +395,7 @@ def test_a_speed_set_while_the_card_is_bound_is_kept_but_not_applied(client, bol
     assert thumb_settings(client)["speed"] == FAST
     bolt.turn_thumb(14)
     assert wait_for(lambda: len(keys_down(uinput)) >= 1)               # one notch, one action
-    settle()
+    bolt.settle()
     assert uinput.rels(REL_HWHEEL_HI_RES) == []
 
 
@@ -430,7 +430,7 @@ def test_reapply_after_wake_keeps_the_card_as_owner(client, bolt, uinput):
     assert wait_for(lambda: bolt.mouse.thumb["mode"] == 1)
     bolt.turn_thumb(DIVERTED_RESOLUTION)
     assert wait_for(lambda: keys_down(uinput) == [KEY_RIGHT])
-    settle()
+    bolt.settle()
     assert uinput.rels(REL_HWHEEL_HI_RES) == []
 
 
@@ -448,3 +448,173 @@ def test_reset_hands_the_thumb_wheel_back_whoever_held_it(client, bolt):
     assign_thumb(client)
     reset(client)
     assert bolt.mouse.thumb["mode"] == 0
+
+
+def test_thumb_direction_survives_a_card_being_added_and_removed(client, bolt, uinput):
+    thumb(client, speed=FAST, dir="NATURAL")
+    assign_thumb(client)
+    assign_thumb(client, THUMB_DEFAULT)
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES))
+    assert uinput.rels(REL_HWHEEL_HI_RES) == [-480]
+
+
+class _Recorded(dict):
+    """A stand-in for the simulated thumb status that remembers every reporting mode written."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.modes = []
+
+    def update(self, *a, **kw):
+        super().update(*a, **kw)
+        self.modes.append(self["mode"])
+
+
+def test_reapplying_after_wake_does_not_hand_the_relayed_thumb_wheel_back_and_forth(agent, client, bolt):
+    thumb(client, speed=FAST)
+    bolt.mouse.thumb = _Recorded(bolt.mouse.thumb)
+    bolt.emit_event(F_WAKE)
+    agent.settle()
+    assert 0 not in bolt.mouse.thumb.modes
+    assert bolt.mouse.thumb["mode"] == 1
+
+
+def test_a_failed_thumb_reapply_does_not_leave_the_relay_believing_it_is_diverted(agent, client, bolt):
+    thumb(client, speed=FAST)
+    bolt.mouse.thumb["mode"] = 0                       # the mouse forgot while asleep
+    bolt.mouse.fail_thumb_write = True
+    bolt.emit_event(F_WAKE)
+    agent.settle()
+    assert not agent.agent.router.relay.axis(agent.agent.reg.devices["dev00000000"], "thumb").diverted
+    bolt.mouse.fail_thumb_write = False
+    bolt.emit_event(F_WAKE)
+    assert wait_for(lambda: bolt.mouse.thumb["mode"] == 1)
+
+
+# ---- recovery: a diversion nothing asked for, left by a crashed agent or rewritten by the kernel ----
+
+def test_a_wheel_left_diverted_by_a_crashed_agent_is_handed_back_when_the_speed_is_neutral(agent_factory, bolt):
+    bolt.mouse.wheel_mode |= TARGET_BIT
+    bolt.mouse.thumb["mode"] = 1
+    c = agent_factory().client()
+    try:
+        assert bolt.mouse.wheel_mode & TARGET_BIT == 0
+        assert bolt.mouse.thumb["mode"] == 0
+    finally:
+        c.close()
+
+
+def test_a_wheel_left_diverted_is_handed_back_when_the_relay_is_switched_off(agent_factory, bolt, monkeypatch):
+    first = agent_factory()
+    c = first.client()
+    scroll(c, speed=FAST)
+    c.close()
+    first.stop()
+    bolt.mouse.wheel_mode |= TARGET_BIT          # as a crash would have left it
+    bolt.mouse.thumb["mode"] = 1
+    monkeypatch.setenv("OPL_WHEEL_RELAY", "0")
+    agent_factory().client().close()
+    assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.thumb["mode"] == 0
+
+
+def test_a_wheel_left_diverted_stays_with_the_relay_when_a_speed_is_stored(agent_factory, bolt, uinput):
+    first = agent_factory()
+    c = first.client()
+    scroll(c, speed=FAST)
+    c.close()
+    first.stop()
+    bolt.mouse.wheel_mode |= TARGET_BIT
+    c2 = agent_factory().client()
+    try:
+        assert bolt.mouse.wheel_mode & TARGET_BIT
+        turn(bolt, MULTIPLIER)
+        assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [480])
+    finally:
+        c2.close()
+
+
+def test_a_diversion_the_kernel_driver_rewrote_after_a_reconnect_is_asserted_again(agent, client, bolt, uinput):
+    from opl_agent.wheel_relay import WheelRelay
+    WheelRelay.REASSERT_DELAY = 0.3
+    try:
+        scroll(client, speed=FAST)
+        thumb(client, speed=FAST)
+        bolt.emit_event(F_WAKE)
+        agent.settle()
+        bolt.mouse.wheel_mode &= ~TARGET_BIT          # hid-logitech-hidpp enabled its own mode afterwards
+        bolt.mouse.thumb["mode"] = 0
+        assert wait_for(lambda: bolt.mouse.wheel_mode & TARGET_BIT and bolt.mouse.thumb["mode"] == 1)
+        turn(bolt, MULTIPLIER)
+        assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [480])
+    finally:
+        WheelRelay.REASSERT_DELAY = 2.0
+
+
+# ---- accumulation and the speed a relay that cannot run must not forget --------------------
+
+def test_reversing_direction_drops_the_motion_held_back_the_other_way(client, bolt, uinput):
+    scroll(client, speed=SLOW, isSmooth=False)       # 0.5x, whole notches only
+    turn(bolt, MULTIPLIER)                           # +60 of a notch, held back
+    turn(bolt, -MULTIPLIER)                          # reversed: starts from nothing, -60 held back
+    turn(bolt, -MULTIPLIER)                          # -120: one notch at once
+    assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [-120])
+    assert uinput.rels(REL_WHEEL) == [-1]
+
+
+def test_a_speed_stored_before_the_relay_became_unavailable_is_not_forgotten(agent, client, bolt):
+    scroll(client, speed=FAST)
+    agent.agent.router.set_wheel_relay(False)
+    assert scroll(client, dir="INVERTED")["result"]["code"] == "SUCCESS"
+    agent.agent.router.set_wheel_relay(True)
+    assert scroll_settings(client)["speed"] == FAST
+    assert bolt.mouse.wheel_mode & TARGET_BIT
+
+
+def test_a_diversion_the_mouse_does_not_keep_is_a_failure(client, bolt):
+    bolt.mouse.thumb_ignores_mode = True             # takes the write, still reports native
+    reply = thumb(client, speed=FAST)
+    assert reply["result"]["code"] != "SUCCESS"
+
+
+# ---- one writer at a time per wheel --------------------------------------------------------
+
+def test_two_settings_changes_of_one_wheel_do_not_interleave():
+    import threading
+    from opl_agent import wheel_relay
+
+    entered, release, order = threading.Event(), threading.Event(), []
+
+    class Reg:
+        on_wheel_event = []
+
+        def read_scroll(self, dev_id):
+            order.append("read")
+            return {"wheel": {"invert": False, "hires": True}}
+
+        def wheel_units_per_notch(self, dev_id):
+            return 8
+
+        def divert_wheel(self, dev_id, divert, invert=None, hires=None):
+            order.append("write")
+            entered.set()
+            assert release.wait(5)
+            return {"target": True}
+
+    class Dev:
+        id = "d"
+        thumb_wheel = False
+        scroll_caps = {"highResolution": True}
+
+    relay = wheel_relay.WheelRelay(Reg(), lambda: object())
+    first = threading.Thread(target=lambda: relay.set_wheel(Dev, speed=FAST))
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=lambda: relay.set_wheel(Dev, speed=SLOW))
+    second.start()
+    second.join(0.3)
+    assert second.is_alive() and order == ["read", "write"]      # waits for the first to commit
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert order == ["read", "write", "write"]                   # the second saw the first's result

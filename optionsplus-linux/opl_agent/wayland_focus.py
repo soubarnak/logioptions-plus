@@ -86,6 +86,17 @@ class _Reader:
         return struct.unpack("=%dI" % (len(raw) // 4), raw[:len(raw) // 4 * 4])
 
 
+class _Toplevel:
+    """One toplevel handle: what it showed at its last `done`, and what is pending until the next."""
+
+    def __init__(self):
+        self.app_id, self.activated = "", False
+        self.pending_app_id, self.pending_activated = "", False
+
+    def commit(self):
+        self.app_id, self.activated = self.pending_app_id, self.pending_activated
+
+
 # -- transport ---------------------------------------------------------------------------
 
 def socket_path(environ):
@@ -188,7 +199,7 @@ class WaylandSource:
         self._kinds = {DISPLAY_ID: "display"}
         self._globals = {}                       # interface -> (name, version)
         self._done = set()                       # callbacks that fired
-        self._toplevels = {}                     # handle id -> {"app_id", "activated", "_app_id", "_activated"}
+        self._toplevels = {}                     # handle id -> _Toplevel
         self._focused = None
         self._manager = None
         try:
@@ -261,7 +272,7 @@ class WaylandSource:
             if opcode == 0:                                            # toplevel(new_id)
                 handle = r.u32()
                 self._kinds[handle] = "toplevel"
-                self._toplevels[handle] = {"app_id": "", "activated": False, "_app_id": "", "_activated": False}
+                self._toplevels[handle] = _Toplevel()
             elif opcode == 1:                                          # finished
                 raise WaylandError("the compositor ended the toplevel manager")
         elif kind == "toplevel" and obj in self._toplevels:
@@ -274,12 +285,12 @@ class WaylandSource:
 
     def _toplevel_event(self, handle, tl, opcode, r):
         if opcode == 1:                                                # app_id
-            tl["_app_id"] = r.string() or ""
+            tl.pending_app_id = r.string() or ""
         elif opcode == 4:                                              # state(array)
-            tl["_activated"] = STATE_ACTIVATED in r.u32_array()
+            tl.pending_activated = STATE_ACTIVATED in r.u32_array()
         elif opcode == 5:                                              # done: apply the pending state
-            tl["app_id"], tl["activated"] = tl["_app_id"], tl["_activated"]
-            if tl["activated"]:
+            tl.commit()
+            if tl.activated:
                 self._focused = handle
             elif self._focused == handle:
                 self._focused = None
@@ -292,6 +303,6 @@ class WaylandSource:
 
     def _window(self):
         tl = self._toplevels.get(self._focused)
-        if tl is None or not tl["app_id"]:
+        if tl is None or not tl.app_id:
             return None
-        return Window((tl["app_id"],))           # the full app_id: matching splits reverse-DNS ids on the profile side
+        return Window((tl.app_id,))           # the full app_id: matching splits reverse-DNS ids on the profile side

@@ -4,7 +4,7 @@ profiles through SET /v2/profiles, and a switch that fails not leaving a half-sa
 from tests.test_app_profiles import (FIREFOX, RELOAD, assign_to, card_of, client, install_apps,  # noqa: F401
                                      profile, settled, tracked, windows)
 from tests.test_button_remap import BACK
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 UUID = "9f1c2a54-7a43-4d3e-8b19-0a5f6c3d7e21"
 UPDATE = "type.googleapis.com/logi.protocol.profiles_v2.Update"

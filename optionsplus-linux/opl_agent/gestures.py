@@ -10,8 +10,10 @@ are as long as each other. The real depot layout is not confirmed on hardware: s
 
 Presets: a card whose `gestureInfo.implementation` names a Logitech preset (CUSTOM_SWITCH_DESKTOPS,
 CUSTOM_APP_EXPOSE_MISSION_CONTROL, ...) and that carries no nested cards would need the preset's own
-actions, which are not in the data. Those are refused (`preset_name`); only GENERIC, and presets
-that carry their actions as nested cards, run.
+actions, which are not in the data. Those are refused (`preset_name`), except the ones in `PRESETS`,
+whose actions are system actions with a Linux keystroke: CUSTOM_SWITCH_DESKTOPS swipes left and right
+to the desktop on that side (assumed to match the Windows preset; confirm on hardware). GENERIC, and
+presets that carry their actions as nested cards, run.
 
 The swipe distance comes from `gestureInfo.x/y.actionThreshold` (a protobuf field of the real
 schema, profiles_v2.proto GestureInfo.AxisInfo). Captures of the real card carry only
@@ -30,6 +32,10 @@ CLICK = "click"
 WORDS = {FOUR_WAYS: SWIPES + (CLICK,), TWO_WAYS: ("left", "right")}
 # other words a depot may use for the press without movement
 ALIASES = {"press": CLICK, "tap": CLICK, "center": CLICK, "centre": CLICK}
+
+# preset -> {direction word: SYSTEM action} for a preset card that carries no nested cards
+PRESETS = {"CUSTOM_SWITCH_DESKTOPS": {"left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
+                                      "right": "SWITCH_BETWEEN_DESKTOPS_RIGHT"}}
 
 DEFAULT_LIMIT = 50              # raw XY counts of travel before a swipe counts, when the card has none
 # Thumb wheel reporting units per action when the wheel's own resolution is unknown. Assumption:

@@ -57,20 +57,20 @@ def add_catalogue(main):
            json.dumps({"cards": [keystroke_card("card_mac_only", "NAME_PLAY")]}))
     _write(os.path.join(data, "rap", "rac_win.json"), json.dumps({
         "recommendedCards": {"racList": [{"appId": "app_test", "slotCardList": [
-            {"slotId": "046d_4242_c82", "cards": [cards[0], cards[3]]}]}]},
+            {"slotId": "046d_4242_c83", "cards": [cards[0], cards[3]]}]}]},
         "availableCards": {"racList": []}}))
     _write(os.path.join(data, "defaults", "defaults_control_win.json"), json.dumps({"assignments": [
-        {"slotId": "046d_4242_c82", "cardId": "card-back"}]}))
+        {"slotId": "046d_4242_c83", "cardId": "card-back"}]}))
     _write(os.path.join(data, "defaults", "defaults_slot_win.json"), json.dumps({"assignments": [
-        {"slotId": "046d_4242_c83", "cardId": "card-forward"}]}))
+        {"slotId": "046d_4242_c86", "cardId": "card-forward"}]}))
     _write(os.path.join(data, "macros", "macros_predefined_win.json"), json.dumps({"macroInfos": [
         {"id": "macros_preset_test", "name": "MACRO_NAME_TEST", "cards": [cards[0], cards[2], cards[3]]},
         {"id": "macros_preset_ok", "name": "MACRO_NAME_OK", "cards": [cards[0], cards[2]]},
         {"id": "macros_preset_all_hidden", "name": "MACRO_NAME_HIDDEN", "cards": [cards[3], cards[5]]}]}))
     _write(os.path.join(data, "macros", "macro_assignments.json"), json.dumps({"macroAssignmentVals": [
-        {"macroId": "macros_preset_test", "slotId": "046d_4242_c82"},
-        {"macroId": "macros_preset_ok", "slotId": "046d_4242_c83"},
-        {"macroId": "macros_preset_all_hidden", "slotId": "046d_4242_c86"}]}))
+        {"macroId": "macros_preset_test", "slotId": "046d_4242_c83"},
+        {"macroId": "macros_preset_ok", "slotId": "046d_4242_c86"},
+        {"macroId": "macros_preset_all_hidden", "slotId": "046d_4242_c82"}]}))
     _write(os.path.join(os.path.dirname(main), "system_actions", "card_play.png"), b"not-a-real-icon")
 
 
@@ -98,7 +98,7 @@ def build_depot(root):
             {"key": "layout", "src": "layout.json"},
             {"key": "device_easyswitch_image", "src": "easyswitch.png"}]}]}))
     _write(os.path.join(dev, "default_configurations.json"), json.dumps({"defaultConfigurations": [{
-        "settings": {"control_id_mappings": {"82": {"id": "card-back"}, "83": {"id": "card-forward"},
+        "settings": {"control_id_mappings": {"83": {"id": "card-back"}, "86": {"id": "card-forward"},
                                                  "195": {"id": "card-gesture"}},
                      "mouseThumbWheelAction": {"id": "card-wheel"},
                      "mouseSettings": {"pointerSpeed": {"active": {"value": 0.5}}}}}]}))

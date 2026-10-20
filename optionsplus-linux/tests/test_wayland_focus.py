@@ -173,3 +173,112 @@ def test_matches_a_profile_by_app_id():
     assert focus.match_profile(window, ["firefox"], []) is None
     assert focus.match_profile(focus.Window(("firefox",)), ["org.mozilla.firefox"], []) == "org.mozilla.firefox"
     assert focus.match_profile(window, ["kitty"], []) is None
+
+
+# ---- events a compositor sends mid-session that carry nothing this source uses ----------------
+
+def test_events_it_does_not_use_are_skipped_mid_session():
+    from tests.fakes.wayland import message, string, u32
+    comp = FakeCompositor()
+    h = comp.open_window("firefox", active=True)
+    other = comp.open_window("kitty")
+    src = source_for(comp)
+    assert src.active().wm_class[0] == "firefox"
+    comp._out += message(h, 0, string("a new title"))                 # title
+    comp._out += message(h, 2, u32(77))                               # output_enter
+    comp._out += message(h, 3, u32(77))                               # output_leave
+    comp._out += message(h, 7, u32(other))                            # parent
+    comp._out += message(h, 5)                                        # done
+    comp._out += message(1, 1, u32(5))                                # wl_display.delete_id
+    comp._out += message(comp._registry, 1, u32(1))                   # wl_registry.global_remove
+    assert src.active().wm_class[0] == "firefox"
+    comp.activate(other)
+    assert src.active().wm_class[0] == "kitty"
+
+
+def test_a_closed_toplevel_is_destroyed_and_late_events_for_it_are_ignored():
+    from tests.fakes.wayland import message, string
+    comp = FakeCompositor()
+    h = comp.open_window("firefox", active=True)
+    src = source_for(comp)
+    comp.close_window(h)
+    comp._out += message(h, 1, string("ghost"))                       # sent before the compositor saw destroy
+    comp._out += message(h, 5)
+    assert src.active() is None
+    assert comp.requests.count((h, 7, b"")) == 1                      # destroy went out once
+
+
+def test_a_hang_up_after_a_close_surfaces_and_closing_twice_is_harmless():
+    comp = FakeCompositor()
+    h = comp.open_window("firefox", active=True)
+    src = source_for(comp)
+    comp.close_window(h)
+    comp.hang_up()
+    with pytest.raises(OSError):
+        src.active()
+    src.close()
+    src.close()
+
+
+# ---- the real transport over a unix socket ----------------------------------------------------
+
+def test_socket_transport_round_trips_over_a_real_unix_socket(tmp_path):
+    import socket
+    path = str(tmp_path / "wl.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    transport = wayland_focus.SocketTransport(path)
+    peer, _ = server.accept()
+    try:
+        assert transport.recv(0) == b""
+        transport.send(b"hello")
+        assert peer.recv(5) == b"hello"
+        peer.sendall(b"world")
+        assert transport.recv(2) == b"world"
+        peer.close()
+        with pytest.raises(ConnectionError):
+            transport.recv(2)
+    finally:
+        transport.close()
+        server.close()
+
+
+def test_the_source_follows_focus_over_a_real_socket(tmp_path):
+    import socket
+    import threading
+    path = str(tmp_path / "wl.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    comp = FakeCompositor()
+    comp.open_window("firefox", active=True)
+
+    def serve():
+        conn, _ = server.accept()
+        conn.settimeout(0.05)
+        try:
+            while True:
+                try:
+                    data = conn.recv(65536)
+                    if not data:
+                        return
+                    comp.send(data)
+                except socket.timeout:
+                    pass
+                out = comp.recv(0)
+                if out:
+                    conn.sendall(out)
+        except OSError:
+            return
+        finally:
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    src = WaylandSource(lambda: wayland_focus.SocketTransport(path), timeout=5)
+    try:
+        src.start()
+        assert src.active().wm_class[0] == "firefox"
+    finally:
+        src.close()
+        server.close()

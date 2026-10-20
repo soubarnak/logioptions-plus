@@ -5,7 +5,8 @@ import threading
 import pytest
 
 from tests.fakes.runner import FakeRunner
-from tests.test_updates import TERMINAL, check, wait_for
+from tests.harness import wait_for
+from tests.test_updates import TERMINAL, check
 
 SUDO_COMMAND = "sudo xbps-install -Su optionsplus-linux"
 INSTALL_ARGV = ["pkexec", "/usr/bin/xbps-install", "-Syu", "optionsplus-linux"]
@@ -76,7 +77,7 @@ def test_install_runs_pkexec_xbps_and_ends_in_restarting(agent_factory, releases
     assert c.call("SET", "/updates/install")["result"]["code"] == "SUCCESS"
     seen = states_until(c, DONE)
     assert [s["state"] for s in seen] == ["UPDATE_INSTALLING", "RESTARTING"]
-    assert runner.executed == [INSTALL_ARGV]
+    assert [a for a in runner.executed if a[0] == "pkexec"] == [INSTALL_ARGV]
     c.close()
 
 
@@ -86,7 +87,7 @@ def test_install_after_download_works_the_same(agent_factory, releases, runner):
     states_until(c, ("UPDATE_READY",))
     c.call("SET", "/updates/install")
     assert states_until(c, DONE)[-1]["state"] == "RESTARTING"
-    assert runner.executed == [INSTALL_ARGV]
+    assert [a for a in runner.executed if a[0] == "pkexec"] == [INSTALL_ARGV]
     c.close()
 
 
@@ -141,5 +142,25 @@ def test_a_second_install_while_one_runs_is_refused(agent_factory, releases):
     assert c.call("SET", "/updates/install")["result"]["code"] != "SUCCESS"
     gate.set()
     wait_for(lambda: c.status()["state"] == "RESTARTING")
-    assert runner.executed == [INSTALL_ARGV]
+    assert [a for a in runner.executed if a[0] == "pkexec"] == [INSTALL_ARGV]
+    c.close()
+
+
+def test_install_that_left_the_old_version_in_place_is_an_error(agent_factory, releases):
+    from opl_agent import __version__
+    runner = FakeRunner(installed=("pkexec",),
+                        outputs={"xbps-query": "optionsplus-linux-%s_1\n" % __version__})
+    c = available(agent_factory, releases, runner=runner)
+    c.call("SET", "/updates/install")
+    last = states_until(c, DONE)[-1]
+    assert last["state"] == "UPDATER_ERROR"
+    assert SUDO_COMMAND in last["errorMessage"]
+    c.close()
+
+
+def test_install_that_brought_the_new_version_restarts(agent_factory, releases):
+    runner = FakeRunner(installed=("pkexec",), outputs={"xbps-query": "optionsplus-linux-9.0.0_1\n"})
+    c = available(agent_factory, releases, runner=runner)
+    c.call("SET", "/updates/install")
+    assert states_until(c, DONE)[-1]["state"] == "RESTARTING"
     c.close()

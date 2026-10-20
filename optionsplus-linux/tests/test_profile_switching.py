@@ -12,8 +12,15 @@ from tests.test_app_profiles import (FIREFOX, RELOAD, RELOAD_KEYS, TERMINAL, ass
                                      settled, windows)  # noqa: F401  (windows is a fixture)
 from tests.test_button_remap import BACK, COPY, assign
 from tests.test_gestures import (ACTIONS, GESTURE, KEY_OF, NOTCH, assign_gesture, assign_thumb, gesture_card,
-                                 keys_down, settle, swipe)
-from tests.test_wake_reapply import wait_for
+                                 keys_down, swipe)
+from tests.harness import wait_for
+
+
+def after_polls(windows, bolt, polls=3):
+    """Let the focus poller look at the current window a few more times, then settle."""
+    start = windows.polls
+    assert wait_for(lambda: windows.polls >= start + polls)
+    bolt.settle()
 
 
 @pytest.fixture
@@ -56,7 +63,7 @@ def test_a_failed_switch_is_retried_while_the_focus_stays(client, bolt, windows)
     assign_to(client, FIREFOX, BACK, RELOAD)
     bolt.mouse.fail_divert_write = True
     windows.focus(("Navigator", "firefox"))
-    time.sleep(0.3)
+    after_polls(windows, bolt)
     assert bolt.mouse.diverted == set()
     bolt.mouse.fail_divert_write = False              # the mouse answers again; the window did not change
     assert wait_for(lambda: bolt.mouse.diverted == {BACK}, timeout=5)
@@ -66,7 +73,7 @@ def test_a_failed_switch_leaves_the_old_profile_in_force(tracked, client, bolt, 
     assign_to(client, FIREFOX, BACK, RELOAD)
     bolt.mouse.fail_divert_write = True
     windows.focus(("Navigator", "firefox"))
-    time.sleep(0.3)
+    after_polls(windows, bolt)
     assert tracked.agent.router.engine.active_app is None
 
 
@@ -125,7 +132,7 @@ def test_focus_and_app_resets_hammering_each_other_stay_consistent(tracked, clie
     def resets():
         try:
             for _ in range(15):
-                router.store.set("046d_4242_c82", RELOAD, FIREFOX)
+                router.store.set("046d_4242_c83", RELOAD, FIREFOX)
                 router._reset_app(FIREFOX, devices)
         except Exception as exc:                          # "dictionary changed size during iteration"
             errors.append(exc)
@@ -145,7 +152,7 @@ def test_reassigning_the_gesture_button_while_held_runs_no_stale_click(client, b
     bolt.press_button(GESTURE)
     assign_gesture(client, gesture_card({"click": 10}, cid="card_gesture_other"))
     bolt.release_button(GESTURE)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == []
 
 
@@ -177,8 +184,9 @@ def test_the_thumb_event_has_rotation_timestamp_status_and_flags(bolt):
     bolt.mouse.thumb["mode"] = 1
     SimulatedBolt.turn_thumb(bolt, -5)
     assert len(seen[0]) == 6
-    assert hidpp.parse_thumb_rotation(seen[0]) == -5 and hidpp.parse_thumb_event(seen[0]) == -5
-    assert hidpp.parse_thumb_rotation(b"\x00\x05") == 5          # a short report still parses
+    assert hidpp.parse_thumb_event(seen[0]) == -5
+    assert hidpp.parse_thumb_event(b"\x00\x05") == 5
+    assert hidpp.parse_thumb_event(b"\x05") is None             # a short report is no rotation
 
 
 # ---- #27 item 3 / 6: the thumb wheel goes back to the speed relay when the profile hands it back ------------

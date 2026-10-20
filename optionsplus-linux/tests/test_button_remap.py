@@ -5,11 +5,11 @@ import time
 
 from tests.fakes import depot as fx
 from tests.fakes.hidpp_device import F_WAKE
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 TYPE = "type.googleapis.com/"
 DEFAULT_PROFILE = "420fd454-0c36-499d-bde4-146823b16147"
-BACK, FORWARD, LEFT = 82, 83, 80          # control ids of the simulated mouse (the test depot's defaults: 82 back, 83 forward)
+BACK, FORWARD, LEFT = 83, 86, 80          # control ids of the simulated mouse, as on a real one: 0x52 middle, 0x53 back, 0x56 forward
 # Linux evdev key codes, from linux/input-event-codes.h
 KEY_LEFTCTRL, KEY_C, KEY_V = 29, 46, 47
 BACK_DEFAULT = {"id": "card-back", "attribute": "MOUSE_BUTTON_ACTION"}
@@ -63,7 +63,7 @@ def test_releasing_the_button_injects_nothing_more_and_it_can_be_pressed_again(c
         bolt.press_button(BACK)
         bolt.release_button(BACK)
     assert wait_for(lambda: len(uinput.keys()) >= 8)
-    time.sleep(0.2)
+    bolt.settle()
     assert len(uinput.keys()) == 8
 
 
@@ -87,7 +87,7 @@ def test_assigning_the_default_card_back_undiverts(client, bolt, uinput):
     assert reply["result"]["code"] == "SUCCESS"
     assert bolt.mouse.diverted == set()
     bolt.press_button(BACK)
-    time.sleep(0.2)
+    bolt.settle()
     assert uinput.keys() == []
 
 
@@ -201,7 +201,7 @@ def test_a_failed_injection_does_not_stop_later_presses(client, bolt, uinput):
     uinput.fail_emit = True
     bolt.press_button(BACK)
     bolt.release_button(BACK)
-    time.sleep(0.2)
+    bolt.settle()
     uinput.fail_emit = False
     bolt.press_button(BACK)
     assert wait_for(lambda: len(uinput.keys()) >= 4)
@@ -224,3 +224,13 @@ def test_a_reply_for_another_control_is_refused(monkeypatch):
     with pytest.raises(hidpp.HidppError):
         hidpp.get_cid_reporting(0, 1, 82)
     assert hidpp.get_cid_reporting(0, 1, 83)[0] is True
+
+
+def test_a_release_lost_with_the_link_does_not_swallow_the_next_press(client, bolt, uinput):
+    assign(client, BACK, COPY)
+    bolt.press_button(BACK)
+    assert wait_for(lambda: len(uinput.keys()) >= 4)
+    bolt.emit_connection(link=False)                 # asleep before the release could be sent
+    bolt.mouse.held.clear()
+    bolt.press_button(BACK)
+    assert wait_for(lambda: len(uinput.keys()) >= 8)

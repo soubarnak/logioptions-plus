@@ -173,6 +173,10 @@ def compile_binding(card, table=None):
     nested = gestures.nested_actions(card)
     if not nested:
         preset = gestures.preset_name(card)
+        if kind == gestures.FOUR_WAYS and preset in gestures.PRESETS:
+            actions = {word: compile_card({"macro": {"type": "SYSTEM", "system": {"action": action}}}, table)
+                       for word, action in gestures.PRESETS[preset].items()}
+            return gestures.Gesture(actions, gestures.swipe_limit(card))
         if preset:
             raise Unsupported("the %s gesture preset is not supported; assign an action to each direction" % preset)
         raise Unsupported("this action card has no actions assigned")
@@ -207,9 +211,11 @@ class InputEngine:
         self._holding = {}              # dev_id -> {cid: key codes} a Hold keeps pressed now
         self.active_app = None          # application id whose profile is in force; None: the default
         self._swipes = {}               # dev_id -> (cid, Swipe) of the gesture button press in progress
+        self.held_elsewhere = lambda dev_id, key: False   # True: another owner (the wheel relay) diverted `key`
         self.on_stale = []              # callables(dev_id, slot_id, app_id, message): a stored card that no longer runs
         registry.on_button_event.append(self.on_event)
         registry.on_thumb_event.append(self.on_thumb_event)
+        registry.on_link_lost.append(self.link_lost)
 
     def _dev_lock(self, dev_id):
         with self._lock:
@@ -241,6 +247,7 @@ class InputEngine:
     def close(self):
         self._stop.set()
         with self._plays.mutex:
+            self._plays.unfinished_tasks -= len(self._plays.queue)
             self._plays.queue.clear()
         try:
             self._plays.put_nowait(None)
@@ -258,6 +265,28 @@ class InputEngine:
                 sink.close()
             except Exception:
                 log.debug("closing the virtual device failed", exc_info=True)
+
+    def release_all(self):
+        """Blocking, best effort at shutdown: hand every control this engine diverted (the thumb
+        wheel included) back to its mouse, so none stays dead after the agent is gone. A mouse
+        that stops answering is given up on; the others still get their turn."""
+        with self._lock:
+            held = {dev_id: list(keys) for dev_id, keys in self._active.items() if keys}
+        for dev_id, keys in held.items():
+            dev = self.reg.devices.get(dev_id)
+            if dev is None:
+                continue
+            with self._dev_lock(dev_id):
+                for key in keys:
+                    try:
+                        self._write(dev, key, None)
+                    except Exception as exc:
+                        log.warning("handing control %s of %s back failed: %s", key, dev_id, exc)
+                        if isinstance(exc, hidpp.HidppTimeout):
+                            break
+                        continue
+                    with self._lock:
+                        self._active.get(dev_id, {}).pop(key, None)
 
     def owns_thumb(self, dev_id):
         """Whether a thumb action card is bound on `dev_id`: the engine then owns the thumb wheel."""
@@ -472,6 +501,8 @@ class InputEngine:
             now, first_error, tried = {}, None, set()
             for key, _info in todo:
                 binding = desired.get(key)
+                if binding is None and self.held_elsewhere(dev.id, key):
+                    continue            # not ours to hand back; writing it would only be undone again
                 tried.add(key)
                 try:
                     if binding is not None:
@@ -547,8 +578,18 @@ class InputEngine:
             return
         with self._lock:
             binding = self._active.get(dev_id, {}).get(profiles.THUMB_KEY)
-            actions = binding.turn(hidpp.parse_thumb_rotation(params)) if binding else []
+            rotation = hidpp.parse_thumb_event(params)
+            actions = binding.turn(rotation) if binding and rotation is not None else []
         self._emit(dev_id, actions)
+
+    def link_lost(self, dev_id):
+        """Registry hook: the mouse went out of reach, and a release it would have sent is lost.
+        Forget what was held (else the next press of that button looks like a repeat and is
+        swallowed), end a swipe in progress and lift the virtual buttons held for it."""
+        with self._lock:
+            self._held[dev_id] = set()
+            self._swipes.pop(dev_id, None)
+        self._let_go(dev_id)
 
     def _let_go(self, dev_id, *keys):
         """Lift the virtual buttons held for `keys` (all of the device's when none are named)."""
@@ -578,6 +619,7 @@ class InputEngine:
         with self._plays.mutex:
             keep = [it for it in self._plays.queue
                     if it is None or it[0] != dev_id or all(k == "lift" for k, _ in it[2])]
+            self._plays.unfinished_tasks -= len(self._plays.queue) - len(keep)
             self._plays.queue.clear()
             self._plays.queue.extend(keep)
 
@@ -597,6 +639,8 @@ class InputEngine:
                 self._play(*item)
             except Exception as exc:
                 log.warning("running the card failed: %s", exc)
+            finally:
+                self._plays.task_done()     # tests wait on unfinished_tasks to know playback is idle
 
     def _abandoned(self, dev_id, gen):
         with self._lock:

@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tests.harness import wait_for
 from opl_agent import __version__
 
 TYPE = "type.googleapis.com/"
@@ -28,15 +29,6 @@ def collect_until_terminal(client):
             states.append(m["payload"])
             if m["payload"]["state"] in TERMINAL:
                 return states
-
-
-def wait_for(predicate, timeout=5):
-    end = time.time() + timeout
-    while time.time() < end:
-        if predicate():
-            return
-        time.sleep(0.02)
-    raise AssertionError("condition not met in %ss" % timeout)
 
 
 # ---- version and About -----------------------------------------------------
