@@ -24,6 +24,7 @@ do_install() {
 	vinstall ${src}/bootstrap/main.js 644 ${lib}/bootstrap
 	vinstall ${src}/bootstrap/package.json 644 ${lib}/bootstrap
 	vinstall ${src}/data/70-optionsplus-linux.rules 644 usr/lib/udev/rules.d
+	vinstall ${src}/data/io.github.soubarnak.optionsplus-linux.policy 644 usr/share/polkit-1/actions
 	vinstall ${src}/data/optionsplus-linux-agent.desktop 644 etc/xdg/autostart
 	vinstall ${src}/data/optionsplus-linux.desktop 644 usr/share/applications
 	vinstall ${src}/data/optionsplus-linux.svg 644 usr/share/icons/hicolor/scalable/apps

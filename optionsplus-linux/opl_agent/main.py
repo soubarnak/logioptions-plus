@@ -103,18 +103,21 @@ class Agent:
                  rescan_seconds=RESCAN_SECONDS,
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
-                 release_base_url=None, clock=None):
+                 release_base_url=None, clock=None, manifest_path=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
         updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
                                   payload_path=payload_path, release_base_url=release_base_url,
-                                  clock=clock, state_dir=state_dir)
+                                  clock=clock, state_dir=state_dir, runner=runner,
+                                  manifest_path=manifest_path)
         self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
                              updater=updater, os_release_path=os_release_path)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         updater.broadcast = self.server.broadcast
+        self.restart_requested = asyncio.Event()
+        updater.on_restart = self._request_restart
         self.poll_seconds = poll_seconds
         self.rescan_seconds = rescan_seconds
         self._watcher = None
@@ -140,9 +143,20 @@ class Agent:
                 _broadcast_battery(self.server, self.reg, dev_id)
         self._loop.call_soon_threadsafe(push)
 
+    def _request_restart(self):
+        """Updater hook (event loop): let the launcher's waiting restart take over."""
+        self.restart_requested.set()
+
     async def serve_forever(self):
+        """Serve until cancelled or until a restart is requested (the launcher then starts anew)."""
         async with self._srv:
-            await self._srv.serve_forever()
+            serving = asyncio.ensure_future(self._srv.serve_forever())
+            leaving = asyncio.ensure_future(self.restart_requested.wait())
+            try:
+                await asyncio.wait({serving, leaving}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                serving.cancel()
+                leaving.cancel()
 
     async def stop(self):
         if self._poller:

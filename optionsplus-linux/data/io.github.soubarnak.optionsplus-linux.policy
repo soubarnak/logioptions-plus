@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>Options+ for Linux</vendor>
+  <vendor_url>https://github.com/soubarnak/logioptions-plus</vendor_url>
+
+  <!-- Used by the in-app "Install update": pkexec xbps-install -Syu optionsplus-linux -->
+  <action id="io.github.soubarnak.optionsplus-linux.update">
+    <description>Update Options+ for Linux</description>
+    <message>Authentication is required to update Options+ for Linux</message>
+    <icon_name>optionsplus-linux</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/xbps-install</annotate>
+  </action>
+</policyconfig>
