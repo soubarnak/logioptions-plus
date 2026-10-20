@@ -1,0 +1,26 @@
+name: Device support request
+description: Ask for a Logitech device to be supported or its notes corrected
+labels: [needs-triage]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Device model
+      placeholder: MX Master 3S
+    validations:
+      required: true
+  - type: input
+    id: connection
+    attributes:
+      label: Connection
+      placeholder: Bolt receiver, Bluetooth, USB cable
+  - type: textarea
+    id: probe
+    attributes:
+      label: Output of opl-probe
+      description: Run optionsplus-linux/bin/opl-probe with the device connected and paste the output.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: What should work

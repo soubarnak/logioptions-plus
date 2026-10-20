@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in Options+ for Linux does not work as expected
+labels: [needs-triage]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in App Settings, General.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Void Linux (glibc or musl)
+  - type: input
+    id: device
+    attributes:
+      label: Device and connection
+      placeholder: MX Master 3S on Bolt receiver
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach the archive from ~/.local/state/optionsplus-linux/ (drag it into this box). Check it for personal data first.
