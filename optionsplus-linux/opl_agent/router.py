@@ -44,7 +44,8 @@ class Router:
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
-        self.engine = input_engine.InputEngine(self.reg, self.store, input_factory)
+        self.engine = input_engine.InputEngine(self.reg, self.store, input_factory,
+                                             os.path.join(_state_dir(state_dir), "actions.toml"))
         self.reg.on_discovered.append(self.apply_stored)
         self.reg.on_resumed.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
