@@ -24,6 +24,23 @@ if [ -z "$ELECTRON" ]; then
     exit 1
 fi
 
+# Restart after an in-app update: the old agent (pid in OPL_RESTART_WAIT_PID) is leaving; wait
+# for it so the socket is free and the new agent, not the old one, answers. Gives up after
+# OPL_RESTART_WAIT_SECONDS (default 10).
+case ${OPL_RESTART_WAIT_PID:-} in
+    ''|*[!0-9]*) ;;
+    *)
+        i=0
+        limit=$(( ${OPL_RESTART_WAIT_SECONDS:-10} * 10 ))
+        while [ $i -lt $limit ] && kill -0 "$OPL_RESTART_WAIT_PID" 2>/dev/null \
+                && ! grep -q '^State:[[:space:]]*Z' "/proc/$OPL_RESTART_WAIT_PID/status" 2>/dev/null; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        ;;
+esac
+unset OPL_RESTART_WAIT_PID OPL_RESTART_WAIT_SECONDS
+
 USER_PAYLOAD=${XDG_DATA_HOME:-$HOME/.local/share}/optionsplus-linux/payload
 SYSTEM_PAYLOAD=${OPL_SYSTEM_PAYLOAD_DIR:-/usr/lib/optionsplus-linux/logitech}
 installed() { [ -f "$1/payload.json" ] && [ -f "$1/app.asar" ]; }

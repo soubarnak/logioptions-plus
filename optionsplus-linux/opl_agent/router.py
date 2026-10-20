@@ -157,6 +157,16 @@ class Router:
         if verb == "SET" and path == "/updates/check_now":
             self.updater.request_check()
             return "SUCCESS", payload, ""
+        if verb == "SET" and path in ("/updates/download", "/updates/install", "/updates/restart_now",
+                                      "/updates/payload/download"):
+            action = {"/updates/download": self.updater.download,
+                      "/updates/install": self.updater.install,
+                      "/updates/restart_now": self.updater.restart_now,
+                      "/updates/payload/download": self.updater.download_payload}[path]
+            code, what = action()
+            return code, (payload if code == "SUCCESS" else None), what
+        if verb == "GET" and path == "/updates/payload":
+            return "SUCCESS", self.updater.payload_status(), ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
