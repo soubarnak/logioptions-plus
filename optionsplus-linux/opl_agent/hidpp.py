@@ -415,6 +415,22 @@ _B1000_STATUS = {0: "discharging", 1: "recharging", 2: "charge in final stage",
                  5: "invalid battery", 6: "thermal error", 7: "other charging error"}
 
 
+_UB_LEVEL_NAMES = ((1, "critical"), (2, "low"), (4, "good"), (8, "full"))
+
+
+def get_battery_caps(fd, idx):
+    """0x1004 fn0 -> {levels, rechargeable, soc}; None when the device lacks 0x1004.
+
+    levels: names of the supported level bits; rechargeable: flags bit0;
+    soc: flags bit1 (device reports a state-of-charge percentage).
+    """
+    if not has_feature(fd, idx, F_UNIFIED_BATTERY):
+        return None
+    caps = _fcall(fd, idx, F_UNIFIED_BATTERY, 0)
+    return {"levels": [n for b, n in _UB_LEVEL_NAMES if caps[0] & b],
+            "rechargeable": bool(caps[1] & 0x01), "soc": bool(caps[1] & 0x02)}
+
+
 def get_battery(fd, idx):
     """-> {percent, charging, next_level, status}.
 

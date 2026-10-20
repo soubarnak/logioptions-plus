@@ -23,7 +23,14 @@ from .router import Router
 
 log = logging.getLogger("opl.main")
 
+TYPE = "type.googleapis.com/"
+
 POLL_SECONDS = 30
+
+
+def _battery_key(reg, dev_id):
+    b = reg.devices[dev_id].battery_cache or {}
+    return (b.get("percent"), bool(b.get("charging")))
 
 
 async def _poll(server, reg, interval=POLL_SECONDS):
@@ -32,16 +39,19 @@ async def _poll(server, reg, interval=POLL_SECONDS):
     while True:
         await asyncio.sleep(interval)
         for dev_id in list(reg.devices):
-            prev = (reg.devices[dev_id].battery_cache or {}).get("percent")
+            prev = _battery_key(reg, dev_id)
             try:
                 await loop.run_in_executor(None, reg.refresh_battery, dev_id)
             except Exception:
                 continue
-            now = (reg.devices[dev_id].battery_cache or {}).get("percent")
-            if now != prev:
+            if _battery_key(reg, dev_id) != prev:
                 pl, _ = reg.battery(dev_id)
                 server.broadcast("/battery/state/changed", pl)
                 server.broadcast("/battery/%s/state/changed" % dev_id, pl)
+                info = reg.devices[dev_id].info()
+                info["batteryStatus"] = reg.battery_status_for_info(dev_id)
+                info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+                server.broadcast("/devices/state/changed", info)
 
 
 class Agent:
