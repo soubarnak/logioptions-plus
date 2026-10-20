@@ -168,6 +168,11 @@ class Router:
                                 "range": self.reg.dpi_range(dev_id)}
             except Exception as exc:
                 log.debug("no live DPI for %s: %s", dev_id, exc)
+            if self.reg.devices[dev_id].thumb_wheel:
+                try:
+                    live.setdefault(dev_id, {})["thumb"] = self.reg.read_thumb(dev_id)
+                except Exception as exc:
+                    log.debug("no live thumb wheel status for %s: %s", dev_id, exc)
         return live
 
     async def _profiles_payload(self):
@@ -190,6 +195,21 @@ class Router:
         dpi = self.reg.write_dpi(dev.id, profiles.dpi_from_value(value, rng))
         return profiles.mouse_settings_card(profiles.value_from_dpi(dpi, rng), dpi)
 
+    def _thumb_device_for_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if dev.thumb_wheel and slot_id == profiles.thumb_wheel_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_thumb(self, dev, card):
+        """Blocking: write thumb wheel direction/smooth from `card` over what the
+        device reports now; returns the card read back (speed is not adjustable)."""
+        invert, smooth = profiles.thumb_wheel_fields(card)
+        cur = self.reg.read_thumb(dev.id)
+        st = self.reg.write_thumb(dev.id, cur["invert"] if invert is None else invert,
+                                  cur["smooth"] if smooth is None else smooth)
+        return profiles.thumb_wheel_card(st["invert"], st["smooth"])
+
     def apply_stored(self, dev_id):
         """Blocking: reapply stored settings to a device (discovery, reconnect)."""
         dev = self.reg.devices.get(dev_id)
@@ -197,6 +217,9 @@ class Router:
         value = profiles.pointer_value(card) if card else None
         if value is not None:
             self._apply_pointer(dev, value)
+        tcard = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix)) if dev and dev.thumb_wheel else None
+        if tcard is not None:
+            self._apply_thumb(dev, tcard)
 
     async def _profiles_set(self, path, payload):
         loop = asyncio.get_event_loop()
@@ -209,6 +232,18 @@ class Router:
         handled = None
         for entry in entries:
             asg = entry.get("assignment") or {}
+            tdev = self._thumb_device_for_slot(asg.get("slotId", ""))
+            if tdev is not None:
+                try:
+                    card = await loop.run_in_executor(
+                        None, self._apply_thumb, tdev, asg.get("card") or entry.get("card") or {})
+                except Exception as exc:
+                    log.warning("thumb wheel write failed: %s", exc)
+                    return "FAULTED", None, "device write failed: %s" % exc
+                self.store.set(asg["slotId"], card)
+                asg["card"], asg["cardId"] = card, card["id"]
+                handled = payload
+                continue
             dev = self._device_for_slot(asg.get("slotId", ""))
             value = profiles.pointer_value(asg.get("card") or entry.get("card") or {})
             if dev is None or value is None:
@@ -232,6 +267,7 @@ class Router:
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
             self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
             try:
                 await loop.run_in_executor(None, self._apply_defaults, dev)
             except Exception as exc:
@@ -241,6 +277,8 @@ class Router:
         return "SUCCESS", info, ""
 
     def _apply_defaults(self, dev):
+        if dev.thumb_wheel:
+            self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)
         if value is not None:
             self._apply_pointer(dev, value)

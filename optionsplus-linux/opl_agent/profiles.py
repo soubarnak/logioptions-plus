@@ -92,6 +92,35 @@ def default_pointer_value(depot):
     return None
 
 
+THUMB_WHEEL_SUFFIX = "_mouse_thumb_wheel_settings"
+THUMB_ATTRIBUTE = "MOUSE_THUMB_WHEEL_SETTINGS"
+DIR_INVERTED, DIR_STANDARD = "NATURAL", "STANDARD"   # logi.protocol.mouse.WheelDirection
+
+
+def thumb_wheel_slot(slot_prefix):
+    return slot_prefix + THUMB_WHEEL_SUFFIX
+
+
+def thumb_wheel_card(invert, smooth):
+    """Thumb wheel card; speed stays 0 (not adjustable) until the relay exists."""
+    return {"id": THUMB_ATTRIBUTE, "attribute": THUMB_ATTRIBUTE,
+            "mouseThumbWheelSettings": {"dir": DIR_INVERTED if invert else DIR_STANDARD,
+                                        "isSmooth": bool(smooth), "speed": 0}}
+
+
+def thumb_wheel_fields(card):
+    """(invert, smooth) from a thumb wheel card; None where the card says nothing."""
+    try:
+        s = card["mouseThumbWheelSettings"]
+    except (KeyError, TypeError):
+        return None, None
+    if not isinstance(s, dict):
+        return None, None
+    invert = {DIR_INVERTED: True, DIR_STANDARD: False}.get(s.get("dir"))
+    smooth = s["isSmooth"] if isinstance(s.get("isSmooth"), bool) else None
+    return invert, smooth
+
+
 class ProfileStore:
     """User settings that override the depot defaults, persisted as profiles.json.
 
@@ -138,11 +167,17 @@ def profiles(devices, store=None, live=None):
         assignments += default_assignments(dev.slot_prefix, dev.depot)
         slot = mouse_settings_slot(dev.slot_prefix)
         card = store.get(slot) if store else None
-        if card is None and dev.id in live:
-            rd = live[dev.id]
+        rd = live.get(dev.id) or {}
+        if card is None and "dpi" in rd:
             card = mouse_settings_card(value_from_dpi(rd["dpi"], rd["range"]), rd["dpi"])
         if card is not None:
             assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
+        tslot = thumb_wheel_slot(dev.slot_prefix)
+        tcard = store.get(tslot) if store else None
+        if tcard is None and "thumb" in rd:
+            tcard = thumb_wheel_card(rd["thumb"]["invert"], rd["thumb"]["smooth"])
+        if tcard is not None:
+            assignments.append({"slotId": tslot, "cardId": tcard.get("id", ""), "card": tcard})
     return {
         "@type": TYPE + "logi.protocol.profiles_v2.Profiles",
         "profiles": [{

@@ -63,6 +63,7 @@ class Device:
         self.first_connected = int(time.time())
         self.serial = ""
         self.fw = ""
+        self.thumb_wheel = False     # has 0x2150
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.catalogue = resources.catalogue_entry(pid) or {}
@@ -92,7 +93,7 @@ class Device:
     # ---- payload builders -------------------------------------------------
     def info(self):
         """logi.protocol.devices.Device.Info for /devices/list and /devices/<id>/info."""
-        return {
+        out = {
             "id": self.id,
             "pid": self.pid,
             "state": "ACTIVE" if self.connected else "ABSENT",
@@ -118,6 +119,10 @@ class Device:
             "firstConnectedTimestamp": str(self.first_connected),
             **self._battery_fields(),
         }
+        if self.thumb_wheel:
+            # speed 0: the thumb wheel speed control stays disabled until the relay exists
+            out.setdefault("capabilities", {})["mouseThumbWheelOverride"] = {"speed": 0}
+        return out
 
     def _battery_fields(self):
         """Capability flags and level that make the UI show the battery indicator."""
@@ -208,6 +213,10 @@ class Registry:
                     pass
                 self.devices[dev_id] = d
                 try:
+                    d.thumb_wheel = hidpp.has_feature(fd, idx, hidpp.F_THUMB_WHEEL)
+                except Exception:
+                    pass
+                try:
                     d.battery_caps = hidpp.get_battery_caps(fd, idx)
                 except Exception:
                     pass
@@ -287,6 +296,18 @@ class Registry:
         """Blocking read of the current and default DPI: {dpi, default, ...}."""
         d = self.devices[dev_id]
         return hidpp.get_dpi(self._fds[d.node.path], d.index)
+
+    def read_thumb(self, dev_id):
+        """Blocking 0x2150 status read: {mode, invert, smooth}."""
+        d = self.devices[dev_id]
+        return hidpp.get_thumbwheel(self._fds[d.node.path], d.index)
+
+    def write_thumb(self, dev_id, invert, smooth):
+        """Blocking 0x2150 write (reporting mode untouched); returns the read-back status."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        mode = hidpp.get_thumbwheel(fd, d.index)["mode"]
+        return hidpp.set_thumbwheel(fd, d.index, invert, smooth, mode)
 
     def write_dpi(self, dev_id, dpi):
         """Blocking 0x2201 write; returns the DPI read back from the device."""

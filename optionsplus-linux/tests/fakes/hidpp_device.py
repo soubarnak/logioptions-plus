@@ -17,7 +17,7 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x2150]
 
 
 class SimulatedMouse:
@@ -32,6 +32,9 @@ class SimulatedMouse:
         self.fail_dpi_write = False                 # answer setSensorDpi with an error
         self.smartshift = {"mode": 2, "threshold": 30, "torque": 0}
         self.firmware = (0x12, 0x34, 0x0567)        # major, minor, build
+        # 0x2150 thumb wheel: reporting mode 1 native / 2 diverted, direction inverted, smooth
+        self.thumb = {"mode": 1, "invert": 0, "smooth": 0}
+        self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
 
     def handle(self, fidx, fn, params):
         """Return reply params for feature index `fidx`, or an int error code."""
@@ -92,6 +95,17 @@ class SimulatedMouse:
                 if params[1]:
                     s["threshold"] = params[1]
                 return b""
+        elif fid == 0x2150:
+            t = self.thumb
+            if fn == 0:                               # info: native res, diverted res, default dir, caps
+                return struct.pack(">HHBB", 120, 14, 0, 0x03)
+            if fn == 1:
+                return bytes([t["mode"], t["invert"], t["smooth"]])
+            if fn == 2:
+                if self.fail_thumb_write:
+                    return 5                          # ERR_BUSY
+                t.update(mode=params[0], invert=params[1] & 1, smooth=params[2] & 1)
+                return bytes([t["mode"], t["invert"], t["smooth"]])
         return 7                                      # INVALID_FUNCTION_ID
 
 
