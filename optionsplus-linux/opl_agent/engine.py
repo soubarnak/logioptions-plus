@@ -134,6 +134,7 @@ class InputEngine:
         self._lock = threading.RLock()
         self._active = {}               # dev_id -> {cid: events}
         self._held = {}                 # dev_id -> set of cids held down now
+        self.active_app = None          # application id whose profile is in force; None: the default
         registry.on_button_event.append(self.on_event)
 
     # ---- the virtual device ------------------------------------------------
@@ -191,7 +192,7 @@ class InputEngine:
         defaults = {a["slotId"]: a["cardId"]
                     for a in profiles.default_assignments(dev.slot_prefix, dev.depot)}
         out = {}
-        for slot_id, card in self.store.cards.items():
+        for slot_id, card in self.store.effective_cards(self.active_app).items():
             if not profiles.is_button_slot(slot_id, dev.slot_prefix):
                 continue
             if card.get("id") == defaults.get(slot_id):
@@ -201,6 +202,59 @@ class InputEngine:
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
         return out
+
+    def validate(self, dev, cid, card):
+        """Raise Unsupported unless button `cid` could run `card`; touches nothing."""
+        compile_card(card, self.table)
+        self._divertable(dev, cid)
+        self.sink()
+
+    def activate(self, app_id, devices):
+        """Blocking: put application `app_id`'s profile in force (None: the default one). Per
+        device, only the buttons whose diversion differs are written; a button that stays
+        diverted just runs its new card. The first error is raised after every device is tried."""
+        self.active_app = app_id
+        first_error = None
+        for dev in devices:
+            try:
+                self._rebase(dev)
+            except Exception as exc:
+                log.warning("switching %s to the profile of %s failed: %s", dev.id, app_id or "the default", exc)
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+
+    def _rebase(self, dev):
+        try:
+            self.reg.controls(dev.id)
+        except hidpp.FeatureNotSupported:
+            return
+        desired = self._desired(dev)
+        with self._lock:
+            current = dict(self._active.get(dev.id, {}))
+        first_error = None
+        for cid in sorted(set(current) | set(desired)):
+            if (cid in current) == (cid in desired):
+                if cid in desired:
+                    current[cid] = desired[cid]
+                continue
+            try:
+                if cid in desired:
+                    self.sink()
+                self.reg.set_divert(dev.id, cid, cid in desired)
+            except Exception as exc:
+                first_error = first_error or exc
+                if isinstance(exc, hidpp.HidppTimeout):
+                    break
+                continue
+            if cid in desired:
+                current[cid] = desired[cid]
+            else:
+                del current[cid]
+        with self._lock:
+            self._active[dev.id] = current
+        if first_error is not None:
+            raise first_error
 
     def sync(self, dev):
         """Blocking: bring the mouse's diversions in line with the store. Reads each divertable

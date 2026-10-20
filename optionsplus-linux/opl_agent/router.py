@@ -16,9 +16,12 @@ import copy
 import json
 import logging
 import os
+import threading
 
-from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, swap, updates
+from . import actions, applications, easy_switch, engine as input_engine, focus, model, profiles, resources, responses, stubs, swap, updates
 from .runner import SubprocessRunner
+
+DEFAULT_PROFILE = profiles.DEFAULT_PROFILE_ID
 
 log = logging.getLogger("opl.router")
 
@@ -41,6 +44,8 @@ class Router:
         self.runner = runner or SubprocessRunner()
         self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
         self.apps = None                 # last scan result; None until first scan
+        self._switch_lock = threading.Lock()   # button assignments and focus switches, one at a time
+        self._focused = None             # the window that has the focus, when known
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
@@ -262,7 +267,7 @@ class Router:
 
     async def _profiles_payload(self):
         live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
-        return profiles.profiles(self.reg.devices.values(), self.store, live)
+        return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app)
 
     async def _broadcast_profiles(self):
         if self.server is not None:
@@ -367,32 +372,36 @@ class Router:
             asg = entry.get("assignment") or {}
             slot_id = asg.get("slotId", "")
             requested = asg.get("card") or entry.get("card") or {}
+            app = entry.get("profileId") or DEFAULT_PROFILE
+            app = None if app == DEFAULT_PROFILE else app
             dev = self._device_for_slot(slot_id)
             value = profiles.pointer_value(requested)
-            if dev is not None and value is not None:
-                apply_fn, arg, what = self._apply_pointer, value, "pointer speed"
-            else:
+            if app is not None or dev is None or value is None:
                 dev = self._device_for_scroll_slot(slot_id)
                 req = profiles.scroll_request(requested)
-                if dev is not None and req is not None:
-                    apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
-                else:
-                    dev = self._thumb_device_for_slot(slot_id)
-                    if dev is None:
-                        target = self._button_target(slot_id) if requested else None
-                        if target is None:
-                            continue
-                        try:
-                            await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested)
-                        except input_engine.Unsupported as exc:
-                            return "NOT_SUPPORTED", None, str(exc)
-                        except Exception as exc:
-                            log.warning("button write failed: %s", exc)
-                            return "FAULTED", None, "device write failed: %s" % exc
-                        asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
-                        handled = payload
+            if app is None and dev is not None and value is not None:
+                apply_fn, arg, what = self._apply_pointer, value, "pointer speed"
+            elif app is None and dev is not None and req is not None:
+                apply_fn, arg, what = self._apply_scroll, req, "scroll wheel"
+            else:
+                dev = self._thumb_device_for_slot(slot_id) if app is None else None
+                if dev is None:
+                    target = self._button_target(slot_id) if requested else None
+                    if target is None and app is not None and requested:
+                        return "NOT_SUPPORTED", None, "only button assignments can differ per application"
+                    if target is None:
                         continue
-                    apply_fn, arg, what = self._apply_thumb, requested, "thumb wheel"
+                    try:
+                        await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
+                    except input_engine.Unsupported as exc:
+                        return "NOT_SUPPORTED", None, str(exc)
+                    except Exception as exc:
+                        log.warning("button write failed: %s", exc)
+                        return "FAULTED", None, "device write failed: %s" % exc
+                    asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
+                    handled = payload
+                    continue
+                apply_fn, arg, what = self._apply_thumb, requested, "thumb wheel"
             try:
                 card = await loop.run_in_executor(None, apply_fn, dev, arg)
             except Exception as exc:
@@ -415,19 +424,33 @@ class Router:
                 return dev, int(slot_id.rpartition("_c")[2])
         return None
 
-    def _assign_button(self, dev, cid, slot_id, card):
+    def _assign_button(self, dev, cid, slot_id, card, app=None):
         """Blocking: make the button do `card` (the depot default card hands it back to the
-        mouse), then keep the choice. Raises, storing nothing, when the device cannot do it."""
-        default = next((a["cardId"] for a in profiles.default_assignments(dev.slot_prefix, dev.depot)
-                        if a["slotId"] == slot_id), None)
-        if card.get("id") == default:
-            self.engine.release(dev, cid)
-        else:
-            self.engine.assign(dev, cid, card)
-        self.store.set(slot_id, card)
+        mouse), then keep the choice for the default profile or application `app`. Only a
+        choice that is in force now touches the mouse: the active application's own, or the
+        default's where the active application has no card of its own for the button. Raises,
+        storing nothing, when the device cannot do it."""
+        with self._switch_lock:
+            default = next((a["cardId"] for a in profiles.default_assignments(dev.slot_prefix, dev.depot)
+                            if a["slotId"] == slot_id), None)
+            active = self.engine.active_app
+            in_force = (app == active) if app is not None else slot_id not in self.store.app_cards(active)
+            if not in_force:
+                if card.get("id") != default:
+                    self.engine.validate(dev, cid, card)
+            elif card.get("id") == default:
+                self.engine.release(dev, cid)
+            else:
+                self.engine.assign(dev, cid, card)
+            self.store.set(slot_id, card, app)
+            if app is not None:
+                self._refocus()               # the focused window may belong to a profile just made
 
     async def _profiles_reset(self, info):
         loop = asyncio.get_event_loop()
+        app = info.get("profileId")
+        if app and app != DEFAULT_PROFILE:
+            return await self._app_profile_reset(app, info)
         for dev in list(self.reg.devices.values()):
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
@@ -442,6 +465,37 @@ class Router:
                 return "FAULTED", None, "device write failed: %s" % exc
         await self._broadcast_profiles()
         return "SUCCESS", info, ""
+
+    async def _app_profile_reset(self, app, info):
+        """Reset an application's profile: it forgets its buttons and follows the default again."""
+        devices = [d for d in self.reg.devices.values() if not info.get("deviceId") or info["deviceId"] == d.id]
+        self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
+                                                              for d in devices))
+        if self.engine.active_app == app:
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, self.engine.activate, app, devices)
+            except Exception as exc:
+                return "FAULTED", None, "device write failed: %s" % exc
+        await self._broadcast_profiles()
+        return "SUCCESS", info, ""
+
+    def on_focus(self, window):
+        """Blocking: the focused window changed; put the profile of its application (else the
+        default) in force. Failures are logged: the next focus change tries again."""
+        with self._switch_lock:
+            self._focused = window
+            try:
+                self._refocus()
+            except Exception as exc:
+                log.warning("switching profile failed: %s", exc)
+
+    def _refocus(self):
+        """Blocking: bring the profile in force in line with the focused window."""
+        if self.apps is None:
+            self.apps = applications.scan(self._app_dirs())
+        app = focus.match_profile(self._focused, sorted(self.store.apps), self.apps)
+        if app != self.engine.active_app:
+            self.engine.activate(app, list(self.reg.devices.values()))
 
     def _apply_defaults(self, dev):
         self.engine.sync(dev)               # the store holds no button choices now: hand them all back
@@ -487,11 +541,14 @@ class Router:
                 return
         log.info("no known desktop mouse settings tool; nothing to open")
 
+    def _app_dirs(self):
+        return self.app_dirs if self.app_dirs is not None else applications.default_dirs()
+
     async def _scan_applications(self, announce):
         """Scan off the event loop. An unreadable tree or a scan error counts
         as "nothing found": the completion broadcast is sent regardless, so the
         UI's scanning spinner always stops."""
-        dirs = self.app_dirs if self.app_dirs is not None else applications.default_dirs()
+        dirs = self._app_dirs()
         try:
             self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
         except Exception as exc:
