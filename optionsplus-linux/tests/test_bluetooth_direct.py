@@ -99,8 +99,8 @@ def test_device_list_battery_and_firmware_over_long_reports(ble_client):
 def test_dpi_write_and_read_back_over_long_reports(ble, ble_client):
     reply = slider(ble_client, 0.5)
     assert reply["result"]["code"] == "SUCCESS"
-    assert ble.mouse.dpi == 4100
-    assert reply["payload"]["assignment"]["card"]["mouseSettings"]["pointerSpeed"]["active"]["dpiLevel"] == 4100
+    assert ble.mouse.dpi == 4500
+    assert reply["payload"]["assignment"]["card"]["mouseSettings"]["pointerSpeed"]["active"]["dpiLevel"] == 4500
 
 
 def test_failed_dpi_write_is_a_failure_not_success(ble, ble_client):

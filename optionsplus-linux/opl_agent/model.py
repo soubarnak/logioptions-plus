@@ -1072,9 +1072,10 @@ class Registry:
                 "chargingStatus": "CHARGING" if b.get("charging") else "DISCHARGING"}
 
     def dpi_range(self, dev_id):
-        """Blocking read of the sensor's DPI list: {values, min, max, step}."""
+        """Blocking read of the sensor's DPI list: {values, min, max, step, default}."""
         d = self.devices[dev_id]
-        return hidpp.get_dpi_list(self._fds[d.node.path], d.index)
+        fd = self._fds[d.node.path]
+        return {**hidpp.get_dpi_list(fd, d.index), "default": hidpp.get_dpi(fd, d.index)["default"]}
 
     def read_dpi(self, dev_id):
         """Blocking read of the current and default DPI: {dpi, default, ...}."""

@@ -79,7 +79,7 @@ def test_settings_are_reapplied_when_the_receiver_returns(bolt, live):
     bolt.mouse.dpi = 1000
     bolt.plug()
     next_push(live, "/devices/state/changed")
-    assert bolt.mouse.dpi == 4100
+    assert bolt.mouse.dpi == 4500
 
 
 # ---- the mouse switching off and on, receiver staying put ------------------
@@ -98,7 +98,7 @@ def test_switching_the_mouse_on_restores_it_with_settings_and_battery(bolt, live
     bolt.mouse.power(True)                     # comes back at its own default DPI
     back = next_push(live, "/devices/state/changed")
     assert back["id"] == DEV and back["batteryDischargeLevel"] == 64
-    assert wait_for(lambda: bolt.mouse.dpi == 6450)
+    assert wait_for(lambda: bolt.mouse.dpi == 6600)
 
 
 def test_a_mouse_switched_off_mid_probe_is_removed_not_re_announced_as_a_new_device(bolt, monkeypatch):

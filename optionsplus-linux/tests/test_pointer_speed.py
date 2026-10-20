@@ -42,18 +42,18 @@ def test_mouse_settings_slot_is_seeded_from_the_live_dpi(client):
     assert a is not None, "hotspot would say MISSING ASSIGNMENT"
     assert a["card"]["attribute"] == "MOUSE_SETTINGS"
     active = a["card"]["mouseSettings"]["pointerSpeed"]["active"]
-    assert active["value"] == pytest.approx((1000 - MIN_DPI) / (MAX_DPI - MIN_DPI))
+    assert active["value"] == pytest.approx(0.0)          # the sensor default sits mid-slider (50%)
     assert active["dpiLevel"] == 1000
 
 
-@pytest.mark.parametrize("value, dpi", [(0.0, 200), (0.25, 2150), (0.5, 4100), (0.8, 6450), (1.0, 8000)])
+@pytest.mark.parametrize("value, dpi", [(-1.0, 200), (-0.46, 650), (0.0, 1000), (0.25, 2750), (0.5, 4500), (0.8, 6600), (1.0, 8000)])
 def test_slider_set_writes_dpi_through_2201_and_replies_with_read_back(client, bolt, value, dpi):
     reply = slider(client, value)
     assert reply["result"]["code"] == "SUCCESS"
     assert bolt.mouse.dpi == dpi
     asg = reply["payload"]["assignment"]
     assert asg["card"]["mouseSettings"]["pointerSpeed"]["active"]["dpiLevel"] == dpi
-    assert pointer_value(asg) == pytest.approx((dpi - MIN_DPI) / (MAX_DPI - MIN_DPI))
+    assert pointer_value(asg) == pytest.approx(value, abs=0.03)
 
 
 def test_slider_beyond_the_ends_is_clamped_to_the_sensor_range(client, bolt):
@@ -69,7 +69,7 @@ def test_failed_device_write_is_a_failure_not_success(client, bolt):
     assert reply["result"]["code"] != "SUCCESS"
     assert bolt.mouse.dpi == 1000
     value = pointer_value(_assignment(get_profile(client)))
-    assert value == pytest.approx((1000 - MIN_DPI) / (MAX_DPI - MIN_DPI))
+    assert value == pytest.approx(0.0)
 
 
 def test_profile_persists_across_agent_restart(agent_factory, bolt):
@@ -83,7 +83,7 @@ def test_profile_persists_across_agent_restart(agent_factory, bolt):
     c2 = second.client()
     try:
         assert pointer_value(_assignment(get_profile(c2))) == pytest.approx(0.8, abs=0.01)
-        assert bolt.mouse.dpi == 6450          # and was reapplied at discovery
+        assert bolt.mouse.dpi == 6600          # and was reapplied at discovery
     finally:
         c2.close()
 
@@ -93,7 +93,7 @@ def test_reset_to_default_restores_and_applies_depot_defaults(client, bolt):
     reply = client.call("SET", "/v2/profiles/reset", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileResetInfo", "profileId": DEFAULT_PROFILE})
     assert reply["result"]["code"] == "SUCCESS"
-    assert bolt.mouse.dpi == 4100              # depot default value 0.5
+    assert bolt.mouse.dpi == 4500              # depot default value 0.5
     assert pointer_value(_assignment(get_profile(client))) == pytest.approx(0.5, abs=0.01)
 
 
@@ -113,7 +113,7 @@ def test_settings_are_reapplied_when_a_device_is_discovered(agent, client, bolt)
     slider(client, 0.5)
     bolt.mouse.dpi = 1000                      # receiver replug: mouse back at its own value
     agent.agent.reg.scan()
-    assert bolt.mouse.dpi == 4100
+    assert bolt.mouse.dpi == 4500
 
 
 def test_the_ui_route_set_v2_assignment_writes_the_dpi(client, bolt):
@@ -147,11 +147,35 @@ def test_an_assignment_for_an_unknown_slot_is_an_invalid_argument(client):
 
 def test_device_restore_resets_the_device_named_by_the_payload(client, bolt):
     slider(client, 0.9)
-    assert bolt.mouse.dpi != 4100
+    assert bolt.mouse.dpi != 4500
     reply = client.call("SET", "/device/restore", {
         "@type": TYPE + "logi.protocol.device.DeviceInfo", "id": "dev00000000",
         "deviceModel": fx.MODEL_ID, "slotPrefix": fx.SLOT_PREFIX})
     assert reply["result"]["code"] == "SUCCESS"
     assert reply["payload"]["id"] == "dev00000000"
-    assert bolt.mouse.dpi == 4100
+    assert bolt.mouse.dpi == 4500
     assert pointer_value(_assignment(get_profile(client))) == pytest.approx(0.5, abs=0.01)
+
+
+@pytest.mark.parametrize("value, dpi", [
+    (-1.0, 200), (-0.46, 650), (-0.5, 600), (0.0, 1000), (0.5, 4500), (1.0, 8000), (-5, 200), (5, 8000)])
+def test_slider_value_maps_around_the_sensor_default(value, dpi):
+    from opl_agent import profiles
+    rng = {"min": 200, "max": 8000, "step": 50, "default": 1000}
+    assert profiles.dpi_from_value(value, rng) == dpi
+    assert profiles.value_from_dpi(dpi, rng) == pytest.approx(max(-1.0, min(1.0, value)), abs=0.03)
+
+
+def test_slider_maps_around_the_range_midpoint_when_the_sensor_reports_no_default():
+    from opl_agent import profiles
+    rng = {"min": 200, "max": 8000, "step": 50, "default": 0}
+    assert profiles.dpi_from_value(0.0, rng) == 4100
+    assert profiles.value_from_dpi(4100, rng) == pytest.approx(0.0)
+
+
+def test_slider_snaps_to_a_dpi_list_without_a_step():
+    from opl_agent import profiles
+    rng = {"values": [400, 800, 1600, 3200], "min": 400, "max": 3200, "step": None, "default": 800}
+    assert profiles.dpi_from_value(0.0, rng) == 800
+    assert profiles.dpi_from_value(1.0, rng) == 3200
+    assert profiles.dpi_from_value(-1.0, rng) == 400

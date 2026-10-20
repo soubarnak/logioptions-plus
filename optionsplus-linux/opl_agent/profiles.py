@@ -82,24 +82,33 @@ def mouse_settings_slot(slot_prefix):
     return slot_prefix + MOUSE_SETTINGS_SUFFIX
 
 
+def _default_dpi(rng):
+    """The DPI the slider's 0.0 stands for: the sensor's default, else the middle of its range."""
+    lo, hi = rng["min"], rng["max"]
+    d = rng.get("default") or (lo + hi) // 2
+    return min(hi, max(lo, d))
+
+
 def dpi_from_value(value, rng):
-    """Map a 0..1 slider position onto the sensor's DPI range/list."""
-    value = min(1.0, max(0.0, float(value)))
+    """Map a slider position onto the sensor's DPI range/list. The slider runs from -1 to 1 (the UI
+    shows (value + 1) / 2 as a percentage); 0.0 is the sensor's default DPI, -1 its minimum, 1 its maximum."""
+    value = min(1.0, max(-1.0, float(value)))
+    lo, hi, d = rng["min"], rng["max"], _default_dpi(rng)
+    dpi = d + value * ((d - lo) if value < 0 else (hi - d))
     step = rng.get("step")
     if step:
-        lo, hi = rng["min"], rng["max"]
-        return lo + int(round(value * (hi - lo) / step)) * step
-    values = rng["values"]
-    return values[int(round(value * (len(values) - 1)))]
+        return min(hi, max(lo, lo + int(round((dpi - lo) / step)) * step))
+    return min(rng["values"], key=lambda v: abs(v - dpi))
 
 
 def value_from_dpi(dpi, rng):
-    lo, hi = rng["min"], rng["max"]
-    return 0.0 if hi == lo else min(1.0, max(0.0, (dpi - lo) / float(hi - lo)))
+    lo, hi, d = rng["min"], rng["max"], _default_dpi(rng)
+    span = (d - lo) if dpi < d else (hi - d)
+    return 0.0 if span == 0 else min(1.0, max(-1.0, (dpi - d) / float(span)))
 
 
 def pointer_value(card):
-    """The slider position (0..1) in a MOUSE_SETTINGS card, or None."""
+    """The slider position (-1..1) in a MOUSE_SETTINGS card, or None."""
     try:
         return float(card["mouseSettings"]["pointerSpeed"]["active"]["value"])
     except (KeyError, TypeError, ValueError):
@@ -112,7 +121,7 @@ def mouse_settings_card(value, dpi):
 
 
 def default_pointer_value(depot):
-    """Pointer speed (0..1) from the depot's default configuration, or None."""
+    """Pointer speed (-1..1) from the depot's default configuration, or None."""
     for conf in _default_configurations(depot):
         card = (conf.get("settings") or {}).get("mouseSettings")
         v = pointer_value({"mouseSettings": card}) if card else None
