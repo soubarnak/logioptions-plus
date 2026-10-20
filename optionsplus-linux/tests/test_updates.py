@@ -14,6 +14,7 @@ TERMINAL = ("NO_UPDATES", "UPDATE_AVAILABLE", "UPDATER_ERROR")
 
 def check(client):
     """Subscribe to status, run a check, return every state pushed until a terminal one."""
+    wait_for(lambda: client.call("GET", "/updates/status")["payload"]["state"] in TERMINAL)
     client.subscribe("/updates/status")
     assert client.call("SET", "/updates/check_now")["result"]["code"] == "SUCCESS"
     return collect_until_terminal(client)

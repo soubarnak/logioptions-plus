@@ -66,9 +66,11 @@ class Agent:
                              os_release_path=os_release_path)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
+        updater.broadcast = self.server.broadcast
         self.poll_seconds = poll_seconds
         self._srv = None
         self._poller = None
+        self._updates = None
 
     async def start(self):
         loop = asyncio.get_event_loop()
@@ -76,6 +78,7 @@ class Agent:
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._srv = await self.server.start()
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
+        self._updates = asyncio.ensure_future(self.router.updater.run())
 
     async def serve_forever(self):
         async with self._srv:
@@ -84,6 +87,8 @@ class Agent:
     async def stop(self):
         if self._poller:
             self._poller.cancel()
+        if self._updates:
+            self._updates.cancel()
         if self._srv:
             self._srv.close()
             await self._srv.wait_closed()
