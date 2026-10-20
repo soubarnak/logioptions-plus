@@ -157,6 +157,7 @@ class Registry:
         self.devices = {}          # id -> Device
         self._fds = {}             # node.path -> fd
         self._receivers = []
+        self.on_discovered = []    # callables(dev_id), run in scan() for each new device
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
@@ -215,6 +216,11 @@ class Registry:
                 except Exception:
                     pass
                 log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
+                for hook in list(self.on_discovered):
+                    try:
+                        hook(dev_id)
+                    except Exception:
+                        log.exception("discovery hook failed for %s", dev_id)
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):
@@ -271,6 +277,23 @@ class Registry:
         d = self.devices.get(dev_id)
         fd = self._fds.get(d.node.path)
         hidpp.set_dpi(fd, d.index, int(dpi))
+
+    def dpi_range(self, dev_id):
+        """Blocking read of the sensor's DPI list: {values, min, max, step}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi_list(self._fds[d.node.path], d.index)
+
+    def read_dpi(self, dev_id):
+        """Blocking read of the current and default DPI: {dpi, default, ...}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi(self._fds[d.node.path], d.index)
+
+    def write_dpi(self, dev_id, dpi):
+        """Blocking 0x2201 write; returns the DPI read back from the device."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        hidpp.set_dpi(fd, d.index, int(dpi))
+        return hidpp.get_dpi(fd, d.index)["dpi"]
 
     def close(self):
         for fd in self._fds.values():

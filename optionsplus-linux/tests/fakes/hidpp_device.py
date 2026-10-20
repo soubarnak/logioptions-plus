@@ -29,6 +29,7 @@ class SimulatedMouse:
         self.battery_caps = (0x0F, 0x03)           # levels crit/low/good/full; rechargeable + SoC
         self.dpi = 1000
         self.default_dpi = 1000
+        self.fail_dpi_write = False                 # answer setSensorDpi with an error
         self.smartshift = {"mode": 2, "threshold": 30, "torque": 0}
         self.firmware = (0x12, 0x34, 0x0567)        # major, minor, build
 
@@ -76,6 +77,8 @@ class SimulatedMouse:
             if fn == 2:
                 return bytes([0]) + struct.pack(">HH", self.dpi, self.default_dpi)
             if fn == 3:
+                if self.fail_dpi_write:
+                    return 5                          # ERR_BUSY
                 self.dpi = struct.unpack(">H", params[1:3])[0]
                 return bytes([0]) + struct.pack(">H", self.dpi)
         elif fid == 0x2110:
