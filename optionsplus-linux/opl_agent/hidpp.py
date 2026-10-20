@@ -58,10 +58,19 @@ F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
 REG_RECEIVER_PAIRING = 0xB2     # Unifying receiver pairing lock (HID++ 1.0 register)
-N_PAIRING_LOCK = 0x4A           # HID++ 1.0 notification: lock status (address bit0 open, data[0] error)
-RECEIVER_NOTIFICATIONS = {N_PAIRING_LOCK}
+REG_BOLT_DISCOVERY = 0xC0       # Bolt device discovery (HID++ 1.0 register, short)
+REG_BOLT_PAIRING = 0x2C1        # Bolt pairing (HID++ 1.0 register 0x2xx: sub id 0x82/0x83, address 0xC1)
+REG_BOLT_UNIQUE_ID = 0x2FB      # Bolt receiver unique id (read)
+# HID++ 1.0 notifications: sub id 0x40..0x7F in the feature slot of a report.
+N_DEVICE_DISCONNECT, N_DEVICE_CONNECT = 0x40, 0x41
+N_PAIRING_LOCK = 0x4A           # Unifying lock status (address bit0 open, data[0] error)
+N_PASSKEY_REQUEST = 0x4D        # Bolt: data[0:6] the digits to enter on the device
+N_PASSKEY_PRESSED = 0x4E        # Bolt: a key was pressed on the device
+N_DEVICE_DISCOVERY = 0x4F       # Bolt: a device advertises itself
+N_DISCOVERY_STATUS = 0x53       # Bolt: address 0 discovery running, else closed; data[0] error
+N_PAIRING_STATUS = 0x54         # Bolt: address 0 lock open, 2 paired (data[7] slot); data[0] error
 F_REPROG_CONTROLS = 0x1B04     # reprogrammable controls v4: divert buttons to software
-F_RECEIVER_PAIRING = 0x1817     # Bolt receiver pairing (open lock, passkey, status events)
+F_RECEIVER_PAIRING = 0x1817     # replaced by the Bolt registers below
 F_CHANGE_HOST = 0x1814
 F_HOSTS_INFO = 0x1815
 
@@ -83,6 +92,11 @@ ERR_HIDPP1 = {
     7: "BUSY", 8: "UNKNOWN_DEVICE", 9: "RESOURCE_ERROR",
     10: "REQUEST_UNAVAILABLE", 11: "INVALID_PARAM_VALUE", 12: "WRONG_PIN_CODE",
 }
+
+
+def is_hidpp10_notification(sub_id):
+    """A report whose feature slot holds a HID++ 1.0 notification sub id (0x40..0x7F)."""
+    return 0x40 <= sub_id < 0x80
 
 
 class HidppError(Exception):
@@ -324,6 +338,8 @@ class Reader:
     def __init__(self, handle, long_only=False):
         self.handle = handle
         self.long_only = long_only      # transport has no short-report collection
+        self.dead = None                # the OSError that stopped the read loop, once it did
+        self._swid = 0
         self._lock = threading.Lock()
         self._waiting = []              # [(key, slot)] in request order
         self._listeners = []
@@ -334,9 +350,18 @@ class Reader:
         for t in self._threads:
             t.start()
 
+    def next_swid(self):
+        """The software id for the next HID++ 2.0 request: 1..15 in turn, so two requests
+        for the same feature and function never share a reply key for long, and a reply
+        that arrives after its request timed out does not answer a later one."""
+        with self._lock:
+            self._swid = self._swid % 15 + 1
+            return self._swid
+
     # ---- events ----------------------------------------------------------
     def add_listener(self, fn):
-        """fn(device_index, feature_index, function, params) for each event."""
+        """fn(device_index, feature_index, function, params) for each event. A HID++ 1.0
+        notification (see is_hidpp10_notification) arrives as (index, sub id, address, data)."""
         self._listeners.append(fn)
 
     def _dispatch_loop(self):
@@ -358,6 +383,7 @@ class Reader:
             except OSError as exc:
                 if not self._stop.is_set():
                     log.warning("HID++ read failed, reader stopped: %s", exc)
+                    self.dead = exc
                     self._fail_all(exc)
                 return
             if r:
@@ -393,12 +419,12 @@ class Reader:
         if slot is not None:
             slot["reply"], slot["version"] = r, version
             slot["done"].set()
-        elif version is None and r[3] & 0x0F == 0:
-            self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
-        elif version is None and idx == DEV_RECEIVER and r[2] in RECEIVER_NOTIFICATIONS:
-            # HID++ 1.0 receiver notification: sub id in the feature slot, address byte
+        elif version is None and is_hidpp10_notification(r[2]):
+            # HID++ 1.0 notification: sub id in the feature slot, the whole address byte
             # (not a function nibble) in the function slot
             self._events.put((idx, r[2], r[3], bytes(r[4:])))
+        elif version is None and r[3] & 0x0F == 0:
+            self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
 
     # ---- requests --------------------------------------------------------
     def request(self, msg, timeout):
@@ -408,6 +434,8 @@ class Reader:
         key = (idx, b2, b3)
         slot = {"done": threading.Event()}
         with self._lock:
+            if self.dead is not None:
+                raise self.dead
             self._waiting.append((key, slot))
         try:
             log.debug("tx %s", msg.hex())
@@ -432,6 +460,9 @@ class Reader:
     def close(self):
         self._stop.set()
         self._events.put(None)
+        if self.dead is None:
+            self.dead = OSError(errno.EBADF, "HID++ reader closed")
+        self._fail_all(self.dead)
         for t in self._threads:
             if t is not threading.current_thread():
                 t.join(2)
@@ -460,8 +491,8 @@ class HidrawTransport:
 HIDRAW = HidrawTransport()
 
 
-def open_node(path):
-    return Reader(HIDRAW.open(path))
+def open_node(path, long_only=False):
+    return Reader(HIDRAW.open(path), long_only=long_only)
 
 
 def close_node(fd):
@@ -495,7 +526,8 @@ def _transact(fd, idx, b2, b3, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
 
 def call(fd, dev_index, feature_index, funcid, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
     """HID++ 2.0 request. Returns reply params (bytes after the 4-byte header)."""
-    r = _transact(fd, dev_index, feature_index, ((funcid & 0xF) << 4) | SW_ID,
+    swid = fd.next_swid() if hasattr(fd, "next_swid") else SW_ID
+    r = _transact(fd, dev_index, feature_index, ((funcid & 0xF) << 4) | swid,
                   params, long, timeout)
     return bytes(r[4:])
 
@@ -1047,7 +1079,7 @@ def _main():
     for node in nodes:
         print("%s  %04x:%04x  %s  receiver=%s" % (node.path, node.vid, node.pid, node.name, node.is_receiver))
         try:
-            fd = open_node(node.path)
+            fd = open_node(node.path, long_only=node.long_only)
         except OSError as e:
             print("  cannot open: %s" % e)
             continue

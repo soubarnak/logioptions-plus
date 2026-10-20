@@ -253,6 +253,14 @@ class Registry:
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
+        if fd is not None and fd.dead is not None:
+            log.info("reopening %s: its reader stopped (%s)", node.path, fd.dead)
+            self._fds.pop(node.path, None)
+            try:
+                hidpp.close_node(fd)
+            except OSError:
+                pass
+            fd = None
         if fd is None:
             fd = hidpp.Reader(self.transport.open(node.path),
                               long_only=getattr(node, "long_only", False))
