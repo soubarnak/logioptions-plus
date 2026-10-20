@@ -101,17 +101,46 @@ async def _poll(server, reg, interval=POLL_SECONDS):
                 _broadcast_battery(server, reg, dev_id)
 
 
-async def _track_focus(router, source, interval=FOCUS_SECONDS):
-    """Poll the window source; hand each change of the focused window to the router."""
+FOCUS_FAIL_LIMIT = 8            # failed polls in a row before the focus counts as unknown
+FOCUS_RETRY_MAX = 30.0          # longest wait between polls of a source that keeps failing
+
+
+async def _track_focus(router, source, interval=FOCUS_SECONDS, fail_limit=FOCUS_FAIL_LIMIT):
+    """Poll the window source; hand each change of the focused window to the router.
+
+    The source is polled off the event loop, so connecting to a slow compositor never holds up
+    the agent. A source that fails is tried again with growing pauses and one warning in the log;
+    after `fail_limit` failures in a row the focus is reported as unknown (the default profile
+    takes over) until the source answers again. A source that cannot ever work (its error has
+    `permanent` set) is given up after saying so."""
     loop = asyncio.get_running_loop()
     last = object()
+    fails = 0
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(interval * min(2 ** max(0, fails - 3), FOCUS_RETRY_MAX / interval))
         try:
             window = await loop.run_in_executor(None, source.active)
         except Exception as exc:
-            log.debug("cannot tell the focused window: %s", exc)
+            fails += 1
+            if getattr(exc, "permanent", False):
+                log.info("no per-application profiles: %s; the default profile stays active", exc)
+                fails = fail_limit
+            elif fails == 1:
+                log.warning("cannot tell the focused window (trying again): %s", exc)
+            else:
+                log.debug("cannot tell the focused window: %s", exc)
+            if fails == fail_limit:
+                last = None
+                try:
+                    await loop.run_in_executor(None, router.on_focus, None)
+                except Exception:
+                    log.exception("switching profile failed")
+            if getattr(exc, "permanent", False):
+                return
             continue
+        if fails:
+            log.info("the focused window can be told again")
+            fails = 0
         if window == last:
             continue
         last = window
@@ -234,6 +263,12 @@ class Agent:
             self._watcher.cancel()
         if self._tracker:
             self._tracker.cancel()
+        close = getattr(self.window_source, "close", None)
+        if close is not None:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, close)
+            except Exception as exc:
+                log.debug("closing the window source failed: %s", exc)
         await self._close_server()
         self.router.relay.close()           # hand the wheels back while the transport is still open
         self.reg.close()

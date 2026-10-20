@@ -35,8 +35,7 @@ def test_reports_the_activated_toplevel():
     assert src.active() is None                              # nothing activated yet
     comp.activate(terminal)
     window = src.active()
-    assert "org.gnome.Terminal" in window.wm_class
-    assert "Terminal" in window.wm_class                     # last part of a reverse-DNS id
+    assert window.wm_class == ("org.gnome.Terminal",)        # the full app_id; no last part to widen matches
 
 
 def test_follows_focus_changes_and_loss_of_focus():
@@ -141,23 +140,21 @@ def test_default_source_is_wayland_on_a_wlroots_session():
     assert isinstance(src, WaylandSource)
 
 
-def test_default_source_gives_none_without_the_protocol_and_logs_why(caplog):
+def test_default_source_without_the_protocol_reports_it_when_polled():
     comp = FakeCompositor(protocol=False)
-    with caplog.at_level("INFO", logger="opl.focus"):
-        src = focus.default_source(environ={"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"},
-                                   which=lambda n: "/usr/bin/xprop", wayland=lambda env: comp)
-    assert src is None                                       # not X11 either: its answer would be wrong
-    text = " ".join(r.getMessage() for r in caplog.records)
-    assert "wlr-foreign-toplevel-management" in text and "default profile" in text
+    src = focus.default_source(environ={"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"},
+                               which=lambda n: "/usr/bin/xprop", wayland=lambda env: comp)
+    assert isinstance(src, WaylandSource)                    # not X11 either: its answer would be wrong
+    with pytest.raises(WaylandError, match="wlr-foreign-toplevel-management"):
+        src.active()
 
 
-def test_default_source_gives_none_when_the_socket_is_missing(caplog):
+def test_default_source_with_a_missing_socket_fails_when_polled_and_not_before():
     def refuse(env):
         raise FileNotFoundError("no socket")
-    with caplog.at_level("INFO", logger="opl.focus"):
-        assert focus.default_source(environ={"WAYLAND_DISPLAY": "wayland-0"}, which=lambda n: None,
-                                    wayland=refuse) is None
-    assert any("default profile" in r.getMessage() for r in caplog.records)
+    src = focus.default_source(environ={"WAYLAND_DISPLAY": "wayland-0"}, which=lambda n: None, wayland=refuse)
+    with pytest.raises(FileNotFoundError):
+        src.active()
 
 
 def test_wayland_socket_path():
@@ -173,5 +170,6 @@ def test_matches_a_profile_by_app_id():
     comp.open_window("org.mozilla.firefox", active=True)
     window = source_for(comp).active()
     assert focus.match_profile(window, ["org.mozilla.firefox"], []) == "org.mozilla.firefox"
-    assert focus.match_profile(window, ["firefox"], []) == "firefox"
+    assert focus.match_profile(window, ["firefox"], []) is None
+    assert focus.match_profile(focus.Window(("firefox",)), ["org.mozilla.firefox"], []) == "org.mozilla.firefox"
     assert focus.match_profile(window, ["kitty"], []) is None

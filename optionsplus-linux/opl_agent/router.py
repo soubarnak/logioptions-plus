@@ -231,7 +231,7 @@ class Router:
     async def _pair_route(self, verb, rcv_id, sub):
         """/devices/<receiver>/pair: SET opens, GET reads, SET .../cancel cancels. A write
         the receiver rejects is FAULTED and leaves the pairing state as it was."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if sub == "" and verb == "GET":
             return "SUCCESS", self.reg.receivers[rcv_id].pairing, ""
         if (sub, verb) == ("", "SET"):
@@ -383,7 +383,7 @@ class Router:
         if verb == "SET":
             wanted = (payload or {}).get("state") == swap.STATE_RIGHT
             try:
-                await asyncio.get_event_loop().run_in_executor(None, self.button_swap.set, wanted)
+                await asyncio.get_running_loop().run_in_executor(None, self.button_swap.set, wanted)
             except swap.SwapUnsupported as exc:
                 return "NOT_SUPPORTED", None, str(exc)
             except Exception as exc:
@@ -677,7 +677,7 @@ class Router:
         dev = self.reg.devices.get(dev_id)
         if dev is None or not dev.easy_switch:
             return ("NO_SUCH_PATH" if verb == "GET" else "INVALID_DEVICE"), None, ""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def read():
             return easy_switch.hosts_payload(dev, self.reg.read_hosts(dev_id))
@@ -716,13 +716,13 @@ class Router:
         UI's scanning spinner always stops."""
         dirs = self._app_dirs()
         try:
-            self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
+            self.apps = await asyncio.get_running_loop().run_in_executor(None, applications.scan, dirs)
         except Exception as exc:
             log.warning("application scan failed: %s", exc)
             self.apps = []
         if announce and self.server is not None:
             # after the SET reply, which the caller is about to send
-            asyncio.get_event_loop().call_soon(self._announce_applications)
+            asyncio.get_running_loop().call_soon(self._announce_applications)
 
     def _announce_applications(self):
         for path in ("/applications/installed", "/applications"):

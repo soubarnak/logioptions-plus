@@ -75,26 +75,19 @@ class X11Source:
 def default_source(environ=None, which=None, wayland=None):
     """The source for this session, else None (the default profile then stays active).
 
-    A Wayland session (WAYLAND_DISPLAY) uses the wlroots foreign-toplevel source when the
-    compositor offers that protocol; GNOME (Mutter) and KWin without it get None, since X11
-    properties would only describe XWayland windows (a session that says it is Wayland gets None
-    even when DISPLAY is set). `wayland(environ)` returns a transport
-    and is injectable. An X11 session uses xprop when there is a display and xprop."""
+    A Wayland session (WAYLAND_DISPLAY) uses the wlroots foreign-toplevel source. Nothing is
+    connected here: the source connects on its first poll (off the event loop) and again after
+    any failure, so an agent started before the compositor is up still follows the focus later.
+    GNOME (Mutter) and KWin, which lack the protocol, make it report that and the tracker stops,
+    since X11 properties would only describe XWayland windows (a session that says it is Wayland
+    gets None even when DISPLAY is set). `wayland(environ)` returns a transport and is
+    injectable. An X11 session uses xprop when there is a display and xprop."""
     env = os.environ if environ is None else environ
     if not env.get("WAYLAND_DISPLAY") and env.get("XDG_SESSION_TYPE") == "wayland":
         return None             # XWayland would only describe the X11 windows and stick on the last one
     if env.get("WAYLAND_DISPLAY"):
         from . import wayland_focus
-        src = wayland_focus.WaylandSource(lambda: (wayland or wayland_focus.connect_from_environment)(env))
-        try:
-            src.start()
-        except (wayland_focus.WaylandError, OSError) as exc:
-            log.info("no per-application profiles on this Wayland session (%s); "
-                     "the default profile stays active. wlroots compositors (sway, Hyprland, river) "
-                     "offer wlr-foreign-toplevel-management", exc)
-            return None
-        log.info("following the focused window through wlr-foreign-toplevel-management")
-        return src
+        return wayland_focus.WaylandSource(lambda: (wayland or wayland_focus.connect_from_environment)(env))
     if not env.get("DISPLAY") or not (which or shutil.which)("xprop"):
         return None
     return X11Source()
