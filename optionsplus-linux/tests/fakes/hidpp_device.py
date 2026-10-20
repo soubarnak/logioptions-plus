@@ -74,6 +74,8 @@ class SimulatedMouse:
         self.max_host_name = 32
         self.fail_host_switch = False               # answer setCurrentHost with an error
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
+        self.host_caps = 0x03                       # 0x1815 capability flags: bit0 read names, bit1 write names
+        self.name_reads, self.name_writes = [], []  # (host, offset) / (host, offset, name bytes) requests seen
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
         self.diverted = set()
         self.divert_writes = []                     # cids software asked to divert or undivert, in order
@@ -225,34 +227,43 @@ class SimulatedMouse:
         elif fid == 0x1814:
             if fn == 0:                               # getHostInfo: host count, current host
                 return bytes([len(self.hosts), self.current_host])
-            if fn == 1:                               # setCurrentHost
+            if fn == 1:                               # setCurrentHost: a real mouse leaves, so no reply
                 if self.fail_host_switch:
                     return 5
                 if params[0] >= len(self.hosts):
                     return 2                          # INVALID_ARGUMENT
                 self.current_host = params[0]
-                return b""
+                return None
         elif fid == 0x1815:
-            if fn == 0:                               # capabilities: bit0 get name, bit1 set name
-                return bytes([0x03])
+            # Layout after Solaar's HostsInfo: fn0 [capability flags, 0, host count, current host],
+            # fn1 getHostInfo(host) [host, status, bus, pages, name length, max name length],
+            # fn2 getHostDescriptor, fn3 getHostFriendlyName(host, offset) [host, offset, 14 name bytes],
+            # fn4 setHostFriendlyName(host, offset, 14 name bytes). fn5 stands for getHostOsVersion.
+            if fn == 0:
+                return bytes([self.host_caps, 0, len(self.hosts), self.current_host])
+            if fn in (1, 2, 3, 4, 5) and params[0] >= len(self.hosts):
+                return 2
             if fn == 1:
-                return bytes([len(self.hosts), self.current_host])
-            if fn == 2 and params[0] < len(self.hosts):          # getHostDescriptor
                 h = self.hosts[params[0]]
-                return bytes([params[0], 1 if h["paired"] else 0, h["bus"], h["os"]])
-            if fn == 3 and params[0] < len(self.hosts):          # getHostFriendlyName chunk
-                chunk = self.hosts[params[0]]["name"][params[1]:params[1] + 13]
-                return bytes([params[0], params[1], self.max_host_name]) + chunk
-            if fn == 4 and params[0] < len(self.hosts):          # setHostFriendlyName chunk
+                return bytes([params[0], 1 if h["paired"] else 0, h["bus"], 1, len(h["name"]),
+                              h.get("max_name", self.max_host_name)])
+            if fn == 2:
+                return bytes([params[0], 0])
+            if fn == 3:
+                self.name_reads.append((params[0], params[1]))
+                return bytes([params[0], params[1]]) + self.hosts[params[0]]["name"][params[1]:params[1] + 14]
+            if fn == 4:
                 if self.fail_host_name_write:
                     return 5
                 h = self.hosts[params[0]]
-                chunk = bytes(params[2:16]).split(b"\0")[0]
-                h["name"] = (h["name"][:params[1]] + chunk)[:self.max_host_name]
+                chunk = bytes(params[2:16])
+                self.name_writes.append((params[0], params[1], len(chunk.rstrip(b"\0"))))
+                # the device takes the name as ending where the last write ends
+                h["name"] = (h["name"][:params[1]] + chunk.rstrip(b"\0"))[:h.get("max_name", self.max_host_name)]
                 h["paired"] = True
                 return bytes([params[0], params[1]])
-            if fn in (2, 3, 4):
-                return 2
+            if fn == 5:
+                return bytes([params[0], self.hosts[params[0]]["os"]])
         return 7                                      # INVALID_FUNCTION_ID
 
 
@@ -471,6 +482,8 @@ class SimulatedBolt:
                 self.drop_name_reads -= 1
                 return                                # a busy reader: this request goes unanswered
             result = mouse.handle(b2, b3 >> 4, params)
+            if result is None:
+                return                                # a request this device never answers
             if isinstance(result, int):
                 self._error(data, True, result)
             else:
@@ -513,6 +526,8 @@ class SimulatedBluetoothMouse(SimulatedBolt):
                 self._error(data, False, 8)           # UNKNOWN_DEVICE
                 return
             result = self.mouse.handle(b2, b3 >> 4, params)
+            if result is None:
+                return
             if isinstance(result, int):
                 self._error(data, True, result)
             else:

@@ -211,6 +211,8 @@ class Router:
         if parts[:1] == ["devices"] and len(parts) in (3, 4) and parts[2] == "easy_switch" \
                 and parts[3:] in ([], ["change"]):
             return await self._easy_switch(verb, parts[1], payload)
+        if parts[0] == "change_host" and len(parts) == 3 and parts[2] == "host":
+            return await self._easy_switch(verb, parts[1], payload, switch_only=True)
         try:
             r = self._device_route(verb, parts, path, payload)
             if r is not None:
@@ -579,10 +581,12 @@ class Router:
         else:
             self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
 
-    async def _easy_switch(self, verb, dev_id, payload):
+    async def _easy_switch(self, verb, dev_id, payload, switch_only=False):
         dev = self.reg.devices.get(dev_id)
         if dev is None or not dev.easy_switch:
             return ("NO_SUCH_PATH" if verb == "GET" else "INVALID_DEVICE"), None, ""
+        if switch_only and (verb != "SET" or not isinstance(payload, dict) or "host" not in payload):
+            return "NO_SUCH_PATH", None, ""
         loop = asyncio.get_event_loop()
 
         def read():
@@ -590,10 +594,11 @@ class Router:
 
         try:
             if verb == "SET":
-                code, msg = await loop.run_in_executor(
+                code, msg, state = await loop.run_in_executor(
                     None, easy_switch.apply_change, self.reg, dev, payload)
                 if code != "SUCCESS":
                     return code, None, msg
+                self._announce_hosts(dev, state, payload.get("host"))
                 if "host" in payload:
                     # the mouse has left for the other computer: no read-back possible
                     return "SUCCESS", payload, ""
@@ -601,6 +606,16 @@ class Router:
         except Exception as exc:
             log.warning("easy switch %s failed: %s", verb, exc)
             return "FAULTED", None, "device access failed: %s" % exc
+
+    def _announce_hosts(self, dev, state, host=None):
+        """Tell subscribers the host slots changed (after a switch or a rename). The payload
+        types of these paths are inferred from their names (re/boot_routes_ref.txt)."""
+        if self.server is None:
+            return
+        self.server.broadcast("/devices/easy_switch", easy_switch.hosts_payload(dev, state))
+        self.server.broadcast("/devices/state/easy_switch_cache_updated", easy_switch.cache_payload(dev, state))
+        if host is not None:
+            self.server.broadcast("/devices/host_changed", easy_switch.host_changed_payload(host))
 
     def _open_settings(self):
         """Open the desktop's mouse settings if a known tool is installed."""

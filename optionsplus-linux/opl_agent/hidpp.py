@@ -918,8 +918,10 @@ def parse_diverted_buttons(params):
 # Easy-Switch: ChangeHost (0x1814) and HostsInfo (0x1815)
 # --------------------------------------------------------------------------
 
-NAME_READ_CHUNK = 13        # name bytes in one getHostFriendlyName reply
-NAME_WRITE_CHUNK = 14       # name bytes in one setHostFriendlyName request
+NAME_CHUNK = 14             # name bytes in one getHostFriendlyName reply / setHostFriendlyName request
+HOST_NAME_CAN_GET, HOST_NAME_CAN_SET = 0x01, 0x02      # 0x1815 fn0 capability flags
+HOST_SWITCH_TIMEOUT = 0.5   # a mouse that switches away does not answer; wait this long for an error
+FN_HOST_OS = 5              # getHostOsVersion; the function number is an assumption, see easy_switch.py
 
 
 def get_current_host(fd, idx):
@@ -929,47 +931,62 @@ def get_current_host(fd, idx):
 
 
 def set_current_host(fd, idx, host):
-    """0x1814 fn1 setCurrentHost. The mouse moves to the other computer, so
-    nothing is read back afterwards; a device error raises."""
-    _fcall(fd, idx, F_CHANGE_HOST, 1, bytes([host]))
+    """0x1814 fn1 setCurrentHost. The mouse moves to the other computer and usually sends no
+    reply, so a timeout is the normal outcome; only a HID++ error reply raises."""
+    try:
+        _fcall(fd, idx, F_CHANGE_HOST, 1, bytes([host]), timeout=HOST_SWITCH_TIMEOUT)
+    except HidppTimeout:
+        pass
 
 
-def get_host_name(fd, idx, host):
-    """0x1815 fn3 getHostFriendlyName, read in chunks -> (name, max length)."""
-    raw, pos, limit = b"", 0, 0
-    while True:
-        p = _fcall(fd, idx, F_HOSTS_INFO, 3, bytes([host, pos]))
-        limit = p[2] or 32
-        chunk = bytes(p[3:3 + NAME_READ_CHUNK])
+def get_host_name(fd, idx, host, length):
+    """0x1815 fn3 getHostFriendlyName(host, offset) -> reply [host, offset, 14 name bytes];
+    reads `length` bytes (the name length fn1 reports) in chunks. -> name."""
+    raw = b""
+    while len(raw) < length:
+        p = _fcall(fd, idx, F_HOSTS_INFO, 3, bytes([host, len(raw)]))
+        chunk = bytes(p[2:2 + NAME_CHUNK])[:length - len(raw)]
         end = chunk.find(b"\0")
         raw += chunk if end < 0 else chunk[:end]
-        pos += NAME_READ_CHUNK
-        if end >= 0 or pos >= limit:
+        if end >= 0 or not chunk:
             break
-    return raw[:limit].decode("utf-8", "replace"), limit
+    return raw.decode("utf-8", "replace")
 
 
 def get_hosts(fd, idx):
-    """0x1814 + 0x1815 -> {"current", "max_name", "hosts": [{index, paired, bus, os, name}]}."""
+    """0x1814 + 0x1815 -> {"current", "max_name", "can_get_name", "can_set_name",
+    "hosts": [{index, paired, bus, os, name, max_name}]}.
+
+    0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
+    [host, status, bus type, pages, name length, max name length]. The OS type comes from
+    getHostOsVersion where the mouse has it, else it is unknown (0)."""
     count, current = get_current_host(fd, idx)
-    hosts, max_name = [], 0
+    flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
+    can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
+    hosts = []
     for i in range(count):
-        d = _fcall(fd, idx, F_HOSTS_INFO, 2, bytes([i]))
+        d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
-        name = ""
+        name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
+        os_type = 0
         if paired:
-            name, max_name = get_host_name(fd, idx, i)
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": d[3], "name": name})
-    if not max_name:
-        max_name = 32
-    return {"current": current, "max_name": max_name, "hosts": hosts}
+            try:
+                os_type = _fcall(fd, idx, F_HOSTS_INFO, FN_HOST_OS, bytes([i]))[1]
+            except HidppError as exc:
+                if isinstance(exc, HidppTimeout):
+                    raise
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": os_type, "name": name,
+                      "max_name": d[5] or 32})
+    return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
+            "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}
 
 
 def set_host_name(fd, idx, host, name):
-    """0x1815 fn4 setHostFriendlyName, in chunks; the last chunk carries a NUL."""
-    raw = name.encode("utf-8") + b"\0"
-    for pos in range(0, len(raw), NAME_WRITE_CHUNK):
-        _fcall(fd, idx, F_HOSTS_INFO, 4, bytes([host, pos]) + raw[pos:pos + NAME_WRITE_CHUNK], long=True)
+    """0x1815 fn4 setHostFriendlyName(host, offset, up to 14 name bytes), in chunks. No
+    terminator is written; the caller keeps the name within the slot's maximum length."""
+    raw = name.encode("utf-8")
+    for pos in range(0, len(raw), NAME_CHUNK):
+        _fcall(fd, idx, F_HOSTS_INFO, 4, bytes([host, pos]) + raw[pos:pos + NAME_CHUNK], long=True)
 
 
 # --------------------------------------------------------------------------
