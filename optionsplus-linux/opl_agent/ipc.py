@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import struct
 
 from .defaults import fill
@@ -34,8 +35,24 @@ GREETING = bytes.fromhex("10071a012f2207") + b"backend"
 
 
 def socket_path(name="logitech_kiros_agent", user=None):
+    override = os.environ.get("OPL_SOCKET")
+    if override and name == "logitech_kiros_agent":
+        return override
     user = user or getpass.getuser()
     return f"/tmp/{name}-{hashlib.md5(user.encode()).hexdigest()}"
+
+
+def socket_alive(path):
+    """True when a process accepts connections on the Unix socket at ``path``."""
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(2)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def encode_frame(obj):

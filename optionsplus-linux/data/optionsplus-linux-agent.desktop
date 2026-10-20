@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Options+ for Linux agent
+Comment=Applies mouse settings and button mappings at login
+Exec=optionsplus-agent
+Icon=optionsplus-linux
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

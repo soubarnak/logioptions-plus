@@ -15,9 +15,10 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 import asyncio
 import logging
 import os
+import sys
 
 from . import resources
-from .ipc import Server
+from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
 
@@ -93,6 +94,9 @@ async def main():
         level=os.environ.get("OPL_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if socket_alive(socket_path()):
+        log.info("agent already running on %s; exiting", socket_path())
+        return
     agent = Agent()
     await agent.start()
     try:
@@ -102,6 +106,8 @@ async def main():
 
 
 if __name__ == "__main__":
+    if "--is-running" in sys.argv[1:]:
+        sys.exit(0 if socket_alive(socket_path()) else 1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
