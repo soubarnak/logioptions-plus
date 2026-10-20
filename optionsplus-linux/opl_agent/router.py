@@ -409,10 +409,11 @@ class Router:
         return "SUCCESS", handled, ""
 
     def _button_target(self, slot_id):
-        """(device, control id) for a button slot of a connected device, else None."""
+        """(device, control key) for a button or thumb wheel action slot of a connected device, else None."""
         for dev in self.reg.devices.values():
-            if profiles.is_button_slot(slot_id, dev.slot_prefix):
-                return dev, int(slot_id.rpartition("_c")[2])
+            key = profiles.control_key(slot_id, dev.slot_prefix)
+            if key is not None:
+                return dev, key
         return None
 
     def _assign_button(self, dev, cid, slot_id, card):

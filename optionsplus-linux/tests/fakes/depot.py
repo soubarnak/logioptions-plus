@@ -95,7 +95,8 @@ def build_depot(root):
             {"key": "layout", "src": "layout.json"},
             {"key": "device_easyswitch_image", "src": "easyswitch.png"}]}]}))
     _write(os.path.join(dev, "default_configurations.json"), json.dumps({"defaultConfigurations": [{
-        "settings": {"control_id_mappings": {"82": {"id": "card-back"}, "83": {"id": "card-forward"}},
+        "settings": {"control_id_mappings": {"82": {"id": "card-back"}, "83": {"id": "card-forward"},
+                                                 "195": {"id": "card-gesture"}},
                      "mouseThumbWheelAction": {"id": "card-wheel"},
                      "mouseSettings": {"pointerSpeed": {"active": {"value": 0.5}}}}}]}))
     return root
