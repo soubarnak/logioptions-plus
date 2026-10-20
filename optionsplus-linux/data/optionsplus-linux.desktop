@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Options+ for Linux
+GenericName=Mouse and keyboard settings
+Comment=Configure Logitech mice and keyboards
+Exec=optionsplus-linux
+Icon=optionsplus-linux
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=logitech;mouse;keyboard;
+StartupWMClass=logioptionsplus

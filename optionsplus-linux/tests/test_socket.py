@@ -272,3 +272,37 @@ def test_hermetic_guard_blocks_the_real_transport():
     import pytest
     with pytest.raises(AssertionError):
         hidpp.HIDRAW.open("/dev/hidraw0")
+
+
+# ---- firmware version and update check -----------------------------------
+
+def test_dfu_info_reports_no_update_and_the_windows_style_version(client):
+    reply = client.call("GET", "/dfu/%s/info" % device_id(client))
+    info = reply["payload"]
+    assert reply["result"]["code"] == "SUCCESS"
+    assert info["@type"] == TYPE + "logi.protocol.dfu.Info"
+    assert info["requireFwUpdate"] is False
+    assert info["dfuResult"] == "SUCCESS"
+    # simulated 0x0003 entity: RBM 0x12.0x34 build 0x0567
+    assert info["eligibleVersion"] == "RBM 12.34.B0567"
+
+
+def test_dfu_info_for_unknown_device_is_rejected(client):
+    reply = client.call("GET", "/dfu/dev99999999/info")
+    assert reply["result"]["code"] == "NO_SUCH_PATH"
+
+
+def test_dfu_update_available_reports_nothing(client):
+    reply = client.call("GET", "/dfu/update/available")
+    assert reply["result"]["code"] == "SUCCESS"
+    assert reply["payload"]["@type"] == TYPE + "google.protobuf.BoolValue"
+    assert reply["payload"]["value"] is False
+
+
+def test_firmware_string_uses_the_main_application_entity_and_pads_the_build():
+    from opl_agent import model
+    fw = [{"type": 1, "name": "BL1", "version": "01.00", "build": 1},
+          {"type": 0, "name": "RBM", "version": "22.01", "build": 6}]
+    assert model.format_firmware(fw) == "RBM 22.01.B0006"
+    assert model.format_firmware([]) == ""
+    assert model.format_firmware("") == ""

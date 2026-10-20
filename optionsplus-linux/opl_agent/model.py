@@ -39,6 +39,18 @@ CONN_BOLT = "BLE_PRO"
 CONN_USB = "USB"
 
 
+def format_firmware(fw):
+    """Windows-style firmware string from DeviceFwInfo (0x0003) entities.
+
+    "RBM 22.01.B0006": name, major.minor, then "B" and the 4-digit build.
+    Uses the main application entity (type 0), else the first one.
+    """
+    if not fw or not isinstance(fw, list):
+        return ""
+    ent = next((e for e in fw if e.get("type") == 0), fw[0])
+    return "%s %s.B%04X" % (ent["name"], ent["version"], ent["build"])
+
+
 class Device:
     def __init__(self, dev_id, node, index, name, dtype, pid):
         self.id = dev_id

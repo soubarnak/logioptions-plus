@@ -17,7 +17,8 @@ import json
 import logging
 import os
 
-from . import profiles, resources, responses
+from . import applications, model, profiles, resources, responses, stubs
+from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
 
@@ -32,8 +33,11 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None):
+    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None):
         self.reg = registry
+        self.runner = runner or SubprocessRunner()
+        self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
+        self.apps = None                 # last scan result; None until first scan
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
@@ -68,6 +72,8 @@ class Router:
         if path == "/lps/endpoint/info_changed":
             return [("/lps/endpoint/info_changed",
                      {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"})]
+        if path == "/applications/installed" and self.apps is not None:
+            return [(path, applications.payload(self.apps))]
         if path == "/devices/state/changed":
             out = []
             for d in self.reg.devices.values():
@@ -90,6 +96,14 @@ class Router:
             lang = (self.config.get("language") or {}).get("value", "en-US")
             return "SUCCESS", resources.localized_packages(payload, lang), ""
 
+        if path == "/applications/scan/installed" and verb == "SET":
+            await self._scan_applications(announce=True)
+            return "SUCCESS", payload, ""
+        if verb == "GET" and path in ("/applications/installed", "/applications/all"):
+            if self.apps is None:
+                await self._scan_applications(announce=False)
+            return "SUCCESS", applications.payload(self.apps), ""
+
         if verb == "GET" and path == "/v2/profiles":
             return "SUCCESS", await self._profiles_payload(), ""
 
@@ -107,6 +121,12 @@ class Router:
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
+        stub = stubs.lookup(verb, path)
+        if stub is not None:
+            return stub[0], stub[1], ""
+        if verb == "SET" and path == "/system/open_settings":
+            self._open_settings()
+            return "SUCCESS", payload, ""
         if path in responses.ERRORS:
             return responses.ERRORS[path], None, ""
         if verb == "SET" and path in responses.SET_ECHO:
@@ -127,7 +147,7 @@ class Router:
         # Several boot sagas issue a SET without catching a failure; one
         # rejected SET cancels the whole saga tree. Accept unknown SETs.
         if verb == "SET":
-            log.info("unhandled SET %s accepted", path)
+            log.warning("unhandled SET %s accepted (feature not implemented)", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
 
@@ -220,6 +240,35 @@ class Router:
         else:
             self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
 
+    def _open_settings(self):
+        """Open the desktop's mouse settings if a known tool is installed."""
+        tools = [["gnome-control-center", "mouse"], ["systemsettings", "kcm_mouse"]]
+        if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+            tools.reverse()
+        for argv in tools:
+            if self.runner.which(argv[0]):
+                self.runner.run(argv)
+                return
+        log.info("no known desktop mouse settings tool; nothing to open")
+
+    async def _scan_applications(self, announce):
+        """Scan off the event loop. An unreadable tree or a scan error counts
+        as "nothing found": the completion broadcast is sent regardless, so the
+        UI's scanning spinner always stops."""
+        dirs = self.app_dirs if self.app_dirs is not None else applications.default_dirs()
+        try:
+            self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
+        except Exception as exc:
+            log.warning("application scan failed: %s", exc)
+            self.apps = []
+        if announce and self.server is not None:
+            # after the SET reply, which the caller is about to send
+            asyncio.get_event_loop().call_soon(self._announce_applications)
+
+    def _announce_applications(self):
+        for path in ("/applications/installed", "/applications"):
+            self.server.broadcast(path, applications.payload(self.apps))
+
     def _set_config(self, payload):
         for k, v in payload.items():
             if k != "@type":
@@ -267,6 +316,18 @@ class Router:
             if sub == "easy_switch":
                 return "NO_SUCH_PATH", None, ""   # matches real agent for BLE devices
             return "NO_SUCH_PATH", None, ""
+
+        # Firmware update check: report "no update" with the current version.
+        # Real DFU is out of scope (needs Logitech's signed payloads).
+        if parts[:2] == ["dfu", "update"] and parts[2:] == ["available"]:
+            return "SUCCESS", {"@type": TYPE + "google.protobuf.BoolValue", "value": False}, ""
+        if parts[0] == "dfu" and len(parts) == 3 and parts[2] == "info":
+            dev = reg.devices.get(parts[1])
+            if dev is None:
+                return "NO_SUCH_PATH", None, ""
+            return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info",
+                               "requireFwUpdate": False, "dfuResult": "SUCCESS",
+                               "eligibleVersion": model.format_firmware(dev.fw)}, ""
 
         # /battery/<id>/state
         if parts[0] == "battery" and len(parts) >= 3 and parts[2] == "state":
