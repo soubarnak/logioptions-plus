@@ -30,7 +30,9 @@ def check(path):
 def clean_tree(root):
     """A destdir that holds only allowed files."""
     files = [
-        "usr/bin/optionsplus-linux", "usr/bin/optionsplus-agent",
+        "usr/bin/optionsplus-linux", "usr/bin/optionsplus-agent", "usr/bin/optionsplus-fetch-payload",
+        "usr/lib/optionsplus-linux/depots.json",
+        "usr/lib/optionsplus-linux/bootstrap/links.js",
         "usr/lib/optionsplus-linux/opl_agent/__init__.py",
         "usr/lib/optionsplus-linux/opl_agent/main.py",
         "usr/lib/optionsplus-linux/bootstrap/main.js",
@@ -217,7 +219,11 @@ def test_built_package_carries_hooks_and_all_parts(built):
                  "etc/xdg/autostart/optionsplus-linux-agent.desktop",
                  "usr/share/applications/optionsplus-linux.desktop",
                  "usr/share/icons/hicolor/scalable/apps/optionsplus-linux.svg",
+                 "usr/bin/optionsplus-fetch-payload",
+                 "usr/lib/optionsplus-linux/depots.json",
                  "usr/lib/optionsplus-linux/bootstrap/main.js",
+                 "usr/lib/optionsplus-linux/bootstrap/links.js",
+                 "usr/lib/optionsplus-linux/opl_agent/fetch.py",
                  "usr/lib/optionsplus-linux/opl_agent/main.py"):
         assert need in names, need
 

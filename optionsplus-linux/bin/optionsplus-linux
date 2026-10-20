@@ -3,15 +3,20 @@
 # newest installed Electron 3x with the Chromium sandbox enabled.
 #
 # Environment (all optional):
-#   OPL_PAYLOAD_DIR  Logitech payload (app.asar, data/, depots/); default
-#                    ${XDG_DATA_HOME:-~/.local/share}/optionsplus-linux/payload
+#   OPL_PAYLOAD_DIR  Logitech payload (app.asar, data/, depots/, payload.json); default
+#                    ${XDG_DATA_HOME:-~/.local/share}/optionsplus-linux/payload, else the
+#                    system-wide /usr/lib/optionsplus-linux/logitech (OPL_SYSTEM_PAYLOAD_DIR)
+#                    when only that exists. A missing payload is fetched first, after the user
+#                    confirms Logitech's EULA; declining exits without starting anything.
 #   OPL_ASAR, OPL_DATA_DIR, OPL_DEPOT_DIR  override single payload paths
 #   OPL_NO_SANDBOX=1 fallback ONLY if Void's Electron cannot sandbox (adds --no-sandbox)
-#   OPL_BIN_DIR, OPL_LIB_DIR, OPL_AGENT_CMD  locations of Electron, our code, the agent command
+#   OPL_BIN_DIR, OPL_LIB_DIR, OPL_AGENT_CMD, OPL_FETCH_CMD  locations of Electron, our code, agent and fetcher commands
 LIB=${OPL_LIB_DIR:-/usr/lib/optionsplus-linux}
 BINDIR=${OPL_BIN_DIR:-/usr/bin}
 AGENT=${OPL_AGENT_CMD:-optionsplus-agent}
 case $AGENT in */*) ;; *) [ -x "$(dirname "$0")/$AGENT" ] && AGENT=$(dirname "$0")/$AGENT ;; esac
+FETCH=${OPL_FETCH_CMD:-optionsplus-fetch-payload}
+case $FETCH in */*) ;; *) [ -x "$(dirname "$0")/$FETCH" ] && FETCH=$(dirname "$0")/$FETCH ;; esac
 
 ELECTRON=$(ls -1 "$BINDIR"/electron3[0-9] 2>/dev/null | sort -V | tail -n 1)
 if [ -z "$ELECTRON" ]; then
@@ -19,9 +24,23 @@ if [ -z "$ELECTRON" ]; then
     exit 1
 fi
 
-PAYLOAD=${OPL_PAYLOAD_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/optionsplus-linux/payload}
+USER_PAYLOAD=${XDG_DATA_HOME:-$HOME/.local/share}/optionsplus-linux/payload
+SYSTEM_PAYLOAD=${OPL_SYSTEM_PAYLOAD_DIR:-/usr/lib/optionsplus-linux/logitech}
+installed() { [ -f "$1/payload.json" ] && [ -f "$1/app.asar" ]; }
+pick_payload() {
+    if [ -n "${OPL_PAYLOAD_DIR:-}" ]; then PAYLOAD=$OPL_PAYLOAD_DIR
+    elif installed "$USER_PAYLOAD"; then PAYLOAD=$USER_PAYLOAD
+    elif installed "$SYSTEM_PAYLOAD"; then PAYLOAD=$SYSTEM_PAYLOAD
+    else PAYLOAD=$USER_PAYLOAD; fi
+}
+pick_payload
+# No payload yet: fetch it (EULA confirmation inside). Declining stops everything here.
+if [ -z "${OPL_ASAR:-}" ] && ! installed "$PAYLOAD"; then
+    "$FETCH" || exit $?
+    pick_payload
+fi
 export OPL_ASAR=${OPL_ASAR:-$PAYLOAD/app.asar}
-export OPL_DATA_DIR=${OPL_DATA_DIR:-$PAYLOAD/data}
+export OPL_DATA_DIR=${OPL_DATA_DIR:-$PAYLOAD/depots/logioptionsplus/data}
 export OPL_DEPOT_DIR=${OPL_DEPOT_DIR:-$PAYLOAD/depots}
 
 if ! "$AGENT" --is-running; then
