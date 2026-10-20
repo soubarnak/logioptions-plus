@@ -30,14 +30,17 @@ What it is not:
 ## Status
 
 Checked on real hardware and in the real UI (MX Master 3S on a Logi Bolt receiver): device
-discovery, the home page, the device page with the BUTTONS layout, theme and language.
+discovery, the home page, the device page with the BUTTONS layout, theme and language, pointer
+speed, scroll and thumb wheel direction, the action picker and assigning an action, the gesture
+button's default, battery, the firmware version and its update check, the Easy-Switch host list,
+swap left/right being refused on Wayland, and RESET TO DEFAULT SETTINGS. Each write was read
+back from the mouse.
 
 Implemented and covered by automated tests that simulate the device, the compositor and the
-UI socket, but **not yet confirmed on hardware or in the live UI**: pointer speed (DPI),
-SmartShift, hi-res scrolling and scroll direction, wheel and thumb wheel speed, button
-remapping, macros, gesture and thumb wheel cards, swap left/right, battery, firmware version,
-Easy-Switch, Bolt and Unifying pairing, hot-plug, per-application profiles (X11 and wlroots),
-the update check and the in-app update. See [Known limitations](#known-limitations) for the
+UI socket, but **not yet confirmed on hardware or in the live UI**: SmartShift and hi-res
+writes, wheel and thumb wheel speed, the key and action injection from a button press, gesture
+swipes, swap through the mouse or X11, switching Easy-Switch hosts, Bolt and Unifying pairing,
+hot-plug, per-application profiles (X11 and wlroots), and the in-app update. See [Known limitations](#known-limitations) for the
 specific unverified assumptions. The plan and root causes are in
 [feature-parity.md](feature-parity.md); reverse-engineering notes are in [FINDINGS.md](FINDINGS.md).
 
@@ -55,16 +58,16 @@ are collected in the [Devices wiki](https://github.com/soubarnak/logioptions-plu
 | Discovery, home page, device page, BUTTONS layout | verified | |
 | Theme, language | verified | |
 | Hot-plug (receiver or mouse removed or switched off) | implemented, unverified | watches `hidraw` nodes and rescans every 2 s |
-| Pointer speed (DPI) | implemented, unverified | slider maps onto the range and step the mouse reports |
-| SmartShift, hi-res scrolling, scroll direction | implemented, unverified | |
+| Pointer speed (DPI) | verified | slider maps onto the range and step the mouse reports |
+| SmartShift, hi-res scrolling, scroll direction | scroll direction verified; SmartShift and hi-res writes unverified | |
 | Scroll and thumb wheel speed | implemented, unverified | needs `/dev/uinput`; speed controls are hidden without it; `OPL_WHEEL_RELAY=0` turns it off |
-| Thumb wheel direction, smoothness | implemented, unverified | |
+| Thumb wheel direction, smoothness | direction verified; smoothness unverified | |
 | Button remap: keystroke, mouse button, system, media, macro | implemented, unverified | virtual input device, works on X11 and Wayland |
-| Gesture button, thumb wheel actions | implemented, unverified | card layout assumed, see limitations |
-| Swap left/right | implemented, unverified | one method system-wide, see [Usage](#swap-left-and-right) |
-| Battery level and charging | implemented, unverified | |
-| Firmware version | implemented, unverified | shown only; the firmware check answers "no update" |
-| Easy-Switch: list, switch, rename hosts | implemented, unverified | |
+| Gesture button, thumb wheel actions | default diversion verified; swipes unverified | card layout assumed, see limitations |
+| Swap left/right | refusal on Wayland verified; swapping unverified | one method system-wide, see [Usage](#swap-left-and-right) |
+| Battery level and charging | level verified; charging unverified | |
+| Firmware version | verified | shown only; the firmware check answers "no update" |
+| Easy-Switch: list and switch hosts | list verified; switch unverified | this UI build offers no rename |
 | Logi Bolt and Unifying pairing | implemented, unverified | |
 | Bluetooth-direct devices | implemented, unverified | uses long HID++ reports |
 | Per-application profiles | implemented, unverified | X11 and wlroots Wayland only |
@@ -246,7 +249,7 @@ in `agent.log`. Where focus cannot be followed the log says so and the default p
 ### Other things the UI offers
 
 Pointer speed, SmartShift, scroll and thumb wheel settings, battery, firmware version, the
-Easy-Switch tab (list, switch, rename hosts), and ADD DEVICE with Logi Bolt and Unifying pairing
+Easy-Switch tab (list and switch hosts), and ADD DEVICE with Logi Bolt and Unifying pairing
 through the receiver. Devices appear and disappear within a few seconds of plugging or unplugging.
 "Open system mouse settings" starts `gnome-control-center mouse` or `systemsettings kcm_mouse`
 when installed. Settings are written to the device and applied again after reconnect or wake.
