@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import actions, applications, easy_switch, model, profiles, resources, responses, stubs, updates
+from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -34,7 +34,7 @@ def _state_dir(explicit=None):
 
 class Router:
     def __init__(self, registry, state_dir=None, runner=None, app_dirs=None,
-                 updater=None, os_release_path=None):
+                 updater=None, os_release_path=None, input_factory=None):
         self.reg = registry
         self.updater = updater or updates.Updater()
         self.os_release_path = os_release_path or updates.OS_RELEASE
@@ -44,6 +44,7 @@ class Router:
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
+        self.engine = input_engine.InputEngine(self.reg, self.store, input_factory)
         self.reg.on_discovered.append(self.apply_stored)
         self.reg.on_resumed.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
@@ -307,7 +308,10 @@ class Router:
         card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix))
         value = profiles.pointer_value(card) if card else None
         if value is not None:
-            self._apply_pointer(dev, value)
+            try:
+                self._apply_pointer(dev, value)
+            except Exception as exc:
+                log.warning("reapplying pointer speed failed: %s", exc)
         card = self.store.get(profiles.scroll_slot(dev.slot_prefix))
         req = profiles.scroll_request(card) if card else None
         if req is not None:
@@ -321,6 +325,10 @@ class Router:
                 self._apply_thumb(dev, tcard)
             except Exception as exc:
                 log.warning("reapplying thumb wheel settings failed: %s", exc)
+        try:
+            self.engine.sync(dev)
+        except Exception as exc:
+            log.warning("reapplying button diversions failed: %s", exc)
 
     async def _profiles_set(self, path, payload):
         loop = asyncio.get_event_loop()
@@ -347,9 +355,18 @@ class Router:
                 else:
                     dev = self._thumb_device_for_slot(slot_id)
                     if dev is None:
-                        if self._store_button_assignment(slot_id, requested):
-                            asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
-                            handled = payload
+                        target = self._button_target(slot_id) if requested else None
+                        if target is None:
+                            continue
+                        try:
+                            await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested)
+                        except input_engine.Unsupported as exc:
+                            return "NOT_SUPPORTED", None, str(exc)
+                        except Exception as exc:
+                            log.warning("button write failed: %s", exc)
+                            return "FAULTED", None, "device write failed: %s" % exc
+                        asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
+                        handled = payload
                         continue
                     apply_fn, arg, what = self._apply_thumb, requested, "thumb wheel"
             try:
@@ -367,14 +384,23 @@ class Router:
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
 
-    def _store_button_assignment(self, slot_id, card):
-        """Keep the action chosen for a button slot (<prefix>_c<controlId>). Making the button
-        perform it is the input engine's job; this only persists the choice."""
-        if not card or not any(profiles.is_button_slot(slot_id, d.slot_prefix)
-                               for d in self.reg.devices.values()):
-            return False
+    def _button_target(self, slot_id):
+        """(device, control id) for a button slot of a connected device, else None."""
+        for dev in self.reg.devices.values():
+            if profiles.is_button_slot(slot_id, dev.slot_prefix):
+                return dev, int(slot_id.rpartition("_c")[2])
+        return None
+
+    def _assign_button(self, dev, cid, slot_id, card):
+        """Blocking: make the button do `card` (the depot default card hands it back to the
+        mouse), then keep the choice. Raises, storing nothing, when the device cannot do it."""
+        default = next((a["cardId"] for a in profiles.default_assignments(dev.slot_prefix, dev.depot)
+                        if a["slotId"] == slot_id), None)
+        if card.get("id") == default:
+            self.engine.release(dev, cid)
+        else:
+            self.engine.assign(dev, cid, card)
         self.store.set(slot_id, card)
-        return True
 
     async def _profiles_reset(self, info):
         loop = asyncio.get_event_loop()
@@ -394,6 +420,7 @@ class Router:
         return "SUCCESS", info, ""
 
     def _apply_defaults(self, dev):
+        self.engine.sync(dev)               # the store holds no button choices now: hand them all back
         if dev.thumb_wheel:
             self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)

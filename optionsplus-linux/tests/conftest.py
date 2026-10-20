@@ -7,6 +7,7 @@ import pytest
 from opl_agent import hidpp
 from tests.fakes.depot import build_depot
 from tests.fakes.clock import FakeClock
+from tests.fakes.uinput import FakeInput
 from tests.fakes.hidpp_device import SimulatedBluetoothMouse, SimulatedBolt
 from tests.fakes.releases import FakeReleaseServer
 from tests.harness import RunningAgent, short_tmpdir
@@ -32,6 +33,12 @@ def hermetic(monkeypatch):
         raise AssertionError("test touched the real hidraw transport")
     monkeypatch.setattr(hidpp.HIDRAW, "list_nodes", no_hardware)
     monkeypatch.setattr(hidpp.HIDRAW, "open", no_hardware)
+    from opl_agent import uinput as real_uinput
+
+    def no_uinput(*_a, **_k):
+        raise AssertionError("test touched the real /dev/uinput")
+    monkeypatch.setattr(real_uinput, "open_default", no_uinput)
+    monkeypatch.setattr(real_uinput.OsBackend, "open", no_uinput)
     for var in ("DISPLAY", "WAYLAND_DISPLAY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("OPL_REPLAY", raising=False)
@@ -47,6 +54,11 @@ def workdir():
 @pytest.fixture
 def bolt():
     return SimulatedBolt()
+
+
+@pytest.fixture
+def uinput():
+    return FakeInput()
 
 
 @pytest.fixture
@@ -76,7 +88,7 @@ def os_release(workdir):
 
 
 @pytest.fixture
-def agent_factory(workdir, bolt, releases, clock, os_release):
+def agent_factory(workdir, bolt, releases, clock, os_release, uinput):
     """Start agents on the temp socket/state/depot; every agent is stopped at teardown."""
     depot = build_depot(os.path.join(workdir, "depots"))
     started = []
@@ -85,7 +97,7 @@ def agent_factory(workdir, bolt, releases, clock, os_release):
         kw = dict(transport=bolt, socket_path=os.path.join(workdir, "s"),
                   state_dir=os.path.join(workdir, "state"), depot_dir=depot,
                   app_dirs=[os.path.join(workdir, "applications")],
-                  release_base_url=releases.base_url, clock=clock,
+                  release_base_url=releases.base_url, clock=clock, input_factory=uinput.factory,
                   os_release_path=os_release,
                   payload_path=os.path.join(workdir, "payload.json"))
         kw.update(overrides)

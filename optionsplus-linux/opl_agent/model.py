@@ -71,6 +71,8 @@ class Device:
         self.easy_switch = False     # has 0x1814 and 0x1815
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
+        self.controls = None         # 0x1b04 {cid: {...}}, read on first use
+        self.button_feature = None   # feature index of 0x1b04, once looked up
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.scroll_caps = {"smartshift": False, "highResolution": False}   # features present
         self.catalogue = resources.catalogue_entry(pid) or {}
@@ -234,6 +236,7 @@ class Registry:
         self.absent = {}           # id -> Device that went away; a returning one keeps its id
         self._next_id = 0
         self.on_discovered = []    # callables(dev_id), run in scan() for each new device
+        self.on_button_event = []  # callables(dev_id, function, params): a 0x1b04 event
         self.on_resumed = []       # callables(dev_id), after a wake or config-change event
         self.receivers = {}        # id -> Receiver
         self.absent_receivers = {}
@@ -462,6 +465,13 @@ class Registry:
         for dev_id, d in list(self.devices.items()):
             if d.node.path != node.path or d.index != index:
                 continue
+            if feature_index == d.button_feature:
+                for hook in list(self.on_button_event):
+                    try:
+                        hook(dev_id, function, params)
+                    except Exception:
+                        log.exception("button hook failed for %s", dev_id)
+                continue
             fid = d.event_features.get(feature_index)
             if fid is None:
                 continue
@@ -673,6 +683,26 @@ class Registry:
         """Blocking read of the current and default DPI: {dpi, default, ...}."""
         d = self.devices[dev_id]
         return hidpp.get_dpi(self._fds[d.node.path], d.index)
+
+    def controls(self, dev_id):
+        """Blocking: the mouse's reprogrammable controls {cid: {...}} (read once, then cached).
+        Raises FeatureNotSupported when it has no 0x1b04. Also learns the feature index the
+        button events arrive under."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        d.button_feature = hidpp.feature_index(fd, d.index, hidpp.F_REPROG_CONTROLS)
+        if d.controls is None:
+            d.controls = hidpp.get_controls(fd, d.index)
+        return d.controls
+
+    def set_divert(self, dev_id, cid, divert):
+        """Blocking: divert a control to software or hand it back; reads the device back and
+        raises when it did not take. Writes only when the device is not already as asked."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        d.button_feature = hidpp.feature_index(fd, d.index, hidpp.F_REPROG_CONTROLS)
+        if hidpp.get_cid_diverted(fd, d.index, cid) != bool(divert):
+            hidpp.set_cid_diverted(fd, d.index, cid, divert)
 
     def read_thumb(self, dev_id):
         """Blocking 0x2150 status read: {mode, invert, smooth}."""

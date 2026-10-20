@@ -131,11 +131,11 @@ def assignment(client, slot=BACK):
 
 
 def test_chosen_action_replaces_the_default_in_the_profile(client):
-    reply = choose(client, presets(client)[1])
+    reply = choose(client, presets(client)[0])
     assert reply["result"]["code"] == "SUCCESS"
     got = assignment(client)
-    assert len(got) == 1 and got[0]["cardId"] == "card_next_desktop"
-    assert got[0]["card"]["macro"]["system"]["action"] == "SWITCH_BETWEEN_DESKTOPS_RIGHT"
+    assert len(got) == 1 and got[0]["cardId"] == "card_play"
+    assert got[0]["card"]["macro"]["type"] == "KEYSTROKE"
 
 
 def test_chosen_action_survives_an_agent_restart(agent_factory):

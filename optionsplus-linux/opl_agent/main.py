@@ -113,7 +113,8 @@ class Agent:
                  rescan_seconds=RESCAN_SECONDS,
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
-                 release_base_url=None, clock=None, manifest_path=None):
+                 release_base_url=None, clock=None, manifest_path=None,
+                 input_factory=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
@@ -122,7 +123,8 @@ class Agent:
                                   clock=clock, state_dir=state_dir, runner=runner,
                                   manifest_path=manifest_path)
         self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
-                             updater=updater, os_release_path=os_release_path)
+                             updater=updater, os_release_path=os_release_path,
+                             input_factory=input_factory)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         updater.broadcast = self.server.broadcast
@@ -196,6 +198,7 @@ class Agent:
         for c in list(self.server.connections):
             c.writer.close()
         self.reg.close()
+        self.router.engine.close()
 
 
 async def main():
