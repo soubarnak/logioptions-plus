@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import applications, model, profiles, resources, responses, stubs, updates
+from . import applications, easy_switch, model, profiles, resources, responses, stubs, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -174,6 +174,9 @@ class Router:
         parts = path.strip("/").split("/")
         if parts[0] == "devices" and len(parts) >= 3 and parts[2] == "pair" and parts[1] in self.reg.receivers:
             return await self._pair_route(verb, parts[1], "/".join(parts[3:]))
+        if parts[:1] == ["devices"] and len(parts) in (3, 4) and parts[2] == "easy_switch" \
+                and parts[3:] in ([], ["change"]):
+            return await self._easy_switch(verb, parts[1], payload)
         try:
             r = self._device_route(verb, parts, path, payload)
             if r is not None:
@@ -367,6 +370,29 @@ class Router:
             self._apply_pointer(dev, value)
         else:
             self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
+
+    async def _easy_switch(self, verb, dev_id, payload):
+        dev = self.reg.devices.get(dev_id)
+        if dev is None or not dev.easy_switch:
+            return ("NO_SUCH_PATH" if verb == "GET" else "INVALID_DEVICE"), None, ""
+        loop = asyncio.get_event_loop()
+
+        def read():
+            return easy_switch.hosts_payload(dev, self.reg.read_hosts(dev_id))
+
+        try:
+            if verb == "SET":
+                code, msg = await loop.run_in_executor(
+                    None, easy_switch.apply_change, self.reg, dev, payload)
+                if code != "SUCCESS":
+                    return code, None, msg
+                if "host" in payload:
+                    # the mouse has left for the other computer: no read-back possible
+                    return "SUCCESS", payload, ""
+            return "SUCCESS", await loop.run_in_executor(None, read), ""
+        except Exception as exc:
+            log.warning("easy switch %s failed: %s", verb, exc)
+            return "FAULTED", None, "device access failed: %s" % exc
 
     def _open_settings(self):
         """Open the desktop's mouse settings if a known tool is installed."""

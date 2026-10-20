@@ -499,7 +499,7 @@ hides the feature; "later" means a phase above; "no" means documented unsupporte
 
 | Route | Disposition |
 |---|---|
-| `/devices/<id>/easy_switch` | later (6.3) |
+| `/devices/<id>/easy_switch` | done (ticket #16): list, switch, rename; HID++ indexes 0-based, UI indexing and 0x1815 byte layouts unconfirmed on hardware |
 | `/dfu/*` | later (6.2) for info; DFU itself: no |
 | `/unified_profiles/activities` | stub: empty list (activities are Windows "Logi profiles") |
 | `/flow/<id>/config`, `/flow/<id>/device_location` | stub: Flow disabled (needs Logitech's cross-host service); no |
