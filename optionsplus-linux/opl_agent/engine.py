@@ -109,22 +109,38 @@ def _compile_sequence(seq):
     return steps
 
 
+# Nested cards of the depot's default gesture card, by id: Windows chords (Win+Ctrl+Left, Win+D, the
+# Windows key) that no Linux desktop binds. They compile to the SYSTEM action of the same meaning, whose
+# chord the user can retune in actions.toml. Any other keystroke card injects its chord unchanged.
+WINDOWS_CHORD_ACTIONS = {
+    "inner_card_vd_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
+    "inner_card_vd_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
+    "inner_card_vd_hide_show_desktop": "SHOW_DESKTOP",
+    "inner_card_vd_start_menu": "SWITCH_BETWEEN_DESKTOPS",      # the overview
+}
+
+
 def compile_card(card, table=None):
     """The steps a press of `card` plays: ("emit", events), ("wait", seconds) or ("system", action).
     Raises Unsupported. System actions are resolved when pressed, so the user's file applies live."""
     table = table or sysactions.ActionTable()
+    action = WINDOWS_CHORD_ACTIONS.get((card or {}).get("id"))
+    if action:
+        return compile_card({"macro": {"type": "SYSTEM", "system": {"action": action}}}, table)
     macro = resolve_card(card).get("macro") or {}
     kind = macro.get("type")
     if kind == "KEYSTROKE":
         ks = macro.get("keystroke") or {}
-        key = keymap.linux_key(ks.get("code"))
-        if key is None:
-            raise Unsupported("key code %r has no Linux equivalent" % (ks.get("code"),))
         mods = []
         for usage in ks.get("modifiers") or []:
             if usage not in keymap.MODIFIER_USAGES:
                 raise Unsupported("modifier %r is not a modifier key" % (usage,))
             mods.append(keymap.linux_key(usage))
+        if ks.get("code") is None and mods:
+            return [("emit", _tap(mods))]               # a modifier on its own, such as the Windows key
+        key = keymap.linux_key(ks.get("code"))
+        if key is None:
+            raise Unsupported("key code %r has no Linux equivalent" % (ks.get("code"),))
         return [("emit", _tap(mods + [key]))]
     if kind == "MOUSE":
         mouse = macro.get("mouse") or {}
@@ -166,6 +182,7 @@ def compile_binding(card, table=None):
     """What a press does: the steps of a plain card, a `Hold` for a mouse button card, a
     `gestures.Gesture` for a four-way card, a `gestures.Thumb` for a two-way card. Raises
     Unsupported when any action cannot run."""
+    card = gestures.adapter(card) or card           # a ONE_OF card runs the adapter it selects
     kind = gestures.kind(card)
     if kind is None:
         codes = _mouse_codes(card)
@@ -394,15 +411,20 @@ class InputEngine:
                     for a in profiles.default_assignments(dev.slot_prefix, dev.depot)}
         out, stale = {}, []
         own = self.store.app_cards(self.active_app)
-        for slot_id, card in self.store.effective_cards(self.active_app).items():
+        # a default card the mouse cannot run itself (the gesture button's) is diverted with no choice stored
+        cards = {a["slotId"]: a["card"] for a in profiles.default_assignments(dev.slot_prefix, dev.depot)
+                 if profiles.needs_software(a["card"])}
+        cards.update(self.store.effective_cards(self.active_app))
+        for slot_id, card in cards.items():
             key = profiles.control_key(slot_id, dev.slot_prefix)
-            if key is None or card.get("id") == defaults.get(slot_id):
+            if key is None or (card.get("id") == defaults.get(slot_id) and not profiles.needs_software(card)):
                 continue
             try:
                 binding = compile_binding(card, self.table)
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
-                stale.append((slot_id, self.active_app if slot_id in own else None, str(exc)))
+                if slot_id in self.store.effective_cards(self.active_app):
+                    stale.append((slot_id, self.active_app if slot_id in own else None, str(exc)))
                 continue
             self._tune(dev, binding)
             out[key] = binding

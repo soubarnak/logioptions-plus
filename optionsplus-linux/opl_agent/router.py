@@ -608,10 +608,11 @@ class Router:
                             if a["slotId"] == slot_id), None)
             active = self.engine.active_app
             in_force = (app == active) if app is not None else slot_id not in self.store.app_cards(active)
+            native = card.get("id") == default and not profiles.needs_software(card)
             if not in_force:
-                if card.get("id") != default:
+                if not native:
                     self.engine.validate(dev, cid, card)
-            elif card.get("id") == default:
+            elif native:
                 self.engine.release(dev, cid)
             else:
                 self.engine.assign(dev, cid, card)

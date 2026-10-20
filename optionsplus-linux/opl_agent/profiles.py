@@ -12,7 +12,7 @@ import json
 import logging
 import os
 
-from . import resources, wheel_relay
+from . import gestures, resources, wheel_relay
 
 log = logging.getLogger("opl.profiles")
 
@@ -48,6 +48,15 @@ def default_assignments(slot_prefix, depot):
 
 THUMB_ADAPTER_SUFFIX = "_thumb_wheel_adapter"
 THUMB_KEY = "thumb"             # control_key of the thumb wheel's action slot
+
+
+def needs_software(card):
+    """True for a card the mouse cannot run itself, so a control on it must be diverted even when it
+    is the depot default: the four-way gesture card with actions to run (swipes need the agent). The
+    other defaults (middle, back, forward, mode shift, thumb wheel scroll) are native."""
+    adapter = gestures.adapter(card)
+    return (adapter is not None and gestures.kind(adapter) == gestures.FOUR_WAYS
+            and bool(gestures.nested_actions(adapter) or gestures.preset_name(adapter) in gestures.PRESETS))
 
 
 def control_key(slot_id, slot_prefix):

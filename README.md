@@ -186,6 +186,11 @@ and resetting it hands it back to the mouse. Gesture cards (press and swipe) and
 two-way cards are supported. Windows-only actions are hidden from the picker. Holding a button
 does not auto-repeat (a volume hold fires once).
 
+The gesture button's default card is the exception: its swipes need the agent, so that button is
+diverted from the start and its Windows chords are replaced by the matching system actions
+(next/previous virtual desktop, show desktop, overview). While the agent is not running, the gesture
+button does nothing.
+
 System actions send a default keystroke that suits GNOME 40 and later. Other desktops bind their
 own keys, so any action can be changed in `~/.config/optionsplus-linux/actions.toml`, which is
 read again whenever it changes:
@@ -295,6 +300,9 @@ confirmed on hardware or in the live UI:
   stock GNOME and other desktops ignore. Likewise stock GNOME has no show-desktop key: `Super+D` is
   Ubuntu's, KDE's and Xfce's binding. Override these in `actions.toml`.
 - Holding a button does not auto-repeat.
+- A keystroke card you pick yourself that holds a Windows chord (for example Win+Ctrl+Left) injects
+  that chord unchanged; most Linux desktops do not bind it. Only the gesture button's default card is
+  translated.
 - No firmware update (DFU) and no cloud features; no "testing" update channel.
 
 ## Building locally

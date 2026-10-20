@@ -3,6 +3,9 @@ XY and a press-and-swipe runs the card of its direction; the thumb wheel's two-w
 left and right actions. Card layout is an assumption: nested cards keyed by direction word."""
 
 
+import json
+import os
+
 import pytest
 
 from opl_agent import gestures as gestures_mod
@@ -397,3 +400,98 @@ def test_the_switch_desktops_preset_swipes_to_the_desktop_on_that_side(client, b
     swipe(bolt, (dx, 0))
     assert wait_for(lambda: len(uinput.keys()) >= 4)
     assert uinput.keys() == keys
+
+
+# ---- the depot's default gesture card (ticket #21, #23) ------------------------------------
+# The shape of Logitech's default for the gesture button: a ONE_OF card whose selected nested
+# card is a four-way adapter with Windows chords. Ids and keys copy the structure only.
+META, CTRL, KEY_META, KEY_CTRL, KEY_PAGEUP, KEY_PAGEDOWN, KEY_D = 227, 224, 125, 29, 104, 109, 32
+
+
+def default_gesture_card(cid="card_gesture_default"):
+    def inner(inner_id, macro):
+        return {"id": inner_id, "attribute": "MACRO_PLAYBACK", "continuous": True, "macro": macro}
+
+    def chord(code, *mods):
+        return {"type": "KEYSTROKE", "keystroke": {"code": code, "modifiers": list(mods)}}
+
+    adapter = {"id": cid + "_virtual_desktops", "attribute": "ADAPTER_4WAYS", "continuous": True,
+               "gestureInfo": {"x": {"speedControl": True}, "y": {"speedControl": True}},
+               "nestedCards": {
+                   "click": inner("inner_card_vd_task_view", {"type": "SYSTEM", "system": {"action": "TASK_VIEW"}}),
+                   "down": inner("inner_card_vd_hide_show_desktop", chord(7, META)),
+                   "left": inner("inner_card_vd_desktop_left", chord(80, CTRL, META)),
+                   "right": inner("inner_card_vd_desktop_right", chord(79, CTRL, META)),
+                   "up": inner("inner_card_vd_start_menu", {"type": "KEYSTROKE", "keystroke": {"modifiers": [META]}})}}
+    return {"id": cid, "attribute": "ONE_OF", "continuous": True, "selectedNestedCard": "virtual_desktops",
+            "nestedCardsOrder": ["virtual_desktops"], "nestedCards": {"virtual_desktops": adapter}}
+
+
+def test_a_modifier_only_keystroke_taps_the_modifier():
+    from opl_agent import engine
+    card = {"id": "x", "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "KEYSTROKE", "keystroke": {"modifiers": [META]}}}
+    assert engine.compile_card(card) == [("emit", [(1, KEY_META, 1), (1, KEY_META, 0)])]
+
+
+def test_a_keystroke_without_key_or_modifier_is_refused():
+    from opl_agent import engine
+    card = {"id": "x", "attribute": "MACRO_PLAYBACK", "macro": {"type": "KEYSTROKE", "keystroke": {}}}
+    with pytest.raises(engine.Unsupported):
+        engine.compile_card(card)
+
+
+def test_the_default_gesture_card_compiles_with_linux_desktop_actions():
+    from opl_agent import engine
+    binding = engine.compile_binding(default_gesture_card())
+    assert {word: steps for word, steps in binding.actions.items()} == {
+        "click": [("system", "TASK_VIEW")],
+        "left": [("system", "SWITCH_BETWEEN_DESKTOPS_LEFT")],
+        "right": [("system", "SWITCH_BETWEEN_DESKTOPS_RIGHT")],
+        "down": [("system", "SHOW_DESKTOP")],
+        "up": [("system", "SWITCH_BETWEEN_DESKTOPS")]}
+
+
+def test_only_a_card_that_resolves_to_a_four_way_adapter_needs_software():
+    from opl_agent import profiles
+    assert profiles.needs_software(default_gesture_card())
+    assert profiles.needs_software(gesture_card())
+    assert not profiles.needs_software(GESTURE_DEFAULT)          # nothing for the agent to run
+    assert not profiles.needs_software(thumb_card())
+    assert not profiles.needs_software(keystroke(6, 224))
+    assert not profiles.needs_software({"id": "card_global_presets_win_back", "attribute": "MACRO_PLAYBACK",
+                                        "macro": {"type": "MOUSE", "mouse": {"action": "WIN_BACK"}}})
+
+
+@pytest.fixture
+def default_gesture_agent(workdir, agent_factory):
+    path = os.path.join(workdir, "depots", fx.DEPOT, "default_configurations.json")
+    with open(path) as f:
+        conf = json.load(f)
+    conf["defaultConfigurations"][0]["settings"]["control_id_mappings"]["195"] = default_gesture_card()
+    with open(path, "w") as f:
+        json.dump(conf, f)
+    running = agent_factory()
+    c = running.client()
+    yield running, c
+    c.close()
+
+
+def test_the_default_gesture_card_diverts_the_button_with_no_stored_choice(default_gesture_agent, bolt):
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})      # and not back, forward or middle
+    assert bolt.mouse.raw_xy == {GESTURE}
+
+
+def test_swiping_left_on_the_default_gesture_card_injects_the_desktop_chord(default_gesture_agent, bolt, uinput):
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})
+    swipe(bolt, (-80, 0))
+    assert wait_for(lambda: len(keys_down(uinput)) >= 2)
+    bolt.settle()
+    assert keys_down(uinput) == [KEY_META, KEY_PAGEUP]
+
+
+def test_assigning_the_default_gesture_card_back_keeps_the_button_diverted(default_gesture_agent, bolt):
+    _agent, client = default_gesture_agent
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})
+    assert assign_gesture(client, default_gesture_card())["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.diverted == {GESTURE}
