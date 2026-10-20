@@ -73,6 +73,7 @@ class Device:
         self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
         self.controls = None         # 0x1b04 {cid: {...}}, read on first use
         self.button_feature = None   # feature index of 0x1b04, once looked up
+        self.thumb_feature = None    # feature index of 0x2150, once looked up
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.scroll_caps = {"smartshift": False, "highResolution": False}   # features present
         self.catalogue = resources.catalogue_entry(pid) or {}
@@ -237,6 +238,7 @@ class Registry:
         self._next_id = 0
         self.on_discovered = []    # callables(dev_id), run in scan() for each new device
         self.on_button_event = []  # callables(dev_id, function, params): a 0x1b04 event
+        self.on_thumb_event = []   # callables(dev_id, function, params): a 0x2150 event
         self.on_resumed = []       # callables(dev_id), after a wake or config-change event
         self.receivers = {}        # id -> Receiver
         self.absent_receivers = {}
@@ -472,6 +474,13 @@ class Registry:
                     except Exception:
                         log.exception("button hook failed for %s", dev_id)
                 continue
+            if feature_index == d.thumb_feature:
+                for hook in list(self.on_thumb_event):
+                    try:
+                        hook(dev_id, function, params)
+                    except Exception:
+                        log.exception("thumb wheel hook failed for %s", dev_id)
+                continue
             fid = d.event_features.get(feature_index)
             if fid is None:
                 continue
@@ -695,14 +704,30 @@ class Registry:
             d.controls = hidpp.get_controls(fd, d.index)
         return d.controls
 
-    def set_divert(self, dev_id, cid, divert):
-        """Blocking: divert a control to software or hand it back; reads the device back and
-        raises when it did not take. Writes only when the device is not already as asked."""
+    def set_divert(self, dev_id, cid, divert, raw_xy=None):
+        """Blocking: divert a control to software (with its raw XY motion when `raw_xy`) or hand it
+        back; reads the device back and raises when it did not take. Writes only when the device
+        is not already as asked. `raw_xy` None leaves the motion reporting alone."""
         d = self.devices[dev_id]
         fd = self._fds[d.node.path]
         d.button_feature = hidpp.feature_index(fd, d.index, hidpp.F_REPROG_CONTROLS)
-        if hidpp.get_cid_diverted(fd, d.index, cid) != bool(divert):
-            hidpp.set_cid_diverted(fd, d.index, cid, divert)
+        got_divert, got_raw = hidpp.get_cid_reporting(fd, d.index, cid)
+        if got_divert != bool(divert) or (raw_xy is not None and got_raw != bool(raw_xy)):
+            hidpp.set_cid_diverted(fd, d.index, cid, divert, raw_xy)
+
+    def set_thumb_divert(self, dev_id, divert):
+        """Blocking: report the thumb wheel to software (or give it back to the HID stack),
+        keeping its direction setting; reads back and raises when it did not take."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        d.thumb_feature = hidpp.feature_index(fd, d.index, hidpp.F_THUMB_WHEEL)
+        want = hidpp.THUMB_DIVERTED if divert else hidpp.THUMB_NATIVE
+        cur = hidpp.get_thumbwheel(fd, d.index)
+        if cur["mode"] == want:
+            return
+        got = hidpp.set_thumbwheel(fd, d.index, cur["invert"], cur["smooth"], want)
+        if got["mode"] != want:
+            raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 2, 4)      # HW_ERROR: the device ignored it
 
     def read_thumb(self, dev_id):
         """Blocking 0x2150 status read: {mode, invert, smooth}."""

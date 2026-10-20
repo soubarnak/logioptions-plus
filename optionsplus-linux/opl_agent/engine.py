@@ -14,7 +14,7 @@ was left diverted by a crashed agent ends up as the store says.
 import logging
 import threading
 
-from . import hidpp, keymap, profiles, uinput
+from . import gestures, hidpp, keymap, profiles, uinput
 
 log = logging.getLogger("opl.engine")
 
@@ -54,8 +54,19 @@ def compile_card(card):
             + [(ev, m, 0) for m in reversed(mods)])
 
 
-def _cid_of(slot_id):
-    return int(slot_id.rpartition("_c")[2])
+def compile_binding(card):
+    """What a press does: the events of a plain card, a `gestures.Gesture` for a four-way card,
+    a `gestures.Thumb` for a two-way card. Raises Unsupported when any action cannot run."""
+    kind = gestures.kind(card)
+    if kind is None:
+        return compile_card(card)
+    nested = gestures.nested_actions(card)
+    if not nested:
+        raise Unsupported("this action card has no actions assigned")
+    actions = {word: compile_card(sub) for word, sub in nested.items()}
+    if kind == gestures.FOUR_WAYS:
+        return gestures.Gesture(actions, gestures.swipe_limit(card))
+    return gestures.Thumb(actions)
 
 
 class InputEngine:
@@ -67,9 +78,11 @@ class InputEngine:
         self.sink_factory = sink_factory or uinput.open_default
         self._sink = None
         self._lock = threading.RLock()
-        self._active = {}               # dev_id -> {cid: events}
+        self._active = {}               # dev_id -> {control key: events | Gesture | Thumb}
         self._held = {}                 # dev_id -> set of cids held down now
+        self._swipes = {}               # dev_id -> (cid, Swipe) of the gesture button press in progress
         registry.on_button_event.append(self.on_event)
+        registry.on_thumb_event.append(self.on_thumb_event)
 
     # ---- the virtual device ------------------------------------------------
     def sink(self):
@@ -97,40 +110,64 @@ class InputEngine:
         info = controls.get(cid)
         if info is None or not info["divertable"]:
             raise Unsupported("this button cannot be reassigned")
+        return info
 
-    def assign(self, dev, cid, card):
-        """Make button `cid` run `card`. Blocking. Raises Unsupported for a card or button that
-        cannot, any other error when the device write fails; nothing changes then."""
-        events = compile_card(card)
-        self._divertable(dev, cid)
-        self.sink()                     # never divert a button that could not be injected for
-        self.reg.set_divert(dev.id, cid, True)
-        with self._lock:
-            self._active.setdefault(dev.id, {})[cid] = events
+    def _write(self, dev, key, binding):
+        """Blocking: put the mouse in the state `binding` (None: native) needs for control `key`."""
+        if key == profiles.THUMB_KEY:
+            self.reg.set_thumb_divert(dev.id, binding is not None)
+            return
+        info = self.reg.controls(dev.id)[key]
+        raw = isinstance(binding, gestures.Gesture)
+        self.reg.set_divert(dev.id, key, binding is not None, raw if info["raw_xy"] else None)
 
-    def release(self, dev, cid):
-        """Hand button `cid` back to the mouse. Blocking; raises when the device write fails,
-        and the button then keeps running its card."""
-        try:
-            self.reg.controls(dev.id)
-        except hidpp.FeatureNotSupported:
-            return                      # nothing was ever diverted
-        self.reg.set_divert(dev.id, cid, False)
+    def assign(self, dev, key, card):
+        """Make control `key` (a control id, or profiles.THUMB_KEY) run `card`. Blocking. Raises
+        Unsupported for a card or control that cannot, any other error when the device write
+        fails; nothing changes then."""
+        binding = compile_binding(card)
+        if key == profiles.THUMB_KEY:
+            if not dev.thumb_wheel:
+                raise Unsupported("this device has no thumb wheel")
+            if not isinstance(binding, gestures.Thumb):
+                raise Unsupported("only a two-way action can be assigned to the thumb wheel")
+        else:
+            info = self._divertable(dev, key)
+            if isinstance(binding, gestures.Thumb):
+                raise Unsupported("a two-way action can only be assigned to the thumb wheel")
+            if isinstance(binding, gestures.Gesture) and not info["raw_xy"]:
+                raise Unsupported("this button cannot do gestures")
+        self.sink()                     # never divert a control that could not be injected for
+        self._write(dev, key, binding)
         with self._lock:
-            self._active.get(dev.id, {}).pop(cid, None)
+            self._active.setdefault(dev.id, {})[key] = binding
+
+    def release(self, dev, key):
+        """Hand control `key` back to the mouse. Blocking; raises when the device write fails,
+        and the control then keeps running its card."""
+        if key == profiles.THUMB_KEY:
+            if not dev.thumb_wheel:
+                return
+        else:
+            try:
+                self.reg.controls(dev.id)
+            except hidpp.FeatureNotSupported:
+                return                  # nothing was ever diverted
+        self._write(dev, key, None)
+        with self._lock:
+            self._active.get(dev.id, {}).pop(key, None)
 
     def _desired(self, dev):
-        """{cid: events} the store asks for on `dev`: non-default cards that can run."""
+        """{control key: binding} the store asks for on `dev`: non-default cards that can run."""
         defaults = {a["slotId"]: a["cardId"]
                     for a in profiles.default_assignments(dev.slot_prefix, dev.depot)}
         out = {}
         for slot_id, card in self.store.cards.items():
-            if not profiles.is_button_slot(slot_id, dev.slot_prefix):
-                continue
-            if card.get("id") == defaults.get(slot_id):
+            key = profiles.control_key(slot_id, dev.slot_prefix)
+            if key is None or card.get("id") == defaults.get(slot_id):
                 continue
             try:
-                out[_cid_of(slot_id)] = compile_card(card)
+                out[key] = compile_binding(card)
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
         return out
@@ -145,35 +182,68 @@ class InputEngine:
             return
         desired = self._desired(dev)
         first_error = None
-        for cid, info in controls.items():
-            if not info["divertable"]:
-                continue
+        todo = [(cid, info) for cid, info in controls.items() if info["divertable"]]
+        if dev.thumb_wheel:
+            todo.append((profiles.THUMB_KEY, None))
+        for key, info in todo:
             try:
-                if cid in desired:
+                if key in desired:
                     self.sink()
-                self.reg.set_divert(dev.id, cid, cid in desired)
+                self._write(dev, key, desired.get(key))
             except Exception as exc:
-                log.warning("button %d on %s: %s", cid, dev.id, exc)
-                desired.pop(cid, None)
+                log.warning("control %s on %s: %s", key, dev.id, exc)
+                desired.pop(key, None)
                 first_error = first_error or exc
                 if isinstance(exc, hidpp.HidppTimeout):
-                    break               # the mouse is not answering: do not wait per button
+                    break               # the mouse is not answering: do not wait per control
         with self._lock:
             self._active[dev.id] = desired
             self._held[dev.id] = set()
+            self._swipes.pop(dev.id, None)
         if first_error is not None:
             raise first_error
 
     # ---- events -------------------------------------------------------------------
     def on_event(self, dev_id, function, params):
-        """Reader-thread hook for 0x1b04 events: run the card of each newly pressed button."""
+        """Reader-thread hook for 0x1b04 events: button presses and releases (function 0), and
+        raw motion while a gesture button is held (function 1)."""
+        if function == 1:
+            dx, dy = hidpp.parse_raw_xy(params)
+            with self._lock:
+                swipe = self._swipes.get(dev_id)
+                events = swipe[1].move(dx, dy) if swipe else None
+            self._emit(dev_id, [events])
+            return
         if function != 0:
             return
         held = set(hidpp.parse_diverted_buttons(params))
         with self._lock:
-            pressed = held - self._held.get(dev_id, set())
+            before = self._held.get(dev_id, set())
             self._held[dev_id] = held
-            actions = [self._active.get(dev_id, {}).get(cid) for cid in sorted(pressed)]
+            active = self._active.get(dev_id, {})
+            actions = []
+            for cid in sorted(held - before):
+                binding = active.get(cid)
+                if isinstance(binding, gestures.Gesture):
+                    self._swipes[dev_id] = (cid, binding.start())
+                elif binding:
+                    actions.append(binding)
+            swipe = self._swipes.get(dev_id)
+            if swipe and swipe[0] in before - held:
+                del self._swipes[dev_id]
+                actions.append(swipe[1].release())
+        self._emit(dev_id, actions)
+
+    def on_thumb_event(self, dev_id, function, params):
+        """Reader-thread hook for 0x2150 events: the thumb wheel turned."""
+        if function != 0:
+            return
+        with self._lock:
+            binding = self._active.get(dev_id, {}).get(profiles.THUMB_KEY)
+            actions = binding.turn(hidpp.parse_thumb_rotation(params)) if binding else []
+        self._emit(dev_id, actions)
+
+    def _emit(self, dev_id, actions):
         for events in actions:
             if not events:
                 continue

@@ -32,6 +32,7 @@ CONTROLS = [
     (195, 195, 0x31, 6, 3, 4, 0x01),            # gesture button
 ]
 DIVERT = 0x01                                   # setCidReporting flags: divert; the change bit is DIVERT << 1
+RAW_XY = 0x10                                   # same byte: divert raw XY; the change bit is RAW_XY << 1
 
 # the receiver's own feature table (device index 0xFF)
 RECEIVER_FEATURES = [0x0000, 0x1817]
@@ -60,8 +61,8 @@ class SimulatedMouse:
         self.wheel_caps = 0x08 | 0x04               # invert supported, ratchet switch
         self.wheel_mode = 0x02                      # as the kernel driver leaves it: HID++ target off,
                                                     # high resolution on, invert off
-        # 0x2150 thumb wheel: reporting mode 1 native / 2 diverted, direction inverted, smooth
-        self.thumb = {"mode": 1, "invert": 0, "smooth": 0}
+        # 0x2150 thumb wheel: reporting mode 0 native / 1 diverted, direction inverted, smooth
+        self.thumb = {"mode": 0, "invert": 0, "smooth": 0}
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
         # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
         self.hosts = [
@@ -74,6 +75,7 @@ class SimulatedMouse:
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
         self.diverted = set()
+        self.raw_xy = set()                         # controls whose motion is reported as raw XY
         self.held = []
         self.fail_divert_write = False              # answer setCidReporting with an error
         self.ignore_divert = False                  # accept setCidReporting but change nothing
@@ -177,7 +179,8 @@ class SimulatedMouse:
             if cid not in [c[0] for c in CONTROLS]:
                 return 2
             if fn == 2:                               # getCidReporting: cid, flags, remapped cid, flags2
-                return struct.pack(">HBHB", cid, DIVERT if cid in self.diverted else 0, cid, 0)
+                flags = (DIVERT if cid in self.diverted else 0) | (RAW_XY if cid in self.raw_xy else 0)
+                return struct.pack(">HBHB", cid, flags, cid, 0)
             if fn == 3:                               # setCidReporting: cid, flags, remap cid
                 if self.fail_divert_write:
                     return 5
@@ -186,6 +189,11 @@ class SimulatedMouse:
                         return 2                      # not divertable
                     if not self.ignore_divert:
                         (self.diverted.add if params[2] & DIVERT else self.diverted.discard)(cid)
+                if params[2] & (RAW_XY << 1):
+                    if not next(c for c in CONTROLS if c[0] == cid)[6] & 0x01:
+                        return 2                      # no raw XY on this control
+                    if not self.ignore_divert:
+                        (self.raw_xy.add if params[2] & RAW_XY else self.raw_xy.discard)(cid)
                 return bytes(params[:5])
         elif fid == 0x1814:
             if fn == 0:                               # getHostInfo: host count, current host
@@ -306,6 +314,17 @@ class SimulatedBolt:
         mouse = self.mice[index]
         mouse.held.append(cid)
         self._button_event(mouse, index)
+
+    def move_mouse(self, dx, dy, index=MOUSE_INDEX):
+        """The user moves the mouse; while a raw-XY control is held the motion goes to software."""
+        mouse = self.mice[index]
+        if any(c in mouse.raw_xy for c in mouse.held):
+            self.emit_event(F_REPROG, 1, struct.pack(">hh", dx, dy), index=index)
+
+    def rotate_thumb(self, amount, index=MOUSE_INDEX):
+        """The user turns the thumb wheel; reported to software only while it is diverted."""
+        if self.mice[index].thumb["mode"] == 1:
+            self.emit_event(0x2150, 0, struct.pack(">hBB", amount, 2, 0), index=index)
 
     def release_button(self, cid, index=MOUSE_INDEX):
         mouse = self.mice[index]
