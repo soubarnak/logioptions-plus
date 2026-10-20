@@ -7,6 +7,7 @@ the device depot's default_configurations.json; this module does the same,
 reading the Logitech-supplied depot at runtime (see resources.py).
 """
 
+import copy
 import json
 import logging
 import os
@@ -45,10 +46,103 @@ def default_assignments(slot_prefix, depot):
     return out
 
 
-def profiles(devices):
+MOUSE_SETTINGS_SUFFIX = "_mouse_settings"
+
+
+def mouse_settings_slot(slot_prefix):
+    return slot_prefix + MOUSE_SETTINGS_SUFFIX
+
+
+def dpi_from_value(value, rng):
+    """Map a 0..1 slider position onto the sensor's DPI range/list."""
+    value = min(1.0, max(0.0, float(value)))
+    step = rng.get("step")
+    if step:
+        lo, hi = rng["min"], rng["max"]
+        return lo + int(round(value * (hi - lo) / step)) * step
+    values = rng["values"]
+    return values[int(round(value * (len(values) - 1)))]
+
+
+def value_from_dpi(dpi, rng):
+    lo, hi = rng["min"], rng["max"]
+    return 0.0 if hi == lo else min(1.0, max(0.0, (dpi - lo) / float(hi - lo)))
+
+
+def pointer_value(card):
+    """The slider position (0..1) in a MOUSE_SETTINGS card, or None."""
+    try:
+        return float(card["mouseSettings"]["pointerSpeed"]["active"]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def mouse_settings_card(value, dpi):
+    return {"id": "MOUSE_SETTINGS", "attribute": "MOUSE_SETTINGS",
+            "mouseSettings": {"pointerSpeed": {"active": {"value": value, "dpiLevel": int(dpi)}}}}
+
+
+def default_pointer_value(depot):
+    """Pointer speed (0..1) from the depot's default configuration, or None."""
+    for conf in _default_configurations(depot):
+        card = (conf.get("settings") or {}).get("mouseSettings")
+        v = pointer_value({"mouseSettings": card}) if card else None
+        if v is not None:
+            return v
+    return None
+
+
+class ProfileStore:
+    """User settings that override the depot defaults, persisted as profiles.json.
+
+    Maps slot id -> card. Written atomically on every change."""
+
+    def __init__(self, state_dir):
+        self.path = os.path.join(state_dir, "profiles.json")
+        self.cards = {}
+        try:
+            with open(self.path) as fh:
+                self.cards = dict(json.load(fh).get("assignments") or {})
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log.warning("ignoring unreadable %s: %s", self.path, exc)
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"assignments": self.cards}, fh, indent=1)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("cannot save profiles: %s", exc)
+
+    def get(self, slot_id):
+        return self.cards.get(slot_id)
+
+    def set(self, slot_id, card):
+        self.cards[slot_id] = copy.deepcopy(card)
+        self._save()
+
+    def remove(self, slot_id):
+        if self.cards.pop(slot_id, None) is not None:
+            self._save()
+
+
+def profiles(devices, store=None, live=None):
+    """The default profile. `live` maps device id -> {"dpi", "range"} from the device."""
+    live = live or {}
     assignments = []
     for dev in devices:
         assignments += default_assignments(dev.slot_prefix, dev.depot)
+        slot = mouse_settings_slot(dev.slot_prefix)
+        card = store.get(slot) if store else None
+        if card is None and dev.id in live:
+            rd = live[dev.id]
+            card = mouse_settings_card(value_from_dpi(rd["dpi"], rd["range"]), rd["dpi"])
+        if card is not None:
+            assignments.append({"slotId": slot, "cardId": card.get("id", ""), "card": card})
     return {
         "@type": TYPE + "logi.protocol.profiles_v2.Profiles",
         "profiles": [{

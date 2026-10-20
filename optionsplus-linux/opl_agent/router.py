@@ -11,6 +11,7 @@ SUBSCRIBE/UNSUBSCRIBE are handled by the IPC Server itself; this router only
 sees GET/SET/REMOVE/OPTIONS.
 """
 
+import asyncio
 import copy
 import json
 import logging
@@ -35,6 +36,8 @@ class Router:
         self.reg = registry
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
+        self.store = profiles.ProfileStore(_state_dir(state_dir))
+        self.reg.on_discovered.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
         try:
             with open(self.config_path) as fh:
@@ -88,7 +91,12 @@ class Router:
             return "SUCCESS", resources.localized_packages(payload, lang), ""
 
         if verb == "GET" and path == "/v2/profiles":
-            return "SUCCESS", profiles.profiles(self.reg.devices.values()), ""
+            return "SUCCESS", await self._profiles_payload(), ""
+
+        if verb == "SET" and path.startswith("/v2/profiles/"):
+            r = await self._profiles_set(path, payload)
+            if r is not None:
+                return r
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
@@ -122,6 +130,95 @@ class Router:
             log.info("unhandled SET %s accepted", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    # ---- profiles / pointer speed ---------------------------------------
+    def _read_live(self):
+        """Blocking: current DPI and range per device, for seeding cards."""
+        live = {}
+        for dev_id in list(self.reg.devices):
+            try:
+                live[dev_id] = {"dpi": self.reg.read_dpi(dev_id)["dpi"],
+                                "range": self.reg.dpi_range(dev_id)}
+            except Exception as exc:
+                log.debug("no live DPI for %s: %s", dev_id, exc)
+        return live
+
+    async def _profiles_payload(self):
+        live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
+        return profiles.profiles(self.reg.devices.values(), self.store, live)
+
+    async def _broadcast_profiles(self):
+        if self.server is not None:
+            self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
+
+    def _device_for_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if slot_id == profiles.mouse_settings_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_pointer(self, dev, value):
+        """Blocking: write DPI for slider `value`; returns the card read back."""
+        rng = self.reg.dpi_range(dev.id)
+        dpi = self.reg.write_dpi(dev.id, profiles.dpi_from_value(value, rng))
+        return profiles.mouse_settings_card(profiles.value_from_dpi(dpi, rng), dpi)
+
+    def apply_stored(self, dev_id):
+        """Blocking: reapply stored settings to a device (discovery, reconnect)."""
+        dev = self.reg.devices.get(dev_id)
+        card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix)) if dev else None
+        value = profiles.pointer_value(card) if card else None
+        if value is not None:
+            self._apply_pointer(dev, value)
+
+    async def _profiles_set(self, path, payload):
+        loop = asyncio.get_event_loop()
+        if path == "/v2/profiles/reset":
+            return await self._profiles_reset(payload or {})
+        payload = payload or {}
+        entries = [op.get("set") for op in payload.get("ops") or [] if op.get("set")]
+        if "assignment" in payload:
+            entries.append(payload)
+        handled = None
+        for entry in entries:
+            asg = entry.get("assignment") or {}
+            dev = self._device_for_slot(asg.get("slotId", ""))
+            value = profiles.pointer_value(asg.get("card") or entry.get("card") or {})
+            if dev is None or value is None:
+                continue
+            try:
+                card = await loop.run_in_executor(None, self._apply_pointer, dev, value)
+            except Exception as exc:
+                log.warning("pointer speed write failed: %s", exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+            self.store.set(asg["slotId"], card)
+            asg["card"], asg["cardId"] = card, card["id"]
+            handled = payload
+        if handled is None:
+            return None
+        await self._broadcast_profiles()
+        return "SUCCESS", handled, ""
+
+    async def _profiles_reset(self, info):
+        loop = asyncio.get_event_loop()
+        for dev in list(self.reg.devices.values()):
+            if info.get("deviceId") and info["deviceId"] != dev.id:
+                continue
+            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            try:
+                await loop.run_in_executor(None, self._apply_defaults, dev)
+            except Exception as exc:
+                log.warning("applying defaults failed: %s", exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+        await self._broadcast_profiles()
+        return "SUCCESS", info, ""
+
+    def _apply_defaults(self, dev):
+        value = profiles.default_pointer_value(dev.depot)
+        if value is not None:
+            self._apply_pointer(dev, value)
+        else:
+            self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
 
     def _set_config(self, payload):
         for k, v in payload.items():
