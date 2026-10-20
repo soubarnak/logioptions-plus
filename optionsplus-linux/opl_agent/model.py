@@ -230,6 +230,46 @@ def pairing_state(rcv_id, state, error="NO_PAIRING_ERROR", slot=0, device=None):
     return out
 
 
+class CoalescingJobs:
+    """Runs blocking jobs off the Reader's dispatch thread, one at a time per key.
+
+    A job posted while one with the same key runs is not queued many times over: it is
+    remembered once and runs again when the first ends, so a burst of wake events costs
+    one more reapply, not one each. Different keys run in parallel."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active = {}              # key -> [fn to run again, or None]
+        self._closed = False
+
+    def post(self, key, fn):
+        with self._lock:
+            if self._closed:
+                return
+            if key in self._active:
+                self._active[key][0] = fn
+                return
+            self._active[key] = [None]
+        threading.Thread(target=self._run, args=(key, fn), daemon=True, name="opl-job").start()
+
+    def _run(self, key, fn):
+        while True:
+            try:
+                fn()
+            except Exception:
+                log.exception("background job %s failed", key)
+            with self._lock:
+                again = self._active[key][0]
+                if again is None or self._closed:
+                    del self._active[key]
+                    return
+                self._active[key][0], fn = None, again
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+
+
 class Registry:
     """Owns open HID++ transports and the set of live devices."""
 
@@ -250,6 +290,7 @@ class Registry:
         self._probed_receivers = []
         self._scan_lock = threading.RLock()
         self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change
+        self._jobs = CoalescingJobs()   # work an event starts, off the Reader's dispatch thread
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
@@ -475,8 +516,13 @@ class Registry:
     def _on_event(self, node, index, feature_index, function=0, params=b""):
         """Reader listener (own thread): a receiver pairing event, or the mouse
         woke or changed configuration."""
-        if index == hidpp.DEV_RECEIVER and feature_index == hidpp.N_PAIRING_LOCK:
-            self._on_unifying_lock(node, function, params)
+        if hidpp.is_hidpp10_notification(feature_index):
+            if index != hidpp.DEV_RECEIVER:
+                self._on_device_notification(node, index, feature_index, function, params)
+            elif feature_index == hidpp.N_PAIRING_LOCK:
+                self._on_unifying_lock(node, function, params)
+            else:
+                self._on_pairing_event(node, feature_index, function, params)
             return
         if index == hidpp.DEV_RECEIVER:
             self._on_pairing_event(node, feature_index, function, params)
@@ -511,15 +557,43 @@ class Registry:
             if fid is None:
                 continue
             log.info("device %s: event 0x%04x, reapplying settings", dev_id, fid)
+            self._jobs.post(("resume", dev_id), lambda dev_id=dev_id: self._resume(dev_id))
+
+    def _resume(self, dev_id):
+        """Job: the mouse woke or changed configuration. Refresh the battery, run the hooks."""
+        try:
+            self.refresh_battery(dev_id)
+        except Exception as exc:
+            log.debug("battery refresh after event failed: %s", exc)
+        for hook in list(self.on_resumed):
             try:
-                self.refresh_battery(dev_id)
-            except Exception as exc:
-                log.debug("battery refresh after event failed: %s", exc)
-            for hook in list(self.on_resumed):
+                hook(dev_id)
+            except Exception:
+                log.exception("resume hook failed for %s", dev_id)
+
+    def _on_device_notification(self, node, index, sub_id, address, data):
+        """Dispatch thread: a HID++ 1.0 notification from the device at `index`."""
+        if sub_id != hidpp.N_DEVICE_CONNECT:
+            return
+        flags = data[0] if data else 0
+        if flags & 0x40:                       # the link was lost, not made
+            return
+        for dev_id, d in list(self.devices.items()):
+            if d.node.path == node.path and d.index == index:
+                log.info("device %s: link up, reapplying settings", dev_id)
+                self._jobs.post(("resume", dev_id), lambda d=d: self._reconnected(d))
+
+    def _reconnected(self, d):
+        """Job: a mouse that woke (or was asleep at discovery) says its link is up. Learn
+        the feature indexes whose events mean a wake, then reapply as after any wake."""
+        fd = self._fds.get(d.node.path)
+        if fd is not None:
+            for fid in RESUME_FEATURES:
                 try:
-                    hook(dev_id)
-                except Exception:
-                    log.exception("resume hook failed for %s", dev_id)
+                    d.event_features[hidpp.feature_index(fd, d.index, fid)] = fid
+                except hidpp.HidppError:
+                    pass
+        self._resume(d.id)
 
     # ---- receiver pairing ---------------------------------------------------
     def open_pairing(self, rcv_id, timeout=60):
@@ -848,6 +922,7 @@ class Registry:
         return self.read_scroll(dev_id)
 
     def close(self):
+        self._jobs.close()
         for fd in self._fds.values():
             try:
                 hidpp.close_node(fd)

@@ -348,6 +348,12 @@ class SimulatedBolt:
         head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
         self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
 
+    def emit_connection(self, link=True, index=MOUSE_INDEX, kind=0x02):
+        """Queue a HID++ 1.0 device-connection notification (sub id 0x41): a mouse that
+        woke or switched on reports its link as established; flags bit 0x40 set means lost."""
+        flags = 0x00 if link else 0x40
+        self.emit(bytes([hidpp.SHORT, index, 0x41, kind, flags | 0x04, 0x42, 0x42]))
+
     def turn_wheel(self, delta, hires=True, index=MOUSE_INDEX):
         """The scroll wheel turns by `delta` (signed; 1/multiplier notches when hi-res, else
         notches). Only a wheel the agent diverted reports to software: the native HID path is
