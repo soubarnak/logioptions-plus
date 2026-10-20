@@ -186,6 +186,10 @@ class Router:
                 if code != "SUCCESS":
                     return code, None, "channel must be stable"
             return "SUCCESS", self.updater.channel(), ""
+        if path == "/dfu/config/update" and verb in ("GET", "SET"):
+            if verb == "SET" and self.updater.set_dfu_config(payload) != "SUCCESS":
+                return "INVALID_ARG", None, "autoInstallEnabled must be a boolean"
+            return "SUCCESS", self.updater.dfu_config(), ""
         if verb == "SET" and path == "/updates/check_now":
             self.updater.request_check()
             return "SUCCESS", payload, ""
@@ -928,6 +932,15 @@ class Router:
             return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info",
                                "requireFwUpdate": False, "dfuResult": "SUCCESS",
                                "eligibleVersion": model.format_firmware(dev.fw)}, ""
+
+        # SET /dfu/<id>/check (CHECK FOR UPDATE): there is never a firmware update to offer
+        if verb == "SET" and parts[0] == "dfu" and len(parts) == 3 and parts[2] == "check":
+            if parts[1] not in reg.devices:
+                return "INVALID_DEVICE", None, "unknown device id"
+            if self.server is not None:
+                self.server.broadcast("/dfu/update/available",
+                                      {"@type": TYPE + "google.protobuf.BoolValue", "value": False})
+            return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info"}, ""
 
         # /battery/<id>/state
         if parts[0] == "battery" and len(parts) >= 3 and parts[2] == "state":

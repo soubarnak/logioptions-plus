@@ -23,7 +23,8 @@ APP_ID = "optionsplus-linux"
 DEFAULT_RELEASES_URL = "https://github.com/soubarnak/logioptions-plus/releases"
 OS_RELEASE = "/etc/os-release"
 CHANNELS = ("stable", "testing")   # "testing" is recognised but not supported (see set_channel)
-DEFAULT_SETTINGS = {"checkPeriodically": True, "intervalInSeconds": 86400, "channel": "stable"}
+DEFAULT_SETTINGS = {"checkPeriodically": True, "intervalInSeconds": 86400, "channel": "stable",
+                    "autoInstallEnabled": False}
 PACKAGE = "optionsplus-linux"
 INSTALL_ARGV = ["pkexec", "/usr/bin/xbps-install", "-Syu", PACKAGE]   # absolute: pkexec must not search a user PATH
 SUDO_COMMAND = "sudo xbps-install -Su " + PACKAGE
@@ -148,6 +149,8 @@ class Updater:
         if isinstance(saved, dict):
             if isinstance(saved.get("checkPeriodically"), bool):
                 self.settings["checkPeriodically"] = saved["checkPeriodically"]
+            if isinstance(saved.get("autoInstallEnabled"), bool):
+                self.settings["autoInstallEnabled"] = saved["autoInstallEnabled"]
             iv = saved.get("intervalInSeconds")
             if isinstance(iv, int) and not isinstance(iv, bool) and iv > 0:
                 self.settings["intervalInSeconds"] = iv
@@ -183,6 +186,20 @@ class Updater:
         self._save_settings()
         self._wake.set()
         self.broadcast("/updates/periodic_check", self.periodic_check())
+        return "SUCCESS"
+
+    def dfu_config(self):
+        """The device firmware update settings. Firmware is never installed here; the flag is only kept."""
+        return {"@type": TYPE + "logi.protocol.dfu.UpdateCheckConfig",
+                "autoInstallEnabled": self.settings["autoInstallEnabled"]}
+
+    def set_dfu_config(self, payload):
+        """Returns a result code."""
+        on = payload.get("autoInstallEnabled") if isinstance(payload, dict) else None
+        if not isinstance(on, bool):
+            return "INVALID_ARG"
+        self.settings["autoInstallEnabled"] = on
+        self._save_settings()
         return "SUCCESS"
 
     def channel(self):

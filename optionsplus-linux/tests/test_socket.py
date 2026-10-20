@@ -316,3 +316,45 @@ def test_firmware_string_uses_the_main_application_entity_and_pads_the_build():
     assert model.format_firmware(fw) == "RBM 22.01.B0006"
     assert model.format_firmware([]) == ""
     assert model.format_firmware("") == ""
+
+
+def test_dfu_check_answers_success_and_pushes_no_update(client, agent):
+    other = agent.client()
+    try:
+        other.subscribe("/dfu/update/available")
+        reply = client.call("SET", "/dfu/%s/check" % device_id(client), {})
+        assert reply["result"]["code"] == "SUCCESS"
+        assert reply["payload"]["@type"] == TYPE + "logi.protocol.dfu.Info"
+        assert not reply["payload"].get("requireFwUpdate")
+        push = other.recv()
+        assert push["path"] == "/dfu/update/available"
+        assert push["payload"]["value"] is False
+    finally:
+        other.close()
+
+
+def test_dfu_check_for_unknown_device_is_rejected(client):
+    reply = client.call("SET", "/dfu/dev99999999/check", {})
+    assert reply["result"]["code"] == "INVALID_DEVICE"
+
+
+def test_dfu_auto_install_setting_is_kept_and_survives_a_restart(agent_factory):
+    first = agent_factory()
+    c = first.client()
+    assert c.call("GET", "/dfu/config/update")["payload"].get("autoInstallEnabled", False) is False
+    reply = c.call("SET", "/dfu/config/update", {"autoInstallEnabled": True})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert reply["payload"]["autoInstallEnabled"] is True
+    assert c.call("GET", "/dfu/config/update")["payload"]["autoInstallEnabled"] is True
+    c.close()
+    first.stop()
+    c2 = agent_factory().client()
+    try:
+        assert c2.call("GET", "/dfu/config/update")["payload"]["autoInstallEnabled"] is True
+    finally:
+        c2.close()
+
+
+def test_dfu_auto_install_setting_must_be_a_boolean(client):
+    reply = client.call("SET", "/dfu/config/update", {"autoInstallEnabled": "yes"})
+    assert reply["result"]["code"] == "INVALID_ARG"
