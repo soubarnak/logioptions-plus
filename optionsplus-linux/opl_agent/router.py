@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import applications, easy_switch, model, profiles, resources, responses, stubs, updates
+from . import actions, applications, easy_switch, model, profiles, resources, responses, stubs, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -110,7 +110,15 @@ class Router:
         # 1. runtime resource packages (Logitech-supplied data dir)
         if verb == "GET" and path == "/resources/localized_packages":
             lang = (self.config.get("language") or {}).get("value", "en-US")
-            return "SUCCESS", resources.localized_packages(payload, lang), ""
+            reply = resources.localized_packages(payload, lang)
+            for pkg in reply["packages"]:
+                if pkg["name"] == actions.STRING_PACKAGE:
+                    pkg["strings"] = actions.relabel_strings(pkg["strings"])
+            return "SUCCESS", reply, ""
+
+        # action picker catalogue, from the fetched depot through the Linux filter
+        if verb == "GET" and path in actions.ROUTES:
+            return "SUCCESS", actions.ROUTES[path](), ""
 
         if path == "/applications/scan/installed" and verb == "SET":
             await self._scan_applications(announce=True)
@@ -329,6 +337,9 @@ class Router:
                 else:
                     dev = self._thumb_device_for_slot(slot_id)
                     if dev is None:
+                        if self._store_button_assignment(slot_id, requested):
+                            asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
+                            handled = payload
                         continue
                     apply_fn, arg, what = self._apply_thumb, requested, "thumb wheel"
             try:
@@ -346,6 +357,15 @@ class Router:
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
 
+    def _store_button_assignment(self, slot_id, card):
+        """Keep the action chosen for a button slot (<prefix>_c<controlId>). Making the button
+        perform it is the input engine's job; this only persists the choice."""
+        if not card or not any(profiles.is_button_slot(slot_id, d.slot_prefix)
+                               for d in self.reg.devices.values()):
+            return False
+        self.store.set(slot_id, card)
+        return True
+
     async def _profiles_reset(self, info):
         loop = asyncio.get_event_loop()
         for dev in list(self.reg.devices.values()):
@@ -354,6 +374,7 @@ class Router:
             self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
             self.store.remove(profiles.scroll_slot(dev.slot_prefix))
             self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
+            self.store.remove_matching(lambda slot: profiles.is_button_slot(slot, dev.slot_prefix))
             try:
                 await loop.run_in_executor(None, self._apply_defaults, dev)
             except Exception as exc:
