@@ -45,7 +45,7 @@ Conventions used below:
 | 15 | ADD APPLICATION, per-app profiles | lists installed apps, switches profile with the active window | "Scanning for applications" forever | `/applications/scan/installed` accepted but nothing is ever broadcast; no active-window tracking | 4 |
 | 16 | Smart Actions templates | gallery from marketplace | empty | marketplace is Logitech cloud | out of scope (stub) |
 | 17 | App Settings → "Logi Options+ version" | shows version | agent serves `/updates/info` and `/system/info` (tested); live UI run pending | field names of `system_info` unverified against the UI | 5 |
-| 18 | Check for update / auto update | Logitech pipeline | agent checks GitHub releases (stable redirect, testing Atom feed), periodic setting, channel (tested); live UI run pending | `/updates/download`, `install` (pkexec xbps-install, polkit action), `restart_now` and payload refresh (`/updates/payload`) tested with a fake runner; real pkexec run pending | 5 |
+| 18 | Check for update / auto update | Logitech pipeline | agent checks GitHub releases (stable redirect), periodic setting, stable channel only (tested); live UI run pending | `/updates/download`, `install` (pkexec xbps-install, polkit action), `restart_now` (broadcasts `/updates/restart_incoming` first) tested with a fake runner; real pkexec run and the UI quitting on that broadcast pending. Logitech data refresh has no UI route: run `optionsplus-fetch-payload` | 5 |
 | 19 | Support, release notes, feedback links | Logitech URLs | Logitech URLs | hard-coded in `app.min.js`; opened through `electronSend.openExternal` | 5 |
 | 20 | LOGI SERVICES, account login, cloud backup | works | empty / login dialog only | Logitech cloud | out of scope (stub) |
 | 21 | Packaging, udev, launcher, autostart, updates via xbps | MSI installer, updater service | none | not written | 0 |
@@ -486,18 +486,19 @@ Finding 17–19. The in-app update section becomes a front end for GitHub releas
   `configuration.json`; the agent runs the check on that interval and at start. The
   "Automatically install updates" toggle becomes "check periodically" (install needs root).
 - `GET /updates/channel` → `updates.Channel{pipeline_host: "https://github.com/soubarnak/
-  logioptions-plus/releases", name: "stable"}`; `SET /updates/channel` accepted only for
-  the names `stable` and `testing` (a `testing` channel = GitHub pre-releases; the HEAD
-  trick does not see pre-releases, so `testing` uses the releases Atom feed).
+  logioptions-plus/releases", name: "stable"}`; `SET /updates/channel` accepts `stable`;
+  `testing` answers `NOT_SUPPORTED`. A testing channel would need xbps-valid pre-release
+  versions (`0.2.0rc1`), `--prerelease` releases that never become `releases/latest`, and
+  a separate repodata URL; none of that exists, so the channel is not offered.
 - `SET /updates/download` → `UPDATE_READY` immediately (xbps downloads at install).
-- `SET /updates/install` → if `pkexec` exists: `pkexec xbps-install -Syu optionsplus-linux`
+- `SET /updates/install` → if `pkexec` exists: `pkexec /usr/bin/xbps-install -Syu optionsplus-linux`
   with a polkit action file shipped in 3.2; progress mapped to `UPDATE_INSTALLING` then
   `RESTARTING`. Without polkit: `UPDATER_ERROR` whose `error_message` is the exact command
   to run (`sudo xbps-install -Su optionsplus-linux`). `SET /updates/restart_now` restarts
   the UI and agent (the launcher re-executes itself).
-- Payload updates: the same check compares `payload/depots.json` in the installed package
-  with `payload.json`; when the package pins newer Logitech data, the status page offers
-  "Download" which runs the fetcher (3.3).
+- Payload updates: no UI route is known for them (`/updates/depots` and `/updates/depot/*`
+  in `re/agent_routes.txt` have unknown payloads), so none is served. A package that pins
+  newer Logitech data is refreshed by running `optionsplus-fetch-payload` (3.3).
 
 ### 8.3 Support and feedback links
 

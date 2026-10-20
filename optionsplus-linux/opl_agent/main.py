@@ -54,7 +54,7 @@ def _receiver_info(receiver):
 async def _watch(server, reg, interval=RESCAN_SECONDS):
     """Rescan on hidraw node add/remove and every `interval` (a mouse switching
     on or off leaves the receiver's node alone); announce what changed."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     wait = getattr(reg.transport, "wait_change", None)
     while True:
         if wait is not None:
@@ -87,7 +87,7 @@ def _broadcast_battery(server, reg, dev_id):
 
 async def _poll(server, reg, interval=POLL_SECONDS):
     """Periodically re-read battery; broadcast changes to subscribers."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval)
         for dev_id in list(reg.devices):
@@ -102,7 +102,7 @@ async def _poll(server, reg, interval=POLL_SECONDS):
 
 async def _track_focus(router, source, interval=FOCUS_SECONDS):
     """Poll the window source; hand each change of the focused window to the router."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     last = object()
     while True:
         await asyncio.sleep(interval)
@@ -134,15 +134,14 @@ class Agent:
                  rescan_seconds=RESCAN_SECONDS,
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
-                 release_base_url=None, clock=None, manifest_path=None,
+                 release_base_url=None, clock=None,
                  input_factory=None, window_source=None, focus_seconds=FOCUS_SECONDS):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
         updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
                                   payload_path=payload_path, release_base_url=release_base_url,
-                                  clock=clock, state_dir=state_dir, runner=runner,
-                                  manifest_path=manifest_path)
+                                  clock=clock, state_dir=state_dir, runner=runner)
         self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
                              updater=updater, os_release_path=os_release_path,
                              input_factory=input_factory)
@@ -162,7 +161,7 @@ class Agent:
         self._updates = None
 
     async def start(self):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.reg.scan)
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._loop = loop
@@ -202,14 +201,28 @@ class Agent:
 
     async def serve_forever(self):
         """Serve until cancelled or until a restart is requested (the launcher then starts anew)."""
-        async with self._srv:
-            serving = asyncio.ensure_future(self._srv.serve_forever())
-            leaving = asyncio.ensure_future(self.restart_requested.wait())
-            try:
-                await asyncio.wait({serving, leaving}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                serving.cancel()
-                leaving.cancel()
+        serving = asyncio.ensure_future(self._srv.serve_forever())
+        leaving = asyncio.ensure_future(self.restart_requested.wait())
+        try:
+            await asyncio.wait({serving, leaving}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            serving.cancel()
+            leaving.cancel()
+            await self._close_server()
+
+    async def _close_server(self):
+        """Stop listening and drop every client first: wait_closed() (Python 3.12+) waits
+        for connected clients, so the UI that asked for a restart would keep us alive."""
+        if self._srv is None:
+            return
+        self._srv.close()
+        for c in list(self.server.connections):
+            c.writer.close()
+        try:
+            await asyncio.wait_for(self._srv.wait_closed(), 5)
+        except asyncio.TimeoutError:
+            log.warning("clients did not disconnect in time")
+        self._srv = None
 
     async def stop(self):
         if self._poller:
@@ -220,11 +233,7 @@ class Agent:
             self._watcher.cancel()
         if self._tracker:
             self._tracker.cancel()
-        if self._srv:
-            self._srv.close()
-            await self._srv.wait_closed()
-        for c in list(self.server.connections):
-            c.writer.close()
+        await self._close_server()
         self.router.relay.close()           # hand the wheels back while the transport is still open
         self.reg.close()
         self.router.engine.close()

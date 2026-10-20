@@ -92,11 +92,6 @@ BOOT = {
     "/lps/service_state": {"@type": TYPE + "logi.protocol.lps.GetServiceStateResponse"},
 }
 
-# SET routes that simply echo SUCCESS. The UI resends its own payload back.
-SET_ECHO = {"/scarif/event", "/system/settings", "/mouse/global/swap",
-            # the UI rejects its boot saga if this scan request fails
-            "/applications/scan/installed", "/updates/depot/info"}
-
 # Routes the real agent rejects; the UI treats the code as "feature absent".
 ERRORS = {
 }

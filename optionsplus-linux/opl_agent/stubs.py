@@ -5,8 +5,9 @@ unsupported (see feature-parity.md section 9). A stub answers the quiet
 "nothing here" value so the UI hides the feature instead of spinning or
 raising an error; none of them reaches the network.
 
-``lookup(verb, path)`` returns ``(code, payload)`` or ``None`` when the path is
-not a stub. Payloads carry only ``@type`` and the fields that differ from the
+``lookup(verb, path, payload)`` returns ``(code, payload)`` or ``None`` when the
+path is not a stub. A SET that the router does not handle and that is not listed
+here is answered NOT_SUPPORTED (and logged) by the router. Payloads carry only ``@type`` and the fields that differ from the
 proto3 defaults; ``defaults.fill`` adds the rest on the way out.
 """
 
@@ -69,8 +70,21 @@ _SET = {
     "/offer/revoke_all": _msg("logi.protocol.offer_redemption.RevokedOffers"),
 }
 
+# SETs the UI's boot sagas send without catching a failure (one rejected call cancels the
+# whole saga tree, see FINDINGS.md). They configure Logitech services we do not run, so
+# the UI's own payload is echoed back.
+_SET_ECHO = {
+    "/scarif/event", "/scarif/settings", "/system/settings", "/updates/depot/info",
+    "/lps/start_library_package_update_check", "/lps/enable_notification",
+    "/lps/enable_trace_events", "/lps/enabled_in_background",
+    "/lps/set_actions_ring_scale_factor", "/lps/set_image_size",
+    "/event_tracing/enable", "/event_tracing/optionsplus_backend/enable",
+    "/integration_manager/settings/led_sdk_enabled", "/set_feature_flag",
+}
+_LOGIVOICE_SET = re.compile(r"^/logivoice/set_[a-z_]+$")
 
-def lookup(verb, path):
+
+def lookup(verb, path, payload=None):
     if verb == "GET":
         if path in _GET:
             return _GET[path]
@@ -80,6 +94,9 @@ def lookup(verb, path):
         if _LOGIVOICE_OFF.match(path):
             return "SUCCESS", _bool(False)
         return None
-    if verb == "SET" and path in _SET:
-        return "SUCCESS", _SET[path]
+    if verb == "SET":
+        if path in _SET:
+            return "SUCCESS", _SET[path]
+        if path in _SET_ECHO or _LOGIVOICE_SET.match(path):
+            return "SUCCESS", payload
     return None

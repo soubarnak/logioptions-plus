@@ -8,7 +8,7 @@ from tests.fakes.runner import FakeRunner
 from tests.test_updates import TERMINAL, check, wait_for
 
 SUDO_COMMAND = "sudo xbps-install -Su optionsplus-linux"
-INSTALL_ARGV = ["pkexec", "xbps-install", "-Syu", "optionsplus-linux"]
+INSTALL_ARGV = ["pkexec", "/usr/bin/xbps-install", "-Syu", "optionsplus-linux"]
 DONE = ("RESTARTING", "UPDATER_ERROR")
 
 
@@ -23,7 +23,6 @@ class Pair:
     def __init__(self, running):
         self.cmd, self.listener = running.client(), running.client()
         self.listener.subscribe("/updates/status")
-        self.listener.subscribe("/updates/payload")
 
     def call(self, *a):
         return self.cmd.call(*a)

@@ -117,12 +117,12 @@ def test_channel_defaults_to_stable_on_our_releases(client, releases):
     assert ch["pipelineHost"] == releases.base_url
 
 
-def test_channel_accepts_only_stable_and_testing(client):
-    assert client.call("SET", "/updates/channel", {"name": "testing"})["result"]["code"] == "SUCCESS"
-    assert client.call("GET", "/updates/channel")["payload"]["name"] == "testing"
+def test_testing_channel_is_unsupported_and_says_so(client):
+    reply = client.call("SET", "/updates/channel", {"name": "testing"})
+    assert reply["result"]["code"] == "NOT_SUPPORTED" and reply["result"]["what"]
+    assert client.call("GET", "/updates/channel")["payload"]["name"] == "stable"
     for bad in ("nightly", "", None, 3):
         assert client.call("SET", "/updates/channel", {"name": bad})["result"]["code"] == "INVALID_ARG"
-    assert client.call("GET", "/updates/channel")["payload"]["name"] == "testing"
     assert client.call("SET", "/updates/channel", {"name": "stable"})["result"]["code"] == "SUCCESS"
 
 
@@ -131,42 +131,17 @@ def test_channel_cannot_redirect_the_check_to_another_host(client, releases):
     assert client.call("GET", "/updates/channel")["payload"]["pipelineHost"] == releases.base_url
 
 
-def test_testing_sees_a_pre_release_that_stable_ignores(client, releases):
+def test_a_pre_release_is_never_offered(client, releases):
     settle(client)
     releases.publish("9.0.0-rc1", prerelease=True)
     assert check(client)[-1]["state"] == "NO_UPDATES"
-    client.call("SET", "/updates/channel", {"name": "testing"})
-    assert check(client)[-1]["state"] == "UPDATE_AVAILABLE"
-    client.call("SET", "/updates/channel", {"name": "stable"})
-    assert check(client)[-1]["state"] == "NO_UPDATES"
 
 
-def test_testing_also_sees_newer_stable_releases(client, releases):
-    settle(client)
-    releases.publish("9.0.0")
-    client.call("SET", "/updates/channel", {"name": "testing"})
-    assert check(client)[-1]["state"] == "UPDATE_AVAILABLE"
-
-
-def test_testing_with_nothing_newer_is_no_updates(client, releases):
-    settle(client)
-    client.call("SET", "/updates/channel", {"name": "testing"})
-    assert check(client)[-1]["state"] == "NO_UPDATES"
-
-
-def test_a_pre_release_of_the_running_version_is_not_an_update(client, releases):
-    settle(client)
-    releases.publish(__version__ + "-rc1", prerelease=True)
-    client.call("SET", "/updates/channel", {"name": "testing"})
-    assert check(client)[-1]["state"] == "NO_UPDATES"
-
-
-def test_channel_persists_across_agent_restarts(agent_factory):
-    first = agent_factory()
-    c = first.client()
-    c.call("SET", "/updates/channel", {"name": "testing"})
-    c.close()
-    first.stop()
+def test_a_saved_testing_channel_from_an_older_build_reads_as_stable(agent_factory, workdir):
+    import json, os
+    os.makedirs(workdir + "/state", exist_ok=True)
+    with open(workdir + "/state/updates.json", "w") as fh:
+        json.dump({"channel": "testing"}, fh)
     c = agent_factory().client()
-    assert c.call("GET", "/updates/channel")["payload"]["name"] == "testing"
+    assert c.call("GET", "/updates/channel")["payload"]["name"] == "stable"
     c.close()

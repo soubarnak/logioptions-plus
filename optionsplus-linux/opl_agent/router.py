@@ -167,22 +167,20 @@ class Router:
         if path == "/updates/channel" and verb in ("GET", "SET"):
             if verb == "SET":
                 code = self.updater.set_channel(payload)
+                if code == "NOT_SUPPORTED":
+                    return code, None, "only the stable channel exists; pre-releases are not offered"
                 if code != "SUCCESS":
-                    return code, None, "channel must be stable or testing"
+                    return code, None, "channel must be stable"
             return "SUCCESS", self.updater.channel(), ""
         if verb == "SET" and path == "/updates/check_now":
             self.updater.request_check()
             return "SUCCESS", payload, ""
-        if verb == "SET" and path in ("/updates/download", "/updates/install", "/updates/restart_now",
-                                      "/updates/payload/download"):
+        if verb == "SET" and path in ("/updates/download", "/updates/install", "/updates/restart_now"):
             action = {"/updates/download": self.updater.download,
                       "/updates/install": self.updater.install,
-                      "/updates/restart_now": self.updater.restart_now,
-                      "/updates/payload/download": self.updater.download_payload}[path]
+                      "/updates/restart_now": self.updater.restart_now}[path]
             code, what = action()
             return code, (payload if code == "SUCCESS" else None), what
-        if verb == "GET" and path == "/updates/payload":
-            return "SUCCESS", self.updater.payload_status(), ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
@@ -193,7 +191,7 @@ class Router:
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
-        stub = stubs.lookup(verb, path)
+        stub = stubs.lookup(verb, path, payload)
         if stub is not None:
             return stub[0], stub[1], ""
         if verb == "SET" and path == "/system/open_settings":
@@ -201,8 +199,6 @@ class Router:
             return "SUCCESS", payload, ""
         if path in responses.ERRORS:
             return responses.ERRORS[path], None, ""
-        if verb == "SET" and path in responses.SET_ECHO:
-            return "SUCCESS", payload, ""
 
         # 2. device-scoped routes
         parts = path.strip("/").split("/")
@@ -221,11 +217,11 @@ class Router:
             log.warning("device route %s failed: %s", path, exc)
             return "FAULTED", None, str(exc)
 
-        # Several boot sagas issue a SET without catching a failure; one
-        # rejected SET cancels the whole saga tree. Accept unknown SETs.
+        # The SETs boot sagas send without catching a failure are in stubs.py; any other
+        # SET is a feature we do not have, and says so instead of pretending to succeed.
         if verb == "SET":
-            log.warning("unhandled SET %s accepted (feature not implemented)", path)
-            return "SUCCESS", payload, ""
+            log.warning("unhandled SET %s refused (feature not implemented)", path)
+            return "NOT_SUPPORTED", None, "not supported on Linux"
         return "NO_SUCH_PATH", None, ""
 
     # ---- receiver pairing -------------------------------------------------

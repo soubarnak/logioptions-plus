@@ -2,6 +2,8 @@
 
 import logging
 
+import pytest
+
 from tests.fakes.runner import FakeRunner
 
 TYPE = "type.googleapis.com/"
@@ -100,9 +102,18 @@ def test_open_settings_does_nothing_when_no_tool_is_known(agent_factory):
     assert runner.launched == []
 
 
-def test_unhandled_set_is_accepted_and_logged_as_warning(client, caplog):
+def test_unhandled_set_is_refused_and_logged_as_warning(client, caplog):
     with caplog.at_level(logging.WARNING, logger="opl.router"):
         r = client.call("SET", "/no/such/feature", {"a": 1})
-    assert r["result"]["code"] == "SUCCESS"
+    assert r["result"]["code"] == "NOT_SUPPORTED"
     assert any(rec.levelno == logging.WARNING and "/no/such/feature" in rec.getMessage()
                for rec in caplog.records)
+
+
+@pytest.mark.parametrize("path", [
+    "/scarif/event", "/system/settings", "/updates/depot/info",
+    "/lps/start_library_package_update_check", "/logivoice/set_microphone",
+])
+def test_boot_saga_sets_stay_accepted_and_echo_the_payload(client, path):
+    r = client.call("SET", path, {"a": 1})
+    assert r["result"]["code"] == "SUCCESS" and r["payload"]["a"] == 1
