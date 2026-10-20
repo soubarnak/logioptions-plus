@@ -128,3 +128,32 @@ def test_installer_missing_a_depot_fails_cleanly(world):
     assert r.returncode != 0
     assert "test_mouse" in r.stderr
     assert not world.payload.exists()
+
+
+def test_installer_with_a_signature_trailer_after_the_zip_installs(world):
+    exe = world.tmp / "installer_offline.exe"
+    kit.offline_installer(exe, world.depots, trailer=b"\x30\x82" * 51200)     # 100 KiB
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode == 0, r.stderr
+    assert (world.payload / "app.asar").read_bytes() == b"fake-asar"
+    assert (world.payload / "depots" / "test_mouse" / "thumb.png").exists()
+
+
+def test_installer_without_a_zip_directory_is_rejected_with_the_usual_message(world):
+    exe = world.tmp / "junk.exe"
+    exe.write_bytes(b"MZ" + b"\0" * 5000)
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "not an Options+ offline installer" in r.stderr
+    assert not world.payload.exists()
+
+
+def test_installer_depot_is_checked_against_the_pinned_sha256_too(world):
+    exe = world.tmp / "installer_offline.exe"
+    other = b"another depot" + world.depots["test_mouse"]
+    # the installer's own mac matches the bytes it carries, the manifest pin does not
+    kit.offline_installer(exe, dict(world.depots, test_mouse=other))
+    r = fetch(world, "--accept-eula", "--from-installer", str(exe))
+    assert r.returncode != 0
+    assert "checksum mismatch for test_mouse; nothing was installed" in r.stderr
+    assert not world.payload.exists()

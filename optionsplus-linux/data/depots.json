@@ -1,13 +1,25 @@
 {
-  "_comment": "Pinned Logitech depots (metadata only, no Logitech bytes). Recheck with tools/verify-depot-urls.py before every release that changes this file. Device depots (mx_master_3s, system_actions) are added from the offline installer's offline.json once their URL, size and SHA-256 are read from it; gated depots stay out.",
+  "_comment": "Pinned Logitech depots (metadata only, no Logitech bytes), taken from offline.json of the Options+ 2.8.981479 offline installer (build 876310). Recheck with tools/verify-depot-urls.py (HEAD requests only) before every release that changes this file; gated depots stay out.",
   "dataVersion": "2.8.981479",
-  "eulaUrl": "https://www.logitech.com/en-us/legal/eula.html",
+  "eulaUrl": "https://www.logitech.com/legal/eula.html",
   "depots": [
     {
       "name": "logioptionsplus",
       "url": "https://updates.optionsplus.logitechg.com/depots/c08bc392-923d-42ea-9511-5a5667b4d0fe/logioptionsplus.depot",
       "size": 552459832,
       "sha256": "baf9ecf05f322b42b0c85a2304e33038f929ee49579ed77be193f2983a715869"
+    },
+    {
+      "name": "system_actions",
+      "url": "https://updates.optionsplus.logitechg.com/depots/7e89b27a-323f-4026-93a1-3ef5d5387c15/system_actions.depot",
+      "size": 159698,
+      "sha256": "85bd8bdba43b61bc7e8341863e5d072518224c9f0defe1710cf6b7c3330445c3"
+    },
+    {
+      "name": "mx_master_3s",
+      "url": "https://updates.optionsplus.logitechg.com/depots/9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81/mx_master_3s.depot",
+      "size": 1606141,
+      "sha256": "50803b06f23984ef26204c4c8018a274145ab52b94c8bafa9b8ab1a6d88ef521"
     }
   ]
 }

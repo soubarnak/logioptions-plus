@@ -6,6 +6,7 @@ there, and only then swapped in, so a failure never leaves a half-installed payl
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ from . import paths
 EXIT_DECLINED = 2
 EXIT_FAILED = 1
 MAGICS = (bytes.fromhex("10011720"), bytes.fromhex("06052120"))   # main app, device assets
+EOCD = b"PK\x05\x06"
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
@@ -155,12 +157,12 @@ def human(n):
     return "%.0f MB" % (n / 1e6)
 
 
-def eula_text(manifest):
+def eula_text(manifest, installer=None):
     total = sum(int(d["size"]) for d in manifest["depots"])
-    return ("Options+ for Linux needs Logitech's Options+ data. It will be downloaded from "
-            "Logitech's servers: %s (%d bytes).\n"
+    how = ("read from %s" % installer) if installer else "downloaded from Logitech's servers"
+    return ("Options+ for Linux needs Logitech's Options+ data. It will be %s: %s (%d bytes).\n"
             "By continuing you accept Logitech's End User License Agreement:\n  %s\n"
-            % (human(total), total, manifest["eulaUrl"]))
+            % (how, human(total), total, manifest["eulaUrl"]))
 
 
 class UI:
@@ -307,10 +309,74 @@ def find_in_zip(z, entry):
     return None
 
 
+class _Window(io.RawIOBase):
+    """Read-only view of the first `end` bytes of a file (zipfile only looks for the EOCD at EOF)."""
+
+    def __init__(self, fh, end):
+        self._fh, self._end, self._pos = fh, end, 0
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        base = {os.SEEK_SET: 0, os.SEEK_CUR: self._pos, os.SEEK_END: self._end}[whence]
+        self._pos = max(0, base + offset)
+        return self._pos
+
+    def readinto(self, b):
+        n = max(0, min(len(b), self._end - self._pos))
+        self._fh.seek(self._pos)
+        data = self._fh.read(n)
+        b[:len(data)] = data
+        self._pos += len(data)
+        return len(data)
+
+
+def find_zip_end(fh, size):
+    """Offset just past the ZIP end-of-central-directory record, or None. Scans backwards from the
+    end of the file: Logitech's installer carries an Authenticode signature (about 96 KB) after the
+    record, which is beyond the 64 KiB that zipfile searches."""
+    chunk, tail = 1 << 20, b""
+    pos = size
+    while pos > 0:
+        start = max(0, pos - chunk)
+        fh.seek(start)
+        buf = fh.read(pos - start) + tail
+        i = buf.rfind(EOCD)
+        while i >= 0:
+            at = start + i
+            rec = buf[i:i + 22]
+            if len(rec) == 22:
+                cd_size, cd_off, clen = struct.unpack("<IIH", rec[12:22])
+                if at + 22 + clen <= size and cd_size + cd_off <= at:
+                    return at + 22 + clen
+            i = buf.rfind(EOCD, 0, i)
+        tail = buf[:len(EOCD) - 1 + 22]       # a record may straddle the chunk boundary
+        pos = start
+    return None
+
+
 def collect_installer(manifest, exe):
     def collect(staging):
         try:
-            z = zipfile.ZipFile(exe)          # the PE overlay is a plain ZIP
+            fh = open(exe, "rb")
+        except OSError as e:
+            raise FetchError("%s is not an Options+ offline installer: %s" % (exe, e))
+        with fh:
+            return unpack(fh, staging)
+
+    def unpack(fh, staging):
+        try:
+            end = find_zip_end(fh, os.fstat(fh.fileno()).st_size)
+            if end is None:
+                raise zipfile.BadZipFile("File is not a zip file")
+            z = zipfile.ZipFile(_Window(fh, end))     # the PE overlay is a plain ZIP
             offline = json.loads(z.read("offline.json"))
         except (OSError, KeyError, ValueError, zipfile.BadZipFile) as e:
             raise FetchError("%s is not an Options+ offline installer: %s" % (exe, e))
@@ -329,7 +395,7 @@ def collect_installer(manifest, exe):
                 except (zipfile.BadZipFile, OSError) as e:
                     raise FetchError("cannot read %s from installer: %s" % (want["name"], e))
                 digest = sha256_file(target)
-                if digest != str(entry.get("mac", "")).lower():
+                if digest != str(entry.get("mac", "")).lower() or digest != want["sha256"].lower():
                     raise FetchError("checksum mismatch for %s; nothing was installed" % want["name"])
                 files[want["name"]] = target
                 depots[want["name"]] = {"sha256": digest, "size": os.path.getsize(target),
@@ -388,7 +454,7 @@ def main(argv=None):
         if args.from_installer and not os.path.isfile(args.from_installer):
             raise FetchError("no such installer: %s" % args.from_installer)
         ui = UI(not args.no_gui)
-        if not ui.confirm(eula_text(manifest), args.accept_eula):
+        if not ui.confirm(eula_text(manifest, args.from_installer), args.accept_eula):
             sys.stderr.write("Declined. Nothing was downloaded.\n")
             return EXIT_DECLINED
         if system and os.geteuid() != 0 and not args.elevated:

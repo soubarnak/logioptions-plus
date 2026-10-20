@@ -116,9 +116,9 @@ the downloaded Logitech data stay.
 ### First launch: Logitech's data
 
 Start **Options+ for Linux** from the menu (or run `optionsplus-linux`). The first launch finds
-no Options+ data and runs `optionsplus-fetch-payload`. It says that the data (about 550 MB) comes
-from Logitech's servers, shows the size and the link to Logitech's EULA, and waits for you to
-confirm (a `zenity` or `kdialog` box when a display and the tool exist, otherwise the terminal).
+no Options+ data and runs `optionsplus-fetch-payload`. It says that the data (three depots,
+about 554 MB in total) comes from Logitech's servers, shows the size and the link to Logitech's
+EULA (https://www.logitech.com/legal/eula.html), and waits for you to confirm (a `zenity` or `kdialog` box when a display and the tool exist, otherwise the terminal).
 Declining exits without downloading or writing anything. After a confirmed download the SHA-256
 is checked against the value pinned in `depots.json` before anything is unpacked; on a mismatch
 nothing is installed.
@@ -128,12 +128,14 @@ nothing is installed.
   system-wide copy in `/usr/lib/optionsplus-linux/logitech/` is the fallback.
 - Behind a proxy or with a dead URL: `optionsplus-fetch-payload --from-installer
   ~/Downloads/logioptionsplus_installer_offline.exe` takes the depots from Logitech's offline
-  installer instead. The usual `https_proxy` variables are honoured for downloads.
+  installer (a 724 MB file with Logitech's signature appended) instead; the prompt then says the
+  data is read from that file. The usual `https_proxy` variables are honoured for downloads.
 - For every user on the machine: `optionsplus-fetch-payload --system` (uses `pkexec`, else `sudo`).
 - `--accept-eula` skips the question for scripted installs; use it only after reading the EULA.
 - `--force` fetches again even when the installed data is current.
-- Only the main Logitech depot is pinned today. Depots with device artwork and action icons are
-  not pinned yet, so on a clean install those images may be missing.
+- Three depots are pinned in `depots.json`: `logioptionsplus` (the app and its data, 552 MB),
+  `mx_master_3s` (device data and artwork, 1.6 MB) and `system_actions` (action icons, 160 KB).
+  Other mouse models need their own depot, which is not pinned yet.
 
 ## Updating
 
