@@ -100,10 +100,15 @@ async def _poll(server, reg, interval=POLL_SECONDS):
                 _broadcast_battery(server, reg, dev_id)
 
 
-async def _track_focus(router, source, interval=FOCUS_SECONDS):
-    """Poll the window source; hand each change of the focused window to the router."""
-    loop = asyncio.get_event_loop()
+RETRY_FIRST, RETRY_LAST = 1.0, 8.0     # seconds before a failed profile switch is tried again, doubling
+
+
+async def _track_focus(router, source, interval=FOCUS_SECONDS, retry=(RETRY_FIRST, RETRY_LAST)):
+    """Poll the window source; hand each change of the focused window to the router. A switch
+    that failed is tried again for the same window, after a wait that doubles up to a limit."""
+    loop = asyncio.get_running_loop()
     last = object()
+    wait, retry_at = retry[0], None     # retry_at: when to try the same window again, None: not needed
     while True:
         await asyncio.sleep(interval)
         try:
@@ -111,13 +116,19 @@ async def _track_focus(router, source, interval=FOCUS_SECONDS):
         except Exception as exc:
             log.debug("cannot tell the focused window: %s", exc)
             continue
-        if window == last:
+        if window == last and (retry_at is None or loop.time() < retry_at):
             continue
         last = window
         try:
-            await loop.run_in_executor(None, router.on_focus, window)
+            ok = await loop.run_in_executor(None, router.on_focus, window)
         except Exception:
             log.exception("switching profile failed")
+            ok = False
+        if ok is False:
+            retry_at = loop.time() + wait
+            wait = min(wait * 2, retry[1])
+        else:
+            retry_at, wait = None, retry[0]
 
 
 class Agent:
@@ -135,7 +146,8 @@ class Agent:
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
                  release_base_url=None, clock=None, manifest_path=None,
-                 input_factory=None, window_source=None, focus_seconds=FOCUS_SECONDS):
+                 input_factory=None, window_source=None, focus_seconds=FOCUS_SECONDS,
+                 focus_retry=(RETRY_FIRST, RETRY_LAST)):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
@@ -155,6 +167,7 @@ class Agent:
         self.rescan_seconds = rescan_seconds
         self.window_source = window_source if window_source is not None else focus.default_source()
         self.focus_seconds = focus_seconds
+        self.focus_retry = focus_retry
         self._tracker = None
         self._watcher = None
         self._srv = None
@@ -166,6 +179,7 @@ class Agent:
         await loop.run_in_executor(None, self.reg.scan)
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._loop = loop
+        self.router.loop = loop
         self.reg.on_resumed.append(self._battery_after_resume)
         self.reg.on_pairing.append(self._announce_pairing)
         self._srv = await self.server.start()
@@ -173,7 +187,8 @@ class Agent:
         self._updates = asyncio.ensure_future(self.router.updater.run())
         self._watcher = asyncio.ensure_future(_watch(self.server, self.reg, self.rescan_seconds))
         if self.window_source is not None:
-            self._tracker = asyncio.ensure_future(_track_focus(self.router, self.window_source, self.focus_seconds))
+            self._tracker = asyncio.ensure_future(_track_focus(self.router, self.window_source, self.focus_seconds,
+                                                              self.focus_retry))
 
     def _battery_after_resume(self, dev_id):
         """Registry hook (reader thread): push the battery read taken after wake."""
