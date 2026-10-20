@@ -10,7 +10,7 @@ route payloads; a bare list is accepted too). Files whose name marks them for
 macOS (osx/mac) are skipped:
 
     card_presets/*.json   {"cards": [...]}                      -> /macros/presets
-    rap/*.json            RACContainer                          -> /rac
+    rap/*.json            tag and recommendation tables         -> /rac (composed, see below)
     defaults/*.json       {"assignments": [...]}                -> /unified_profiles/assignment/default
     macros/*.json         {"macroInfos": [...]}                 -> /macros/predefined
                           {"macroAssignmentVals": [...]}        -> /macro_assignments/all
@@ -152,9 +152,17 @@ def _read(path):
     if cached and cached[0] == stamp:
         return cached[1]
     try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as exc:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        log.warning("cannot read %s: %s", path, exc)
+        return None
+    if raw.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] not in (b"{", b"["):
+        _files[path] = (stamp, None)
+        return None                     # Logitech's encrypted wrappers (card_presets_001.json): not data for us
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except ValueError as exc:
         log.warning("cannot read %s: %s", path, exc)
         return None
     _files[path] = (stamp, data)
@@ -228,26 +236,147 @@ def presets():
             "cards": _serve(_dedupe(_items("card_presets", "cards")))}
 
 
-def _rac_list(key):
+# ---- /rac: composed from Logitech's tag and recommendation tables ----------------
+#
+# The depot ships no RACContainer. data/rap/ holds four tables, all
+# {"data": {<app id>: {"infoList": [{"id": ..., "infos": [...]}]}}}:
+#
+#     available_card_tags_slot.json      slot id    -> preset tags the slot accepts
+#     available_card_tags_control.json   control id -> preset tags (devices without a slot row)
+#     recommendations_slot_win.json      slot id    -> recommended card ids
+#     recommendations_control_win.json   control id -> recommended card ids
+#
+# A slot id is "<slotPrefix>_c<control id>" (or "<slotPrefix>_thumb_wheel_adapter"). The
+# available cards of a slot are the presets whose tags meet the slot's tags.
+
+_TABLES = {"tags_slot": "available_card_tags_slot.json", "tags_control": "available_card_tags_control.json",
+           "rec_slot": "recommendations_slot_win.json", "rec_control": "recommendations_control_win.json"}
+_CONTROL_SLOT = re.compile(r"_c(\d+)$")
+_rac_cache = {}
+
+
+def _table(name):
+    """{app id: {row id: [infos]}} of one rap table; malformed parts are left out."""
+    doc = _read(os.path.join(resources.DATA_DIR, "rap", _TABLES[name]))
+    data = doc.get("data") if isinstance(doc, dict) else None
+    out = {}
+    for app, body in (data.items() if isinstance(data, dict) else ()):
+        rows = body.get("infoList") if isinstance(body, dict) else None
+        out[app] = {r["id"]: r["infos"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)
+                    and isinstance(r.get("infos"), list)} if isinstance(rows, list) else {}
+    return out
+
+
+def _catalogue_entry(prefix):
+    return next((e for e in resources._load_catalogue().values() if e.get("slotPrefix") == prefix), {})
+
+
+def _installed_prefixes():
+    """Slot prefixes of the catalogued devices whose depot is installed, in catalogue order."""
     out = []
-    for doc in _documents("rap"):
-        lst = ((doc.get(key) or {}).get("racList")) if isinstance(doc, dict) else None
-        for rac in lst or []:
-            slots = []
-            for slot in rac.get("slotCardList") or []:
-                slot = dict(slot)
-                for field in ("cards", "appSpecificCards", "desktopCards"):
-                    if field in slot:
-                        slot[field] = _serve(slot[field])
-                slots.append(slot)
-            out.append(dict(rac, slotCardList=slots))
-    return {"racList": out}
+    for entry in resources._load_catalogue().values():
+        prefix = entry.get("slotPrefix")
+        if prefix and prefix not in out and resources.depot_installed(entry.get("depot")):
+            out.append(prefix)
+    return out
 
 
-def rac():
+def _slot_ids(prefix, tables, app):
+    """Slots of one app for one device. A device that has slot rows in any table is listed by
+    those rows (this app's own, in table order); one that has none is listed by the controls of
+    its depot defaults, whose cards then come from the control tables."""
+    own = [sid for name in ("tags_slot", "rec_slot") for app_id in tables[name]
+           for sid in tables[name][app_id] if sid.startswith(prefix + "_")]
+    if own:
+        seen = []
+        for name in ("tags_slot", "rec_slot"):
+            for sid in tables[name].get(app, {}):
+                if sid.startswith(prefix + "_") and sid not in seen:
+                    seen.append(sid)
+        return seen
+    from .profiles import default_assignments
+    entry = _catalogue_entry(prefix)
+    return [a["slotId"] for a in default_assignments(prefix, entry.get("depot", ""))]
+
+
+def _compose(prefixes):
+    from .profiles import DEFAULT_PROFILE_ID
+    tables = {name: _table(name) for name in _TABLES}
+    presets_by_id = {c["id"]: c for c in _dedupe(_items("card_presets", "cards"))
+                     if isinstance(c, dict) and c.get("id")}
+    served = {}
+
+    def serve(card):
+        if card["id"] not in served:
+            served[card["id"]] = _serve([card])
+        return served[card["id"]]
+
+    apps = []
+    for name in _TABLES:
+        for app in tables[name]:
+            if app not in apps:
+                apps.append(app)
+    apps.sort(key=lambda a: a != DEFAULT_PROFILE_ID)        # default first, rest in table order
+
+    def row(kind, sid, app):
+        """The app's own slot row, else its own control row; the default app's rows stand in
+        only for an app that has no rows in any table."""
+        cid = (_CONTROL_SLOT.search(sid) or [None, None])[1]
+        owners = [app] if any(tables[n].get(app) for n in _TABLES) else [app, DEFAULT_PROFILE_ID]
+        for owner in dict.fromkeys(owners):
+            if sid in tables[kind + "_slot"].get(owner, {}):
+                return tables[kind + "_slot"][owner][sid]
+            if cid is not None and cid in tables[kind + "_control"].get(owner, {}):
+                return tables[kind + "_control"][owner][cid]
+        return None
+
+    available, recommended = [], []
+    for app in apps:
+        slots_a, slots_r = [], []
+        for prefix in prefixes:
+            for sid in _slot_ids(prefix, tables, app):
+                tags = row("tags", sid, app)
+                if tags is not None:
+                    want = set(t for t in tags if isinstance(t, str))
+                    cards = [c for c in presets_by_id.values() if want.intersection(c.get("tags") or ())]
+                    slots_a.append({"slotId": sid, "cards": [x for c in cards for x in serve(c)]})
+                rec = row("rec", sid, app)
+                if rec is not None:
+                    cards = [presets_by_id[i] for i in rec if i in presets_by_id]
+                    slots_r.append({"slotId": sid, "cards": [x for c in cards for x in serve(c)]})
+        if slots_a:
+            available.append({"appId": app, "slotCardList": slots_a})
+        if slots_r:
+            recommended.append({"appId": app, "slotCardList": slots_r})
     return {"@type": TYPE + "logi.protocol.rap.RACContainer",
-            "availableCards": _rac_list("availableCards"),
-            "recommendedCards": _rac_list("recommendedCards")}
+            "availableCards": {"racList": available}, "recommendedCards": {"racList": recommended}}
+
+
+def _rac_stamp(prefixes):
+    files = [os.path.join(resources.DATA_DIR, "rap", n) for n in _TABLES.values()]
+    files += sorted(glob.glob(os.path.join(resources.DATA_DIR, "card_presets", "*.json")))
+    files += [os.path.join(resources.depot_root(_catalogue_entry(p).get("depot", "")), "default_configurations.json")
+              for p in prefixes if _catalogue_entry(p).get("depot")]
+    stamps = []
+    for f in files:
+        try:
+            stamps.append((f, os.stat(f).st_mtime_ns))
+        except OSError:
+            stamps.append((f, None))
+    return tuple(stamps), _icon_dir("pipeline://%s/" % ICON_DEPOT)
+
+
+def rac(payload=None):
+    """The action picker container for one device ({"slotPrefix"}), or, without one, for every
+    catalogued device whose depot is installed. One cache entry per device set, dropped when
+    a depot file it was built from changes."""
+    prefix = payload.get("slotPrefix") if isinstance(payload, dict) else None
+    prefixes = (prefix,) if isinstance(prefix, str) and prefix else tuple(_installed_prefixes())
+    stamp = _rac_stamp(prefixes)
+    hit = _rac_cache.get(prefixes)
+    if hit is None or hit[0] != stamp:
+        hit = _rac_cache[prefixes] = (stamp, _compose(prefixes))
+    return copy.deepcopy(hit[1])
 
 
 def default_assignments():
