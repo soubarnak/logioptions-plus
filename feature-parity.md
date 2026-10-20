@@ -368,6 +368,14 @@ Setting survives a receiver re-plug.
   (open lock, passkey display, status events); Unifying uses register `0xB2`. Both are
   documented by Solaar. Implement open/close/cancel with status broadcasts; the UI shows
   the passkey screen itself.
+- Done (ticket #18): receiver ids are `rcv%08d`, listed after the mice. Routes from
+  `re/agent_routes.txt`: `SET /devices/<rcv>/pair` opens, `SET .../pair/cancel` closes,
+  `GET .../pair` reads; broadcasts `.../pair/changed` (PairingState) and
+  `.../pair/passkey/displayed` (PassKeyDisplay). A write the receiver rejects is FAULTED.
+  Unverified on hardware: the 0x1817 function layout (fn0 open lock + timeout, fn1 close;
+  events fn0 `[status, error, slot]`, fn1 passkey digits), the PairingState enum value names
+  (`STARTED`, `PASSKEY_DISPLAYED`, `PAIRED`, `FAILED`, `CANCELLED`) and the pairing error
+  names. Not done: Unifying register `0xB2`, `.../pair/passkey/entry`, `/receivers/<id>/unpair`.
 
 ### 6.5 Hot-plug and reconnect (finding 14)
 

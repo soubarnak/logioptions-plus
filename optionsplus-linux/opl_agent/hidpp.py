@@ -57,6 +57,7 @@ F_SMART_SHIFT = 0x2110
 F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
+F_RECEIVER_PAIRING = 0x1817     # Bolt receiver pairing (open lock, passkey, status events)
 
 DEVICE_TYPES = [
     "keyboard", "remote control", "numpad", "mouse", "trackpad", "trackball",
@@ -777,6 +778,19 @@ def _pairing_wpid(fd, n, bolt):
     # Unifying: big-endian at [3:5]. Bolt: [0] echo, [1] kind, [2:4] wpid
     # little-endian, [4:8] unit id (MX Master 3S: 51 42 34b0 43ccd316 -> b034)
     return (d[3] << 8 | d[2]) if bolt else struct.unpack(">H", d[3:5])[0]
+
+
+def pairing_open(fd, feature_index, timeout=60):
+    """Receiver pairing feature (0x1817) fn0: open the pairing lock for `timeout` seconds.
+
+    Layout assumed from the ticket (open lock, status/passkey events); not yet
+    verified on hardware."""
+    call(fd, DEV_RECEIVER, feature_index, 0, bytes([timeout]))
+
+
+def pairing_cancel(fd, feature_index):
+    """Receiver pairing feature (0x1817) fn1: close the pairing lock."""
+    call(fd, DEV_RECEIVER, feature_index, 1)
 
 
 def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
