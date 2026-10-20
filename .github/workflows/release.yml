@@ -21,7 +21,7 @@ jobs:
       - name: Install build tools
         run: |
           xbps-install -Syu xbps
-          xbps-install -Sy python3 python3-pytest python3-yaml nodejs bash openssl tar zstd git shadow github-cli
+          xbps-install -Sy python3 python3-pytest python3-yaml nodejs bash openssl tar zstd git shadow github-cli procps-ng findutils util-linux
       - uses: actions/checkout@v4
       - name: Check tag against version
         run: |
@@ -34,12 +34,12 @@ jobs:
           useradd -m builder
           mkdir -p "$RUNNER_TEMP/repo"
           chown -R builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/repo"
-          su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && optionsplus-linux/dev/test.sh"
+          HOME=/home/builder chroot --userspec=builder:builder / /bin/sh -c "cd '$GITHUB_WORKSPACE' && optionsplus-linux/dev/test.sh"
       - name: Build and check contents
         run: |
           # build-xbps.sh fails on any file outside the contents allow-list, so nothing is
           # signed or published after a violation.
-          su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && OPL_BUILD_DIR='$RUNNER_TEMP/repo' tools/build-xbps.sh"
+          HOME=/home/builder chroot --userspec=builder:builder / /bin/sh -c "cd '$GITHUB_WORKSPACE' && OPL_BUILD_DIR='$RUNNER_TEMP/repo' tools/build-xbps.sh"
       - name: Sign repository
         env:
           XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
