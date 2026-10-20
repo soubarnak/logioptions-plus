@@ -24,7 +24,7 @@ def main(argv):
         racs = box[key]["racList"]
         print("%s: %d apps" % (key, len(racs)))
         for rac in racs:
-            counts = ", ".join("%s=%d" % (s["slotId"], len(s["cards"]))
+            counts = ", ".join("%s=%d" % (s["slotId"], len(s.get("desktopCards", s.get("cards", ()))))
                                for s in rac["slotCardList"])
             print("  %-45s %s" % (rac["appId"], counts))
 

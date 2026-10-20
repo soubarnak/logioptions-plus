@@ -248,6 +248,11 @@ def presets():
 #
 # A slot id is "<slotPrefix>_c<control id>" (or "<slotPrefix>_thumb_wheel_adapter"). The
 # available cards of a slot are the presets whose tags meet the slot's tags.
+#
+# The UI's rac reducer reads the two lists from different fields of a slot entry: the
+# available list from "desktopCards" (and "appSpecificCards"), the recommended list from
+# "cards". An available list sent as "cards" is stored empty, so the picker shows only the
+# recommended cards and search finds nothing else.
 
 _TABLES = {"tags_slot": "available_card_tags_slot.json", "tags_control": "available_card_tags_control.json",
            "rec_slot": "recommendations_slot_win.json", "rec_control": "recommendations_control_win.json"}
@@ -339,7 +344,7 @@ def _compose(prefixes):
                 if tags is not None:
                     want = set(t for t in tags if isinstance(t, str))
                     cards = [c for c in presets_by_id.values() if want.intersection(c.get("tags") or ())]
-                    slots_a.append({"slotId": sid, "cards": [x for c in cards for x in serve(c)]})
+                    slots_a.append({"slotId": sid, "desktopCards": [x for c in cards for x in serve(c)]})
                 rec = row("rec", sid, app)
                 if rec is not None:
                     cards = [presets_by_id[i] for i in rec if i in presets_by_id]

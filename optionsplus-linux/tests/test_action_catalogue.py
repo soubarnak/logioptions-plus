@@ -72,7 +72,8 @@ def rac(client):
 def slots(container, key, app=fx.DEFAULT_APP):
     """{slotId: [card ids]} of one app in availableCards or recommendedCards."""
     racs = {r["appId"]: r for r in container[key]["racList"]}
-    return {s["slotId"]: ids(s["cards"]) for s in racs[app]["slotCardList"]} if app in racs else None
+    field = "desktopCards" if key == "availableCards" else "cards"
+    return {s["slotId"]: ids(s[field]) for s in racs[app]["slotCardList"]} if app in racs else None
 
 
 def test_available_actions_are_composed_from_the_slot_tags_and_hide_windows_only_cards(client):
@@ -82,6 +83,16 @@ def test_available_actions_are_composed_from_the_slot_tags_and_hide_windows_only
     assert got["046d_4242_c83"] == ["card_play", "card_snip"]
     assert got["046d_4242_c86"] == ["card_next_desktop"]
     assert not any(s.startswith("other-") for s in got)
+
+
+def test_the_lists_use_the_fields_the_ui_reducer_reads(client):
+    # available -> "desktopCards", recommended -> "cards"; the UI ignores the other field
+    # (the wire schema fills it with an empty list)
+    box = rac(client)
+    avail = [s for r in box["availableCards"]["racList"] for s in r["slotCardList"]]
+    rec = [s for r in box["recommendedCards"]["racList"] for s in r["slotCardList"]]
+    assert any(s["desktopCards"] for s in avail) and not any(s["cards"] for s in avail)
+    assert any(s["cards"] for s in rec) and not any(s["desktopCards"] for s in rec)
 
 
 def test_a_slot_without_a_tag_row_uses_the_control_tag_row(client):
@@ -103,7 +114,7 @@ def test_recommended_actions_resolve_to_served_cards(client):
 
 
 def test_served_actions_carry_the_resolved_icon_location(client, workdir):
-    card = rac(client)["availableCards"]["racList"][0]["slotCardList"][0]["cards"][0]
+    card = rac(client)["availableCards"]["racList"][0]["slotCardList"][0]["desktopCards"][0]
     assert card["icons"]["uri"] == "file://" + os.path.join(workdir, "depots", "system_actions") + "/"
 
 
