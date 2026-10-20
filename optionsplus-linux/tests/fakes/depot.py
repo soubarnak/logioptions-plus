@@ -16,6 +16,60 @@ def _write(path, data):
         fh.write(data)
 
 
+def keystroke_card(cid, name, **extra):
+    card = {"id": cid, "name": name, "attribute": "MACRO_PLAYBACK", "readOnly": True,
+            "macro": {"type": "KEYSTROKE", "keystroke": {"code": 4, "modifiers": [224]}},
+            "icons": {"uri": "pipeline://system_actions/", "icons": [cid + ".png"]},
+            "nestedCards": {}, "nestedCardsOrder": [], "tags": ["PRESET_TAG_KEY_OR_BUTTON"]}
+    card.update(extra)
+    return card
+
+
+def system_card(cid, name, action):
+    return keystroke_card(cid, name, macro={"type": "SYSTEM", "system": {"action": action}})
+
+
+# Invented catalogue: card_task_view, card_quick_launch and card_cortana model entries Linux cannot run.
+
+
+def catalogue_cards():
+    return [
+        keystroke_card("card_play", "NAME_PLAY"),
+        system_card("card_next_desktop", "NAME_NEXT_DESKTOP", "SWITCH_BETWEEN_DESKTOPS_RIGHT"),
+        system_card("card_snip", "NAME_SNIP_WINDOWS", "WINDOWS_SCREEN_CAPTURE"),
+        system_card("card_task_view", "NAME_TASK_VIEW", "TASK_VIEW"),
+        keystroke_card("card_quick_launch", "NAME_QUICK",
+                       macro={"type": "QUICK_LAUNCH", "quickLaunch": {"action": "CALCULATOR"}}),
+        keystroke_card("card_cortana", "NAME_CORTANA"),
+    ]
+
+
+def add_catalogue(main):
+    """Card presets, recommended actions, defaults and macros, with Windows-only entries."""
+    data = os.path.join(main, "data")
+    cards = catalogue_cards()
+    _write(os.path.join(data, "card_presets", "card_presets_win.json"),
+           json.dumps({"cards": cards[:4]}))
+    _write(os.path.join(data, "card_presets", "card_presets_001.json"),
+           json.dumps({"cards": cards[4:] + [cards[0]]}))
+    _write(os.path.join(data, "card_presets", "card_presets_osx.json"),
+           json.dumps({"cards": [keystroke_card("card_mac_only", "NAME_PLAY")]}))
+    _write(os.path.join(data, "rap", "rac_win.json"), json.dumps({
+        "recommendedCards": {"racList": [{"appId": "app_test", "slotCardList": [
+            {"slotId": "046d_4242_c82", "cards": [cards[0], cards[3]]}]}]},
+        "availableCards": {"racList": []}}))
+    _write(os.path.join(data, "defaults", "defaults_control_win.json"), json.dumps({"assignments": [
+        {"slotId": "046d_4242_c82", "cardId": "card-back"}]}))
+    _write(os.path.join(data, "defaults", "defaults_slot_win.json"), json.dumps({"assignments": [
+        {"slotId": "046d_4242_c83", "cardId": "card-forward"}]}))
+    _write(os.path.join(data, "macros", "macros_predefined_win.json"), json.dumps({"macroInfos": [
+        {"id": "macros_preset_test", "name": "MACRO_NAME_TEST", "cards": [cards[0], cards[2], cards[3]]},
+        {"id": "macros_preset_all_hidden", "name": "MACRO_NAME_HIDDEN", "cards": [cards[3], cards[5]]}]}))
+    _write(os.path.join(data, "macros", "macro_assignments.json"), json.dumps({"macroAssignmentVals": [
+        {"macroId": "macros_preset_test", "slotId": "046d_4242_c82"}]}))
+    _write(os.path.join(os.path.dirname(main), "system_actions", "card_play.png"), b"not-a-real-icon")
+
+
 def build_depot(root):
     """Create the tree under `root`; returns it (the OPL_DEPOT_DIR)."""
     main = os.path.join(root, "logioptionsplus")
@@ -26,7 +80,10 @@ def build_depot(root):
         "modes": [{"interfaces": [{"id": "046d_4242"}]}],
     }]}))
     _write(os.path.join(main, "data", "strings", "en-US.yaml"),
-           'HELLO_KEY: "Hello"\nBYE_KEY: Bye\n')
+           'HELLO_KEY: "Hello"\nBYE_KEY: Bye\nNAME_PLAY: Play/Pause\n'
+           'NAME_NEXT_DESKTOP: Next desktop\nNAME_SNIP_WINDOWS: Snipping Tool\n'
+           'NAME_TASK_VIEW: Task View\nNAME_QUICK: Quick launch\nNAME_CORTANA: Cortana\n')
+    add_catalogue(main)
     dev = os.path.join(root, DEPOT)
     _write(os.path.join(dev, "thumb.png"), THUMB_BYTES)
     _write(os.path.join(dev, "layout.json"), json.dumps({"buttons": []}))

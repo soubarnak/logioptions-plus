@@ -141,7 +141,8 @@ def test_localized_strings_come_from_the_depot(client):
     reply = client.call("GET", "/resources/localized_packages",
                         {"packages": ["logioptionsplus/data/strings"]})
     (pkg,) = reply["payload"]["packages"]
-    assert pkg["available"] is True and pkg["strings"] == {"HELLO_KEY": "Hello", "BYE_KEY": "Bye"}
+    assert pkg["available"] is True
+    assert (pkg["strings"]["HELLO_KEY"], pkg["strings"]["BYE_KEY"]) == ("Hello", "Bye")
 
 
 def test_agent_talked_hidpp_to_the_simulated_device(client, bolt):

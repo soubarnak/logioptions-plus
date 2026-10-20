@@ -46,6 +46,23 @@ def default_assignments(slot_prefix, depot):
     return out
 
 
+def is_button_slot(slot_id, slot_prefix):
+    """True for a control's slot, <slotPrefix>_c<controlId>."""
+    head, _, cid = slot_id.rpartition("_c")
+    return head == slot_prefix and cid.isdigit()
+
+
+def _with_chosen_buttons(assignments, store, slot_prefix):
+    """Replace default button assignments by the user's choice; append choices with no default."""
+    chosen = {s: c for s, c in store.cards.items() if is_button_slot(s, slot_prefix)}
+    out = []
+    for a in assignments:
+        card = chosen.pop(a["slotId"], None)
+        out.append(a if card is None else {"slotId": a["slotId"], "cardId": card.get("id", ""), "card": card})
+    out += [{"slotId": s, "cardId": c.get("id", ""), "card": c} for s, c in chosen.items()]
+    return out
+
+
 MOUSE_SETTINGS_SUFFIX = "_mouse_settings"
 
 
@@ -202,13 +219,21 @@ class ProfileStore:
         if self.cards.pop(slot_id, None) is not None:
             self._save()
 
+    def remove_matching(self, predicate):
+        gone = [s for s in self.cards if predicate(s)]
+        for s in gone:
+            del self.cards[s]
+        if gone:
+            self._save()
+
 
 def profiles(devices, store=None, live=None):
     """The default profile. `live` maps device id -> {"dpi", "range"} from the device."""
     live = live or {}
     assignments = []
     for dev in devices:
-        assignments += default_assignments(dev.slot_prefix, dev.depot)
+        defaults = default_assignments(dev.slot_prefix, dev.depot)
+        assignments += _with_chosen_buttons(defaults, store, dev.slot_prefix) if store else defaults
         slot = mouse_settings_slot(dev.slot_prefix)
         card = store.get(slot) if store else None
         rd = live.get(dev.id) or {}
