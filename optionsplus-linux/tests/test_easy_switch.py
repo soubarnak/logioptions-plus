@@ -79,6 +79,26 @@ def test_the_os_is_only_read_for_paired_hosts(client, bolt):
     assert len(os_reads) == 2
 
 
+def test_a_silent_host_os_read_is_tried_once_then_skipped(agent_factory, bolt):
+    bolt.mouse.host_os_silent = True
+    c = agent_factory().client()
+    try:
+        p = hosts(c)
+        assert all("os" not in h for h in p["hosts"])
+        assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
+        index = bolt.mouse.features.index(0x1815)
+        assert len([w for w in bolt.writes if w[2] == index and w[3] >> 4 == 7]) == 1
+    finally:
+        c.close()
+
+
+def test_reading_the_hosts_sends_only_getHostInfo_to_0x1814(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1814)
+    assert {w[3] >> 4 for w in bolt.writes if w[2] == index} <= {0}
+    assert not bolt.mouse.host_writes
+
+
 def test_a_failing_host_os_read_omits_os_and_keeps_the_rest(agent_factory, bolt):
     bolt.mouse.fail_host_os_read = True
     c = agent_factory().client()

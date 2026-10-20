@@ -80,6 +80,7 @@ class SimulatedMouse:
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
         self.fail_host_os_read = False              # answer getHostOsVersion (fn7) with an error
         self.host_writes = []                       # (fn, host) of moveHost (5), deleteHost (6), setHostOsVersion (8)
+        self.host_os_silent = False                 # getHostOsVersion gets no reply at all
         self.host_os_echo = None                    # when set, getHostOsVersion echoes this host index instead
         self.host_caps = 0x03                       # 0x1815 capability flags: bit0 read names, bit1 write names
         self.name_reads, self.name_writes = [], []  # (host, offset) / (host, offset, name bytes) requests seen
@@ -273,11 +274,13 @@ class SimulatedMouse:
                 self.host_writes.append((fn, params[0]))
                 return 5
             if fn == 7:
-                # getHostOsVersion(host) -> [host, os type, major (BE u16), minor (BE u16)]
+                # getHostOsVersion(host) -> [host, os type, major u8, minor u16 BE, patch u16 BE]
+                if self.host_os_silent:
+                    return None
                 if self.fail_host_os_read:
                     return 5
                 echo = params[0] if self.host_os_echo is None else self.host_os_echo
-                return bytes([echo, self.hosts[params[0]]["os"], 0, 10, 0, 0])
+                return bytes([echo, self.hosts[params[0]]["os"], 10, 0, 0, 0, 0])
             if fn == 4:
                 if self.fail_host_name_write:
                     return 5
