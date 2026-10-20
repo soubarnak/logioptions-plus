@@ -20,6 +20,7 @@ MOUSE_INDEX = 1
 FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150, 0x1814, 0x1815, 0x1B04]
 F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
 F_REPROG = 0x1B04
+F_HIRES_WHEEL, F_THUMB_WHEEL = 0x2121, 0x2150
 
 # 0x1b04 reprogrammable controls: (cid, task id, flags1, position, group, group mask, flags2).
 # flags1 bits: 0x01 mouse, 0x10 reprogrammable, 0x20 divertable. Invented table.
@@ -332,6 +333,25 @@ class SimulatedBolt:
         """Queue an unsolicited feature event (software id 0) from the mouse."""
         head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
         self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def turn_wheel(self, delta, hires=True, index=MOUSE_INDEX):
+        """The scroll wheel turns by `delta` (signed; 1/multiplier notches when hi-res, else
+        notches). Only a wheel the agent diverted reports to software: the native HID path is
+        not modelled, so a native wheel emits nothing here. Returns whether a report went out."""
+        mouse = self.mice[index]
+        if not mouse.wheel_mode & 0x01:
+            return False
+        flags = 0x10 if hires else 0x00
+        self.emit_event(F_HIRES_WHEEL, 0, bytes([flags]) + struct.pack(">h", delta), index=index)
+        return True
+
+    def turn_thumb(self, rotation, index=MOUSE_INDEX):
+        """The thumb wheel turns by `rotation` units (signed); reported only while diverted."""
+        mouse = self.mice[index]
+        if mouse.thumb["mode"] != 1:
+            return False
+        self.emit_event(F_THUMB_WHEEL, 0, struct.pack(">hHB", rotation, 0, 2), index=index)
+        return True
 
     def press_button(self, cid, index=MOUSE_INDEX):
         """The user presses a button; a diverted one is reported to software."""

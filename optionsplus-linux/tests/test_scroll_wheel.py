@@ -78,7 +78,7 @@ def test_scroll_capabilities_come_from_the_features_the_mouse_has(client):
     sw = caps["scrollWheelCapabilities"]
     assert sw["highResolution"] is True
     assert sw["smartshift"] is True
-    assert sw["adjustableSpeed"] is False                # no wheel relay yet: UI greys speed out
+    assert sw["adjustableSpeed"] is True                 # the wheel relay can run (see test_wheel_relay.py)
     assert caps["hasBatteryStatus"] is True              # merged with the battery capabilities
 
 

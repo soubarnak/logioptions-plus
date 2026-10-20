@@ -3,6 +3,7 @@
 import struct
 
 EV_KEY = 1
+EV_REL = 2
 
 
 class FakeInput:
@@ -34,6 +35,10 @@ class FakeInput:
     def keys(self):
         """[(key code, 1 down / 0 up)] of the key events emitted."""
         return [(c, v) for t, c, v in self.events if t == EV_KEY]
+
+    def rels(self, code):
+        """The values of the relative events with `code` emitted so far."""
+        return [v for t, c, v in self.events if t == EV_REL and c == code]
 
     def close(self):
         pass

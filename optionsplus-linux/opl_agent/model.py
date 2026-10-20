@@ -16,6 +16,7 @@ import threading
 import time
 
 from . import hidpp, resources
+from .wheel_relay import NEUTRAL_SPEED
 
 log = logging.getLogger("opl.model")
 
@@ -76,6 +77,8 @@ class Device:
         self.thumb_feature = None    # feature index of 0x2150, once looked up
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.scroll_caps = {"smartshift": False, "highResolution": False}   # features present
+        self.wheel_features = {}     # feature index -> 0x2121 / 0x2150, whose events the wheel relay reads
+        self.relay = {"wheel": False, "thumb": False}   # speed can be applied: the wheel relay is available
         self.catalogue = resources.catalogue_entry(pid) or {}
 
     @property
@@ -134,14 +137,14 @@ class Device:
         if self.easy_switch:
             caps["hostInfos"] = True
         if self.thumb_wheel:
-            # speed 0: the thumb wheel speed control stays disabled until the relay exists
-            caps["mouseThumbWheelOverride"] = {"speed": 0}
+            # speed 0 keeps the thumb wheel speed control disabled: it is on only with the relay
+            caps["mouseThumbWheelOverride"] = {"speed": NEUTRAL_SPEED if self.relay["thumb"] else 0}
         return out
 
     def _scroll_capabilities(self):
         return {"highResolution": self.scroll_caps["highResolution"],
                 "smartshift": self.scroll_caps["smartshift"],
-                "adjustableSpeed": False}       # needs the wheel relay (not built yet)
+                "adjustableSpeed": self.relay["wheel"]}     # speed needs the wheel relay
 
     def _battery_fields(self):
         """Capability flags and level that make the UI show the battery indicator."""
@@ -238,7 +241,8 @@ class Registry:
         self._next_id = 0
         self.on_discovered = []    # callables(dev_id), run in scan() for each new device
         self.on_button_event = []  # callables(dev_id, function, params): a 0x1b04 event
-        self.on_thumb_event = []   # callables(dev_id, function, params): a 0x2150 event
+        self.on_thumb_event = []   # callables(dev_id, function, params): a 0x2150 event (the action engine)
+        self.on_wheel_event = []   # callables(dev_id, feature_id, function, params): a 0x2121 / 0x2150 event (the wheel relay)
         self.on_resumed = []       # callables(dev_id), after a wake or config-change event
         self.receivers = {}        # id -> Receiver
         self.absent_receivers = {}
@@ -386,6 +390,11 @@ class Registry:
                 "highResolution": hidpp.has_feature(fd, idx, hidpp.F_HIRES_WHEEL)}
         except Exception:
             pass
+        for fid in (hidpp.F_HIRES_WHEEL, hidpp.F_THUMB_WHEEL):
+            try:
+                d.wheel_features[hidpp.feature_index(fd, idx, fid)] = fid
+            except hidpp.HidppError:
+                pass
         return d
 
     def scan(self):
@@ -480,6 +489,15 @@ class Registry:
                         hook(dev_id, function, params)
                     except Exception:
                         log.exception("thumb wheel hook failed for %s", dev_id)
+                if feature_index not in d.wheel_features:
+                    continue
+            wheel = d.wheel_features.get(feature_index)
+            if wheel is not None:          # the thumb wheel's event reaches both hooks; its owner is decided there
+                for hook in list(self.on_wheel_event):
+                    try:
+                        hook(dev_id, wheel, function, params)
+                    except Exception:
+                        log.exception("wheel hook failed for %s", dev_id)
                 continue
             fid = d.event_features.get(feature_index)
             if fid is None:
@@ -747,12 +765,35 @@ class Registry:
         d = self.devices[dev_id]
         return hidpp.get_thumbwheel(self._fds[d.node.path], d.index)
 
-    def write_thumb(self, dev_id, invert, smooth):
-        """Blocking 0x2150 write (reporting mode untouched); returns the read-back status."""
+    def write_thumb(self, dev_id, invert, smooth, divert=None):
+        """Blocking 0x2150 write; returns the read-back status. The reporting mode stays as it
+        is unless `divert` says to send the wheel to software (True) or hand it back (False)."""
         d = self.devices[dev_id]
         fd = self._fds[d.node.path]
-        mode = hidpp.get_thumbwheel(fd, d.index)["mode"]
+        if divert is None:
+            mode = hidpp.get_thumbwheel(fd, d.index)["mode"]
+        else:
+            mode = hidpp.THUMB_DIVERTED if divert else hidpp.THUMB_NATIVE
         return hidpp.set_thumbwheel(fd, d.index, invert, smooth, mode)
+
+    def thumb_units_per_notch(self, dev_id):
+        """Blocking 0x2150 read: rotation units the diverted thumb wheel reports per notch."""
+        d = self.devices[dev_id]
+        return hidpp.get_thumbwheel_info(self._fds[d.node.path], d.index)["diverted"]
+
+    def wheel_units_per_notch(self, dev_id):
+        """Blocking 0x2121 read: hi-res steps the diverted wheel reports per notch."""
+        d = self.devices[dev_id]
+        return hidpp.get_wheel(self._fds[d.node.path], d.index)["multiplier"]
+
+    def divert_wheel(self, dev_id, divert, invert=None, hires=None):
+        """Blocking 0x2121 write: send the wheel's motion to software (True), hand it back (False)
+        or leave the target as it is (None);
+        `invert` and `hires` set the device's own direction and resolution (None: as they are).
+        Returns the wheel state read back."""
+        d = self.devices[dev_id]
+        return hidpp.set_wheel(self._fds[d.node.path], d.index, hires=hires, invert=invert,
+                               target=None if divert is None else bool(divert))
 
     def read_hosts(self, dev_id):
         """Blocking 0x1814 / 0x1815 read: {current, max_name, hosts}."""

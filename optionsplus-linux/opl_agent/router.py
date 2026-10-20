@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, swap, updates
+from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, swap, updates, wheel_relay
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -46,6 +46,9 @@ class Router:
         self.store = profiles.ProfileStore(_state_dir(state_dir))
         self.engine = input_engine.InputEngine(self.reg, self.store, input_factory,
                                              os.path.join(_state_dir(state_dir), "actions.toml"))
+        self.relay = wheel_relay.WheelRelay(self.reg, self.engine.sink,
+                                            enabled=os.environ.get("OPL_WHEEL_RELAY", "1") != "0")
+        self.relay.thumb_owned = self.engine.owns_thumb     # a thumb action card outranks thumb speed
         self.button_swap = swap.ButtonSwap(self.reg, _state_dir(state_dir), self.runner)
         self.reg.on_discovered.append(self.apply_stored)
         self.reg.on_resumed.append(self.apply_stored)
@@ -250,12 +253,12 @@ class Router:
             except Exception as exc:
                 log.debug("no live DPI for %s: %s", dev_id, exc)
             try:
-                live.setdefault(dev_id, {})["scroll"] = profiles.scroll_card(self.reg.read_scroll(dev_id))
+                live.setdefault(dev_id, {})["scroll"] = self._scroll_card(self.reg.devices[dev_id])
             except Exception as exc:
                 log.debug("no live scroll state for %s: %s", dev_id, exc)
             if self.reg.devices[dev_id].thumb_wheel:
                 try:
-                    live.setdefault(dev_id, {})["thumb"] = self.reg.read_thumb(dev_id)
+                    live.setdefault(dev_id, {})["thumb"] = self._thumb_state(self.reg.devices[dev_id])
                 except Exception as exc:
                     log.debug("no live thumb wheel status for %s: %s", dev_id, exc)
         return live
@@ -286,8 +289,30 @@ class Router:
                 return dev
         return None
 
+    def _scroll_card(self, dev):
+        """Blocking: the scroll wheel card for the mouse as it is now, with the relay's speed."""
+        ax = self.relay.axis(dev, wheel_relay.WHEEL)
+        speed = profiles.shown_speed(ax.speed, self.relay.available(dev, wheel_relay.WHEEL))
+        state = self.reg.read_scroll(dev.id)
+        if ax.diverted and state["wheel"] is not None:      # the device shows the diverted bits, not the user's
+            state["wheel"] = {**state["wheel"], "hires": ax.smooth, "invert": ax.invert}
+        return profiles.scroll_card(state, speed)
+
+    def _thumb_state(self, dev):
+        """Blocking: {invert, smooth, speed} of the thumb wheel as the user has it."""
+        ax = self.relay.axis(dev, wheel_relay.THUMB)
+        st = self.reg.read_thumb(dev.id)
+        if ax.diverted:
+            st = {**st, "invert": ax.invert, "smooth": ax.smooth}
+        return {**st, "speed": profiles.shown_speed(ax.speed, self.relay.available(dev, wheel_relay.THUMB))}
+
     def _apply_scroll(self, dev, req):
         """Blocking: write the requested wheel settings; returns the card read back."""
+        if self.relay.available(dev, wheel_relay.WHEEL):
+            self.relay.set_wheel(dev, speed=req["speed"], invert=req["invert"], smooth=req["hires"])
+            self.reg.write_scroll(dev.id, ratchet=req["ratchet"], threshold=req["threshold"])
+            return self._scroll_card(dev)
+        self.relay.release(dev, wheel_relay.WHEEL)         # no relay now: nothing may stay diverted
         state = self.reg.write_scroll(dev.id, ratchet=req["ratchet"], threshold=req["threshold"],
                                       hires=req["hires"], invert=req["invert"])
         return profiles.scroll_card(state)
@@ -302,6 +327,11 @@ class Router:
         """Blocking: write thumb wheel direction/smooth from `card` over what the
         device reports now; returns the card read back (speed is not adjustable)."""
         invert, smooth = profiles.thumb_wheel_fields(card)
+        if self.relay.available(dev, wheel_relay.THUMB):
+            self.relay.set_thumb(dev, speed=profiles.thumb_speed(card), invert=invert, smooth=smooth)
+            st = self._thumb_state(dev)
+            return profiles.thumb_wheel_card(st["invert"], st["smooth"], st["speed"])
+        self.relay.release(dev, wheel_relay.THUMB)
         cur = self.reg.read_thumb(dev.id)
         st = self.reg.write_thumb(dev.id, cur["invert"] if invert is None else invert,
                                   cur["smooth"] if smooth is None else smooth)
@@ -312,6 +342,7 @@ class Router:
         dev = self.reg.devices.get(dev_id)
         if dev is None:
             return
+        self.relay.probe(dev)               # which speed controls the device offers, before it is listed
         card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix))
         value = profiles.pointer_value(card) if card else None
         if value is not None:
@@ -326,16 +357,17 @@ class Router:
                 self._apply_scroll(dev, req)
             except Exception as exc:
                 log.warning("reapplying scroll wheel settings failed: %s", exc)
+        try:
+            self.engine.sync(dev)
+        except Exception as exc:
+            log.warning("reapplying button diversions failed: %s", exc)
         tcard = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix)) if dev and dev.thumb_wheel else None
         if tcard is not None:
             try:
                 self._apply_thumb(dev, tcard)
             except Exception as exc:
                 log.warning("reapplying thumb wheel settings failed: %s", exc)
-        try:
-            self.engine.sync(dev)
-        except Exception as exc:
-            log.warning("reapplying button diversions failed: %s", exc)
+        self._settle_thumb(dev)
         try:
             self.button_swap.apply_stored(dev)
         except Exception as exc:
@@ -425,7 +457,37 @@ class Router:
             self.engine.release(dev, cid)
         else:
             self.engine.assign(dev, cid, card)
+        if cid == profiles.THUMB_KEY:
+            self._settle_thumb(dev)
         self.store.set(slot_id, card)
+
+    def _settle_thumb(self, dev):
+        """Blocking: the thumb wheel has one owner. A bound thumb action card gives it to the
+        engine and the relay stops scaling it; with no card the relay takes it back when its
+        speed is not neutral."""
+        if not dev.thumb_wheel:
+            return
+        if self.engine.owns_thumb(dev.id):
+            self.relay.yield_thumb(dev)
+            return
+        try:
+            self.relay.resume_thumb(dev)
+        except Exception as exc:
+            log.warning("handing the thumb wheel back to the speed relay failed: %s", exc)
+
+    def set_wheel_relay(self, enabled):
+        """Blocking: turn the wheel relay on or off. Off hands every diverted wheel back to the
+        mouse and takes the speed controls away; on diverts the wheels the store asks for."""
+        self.relay.enabled = bool(enabled)
+        for dev in list(self.reg.devices.values()):
+            if not enabled:
+                try:
+                    self.relay.release(dev)
+                except Exception as exc:
+                    log.warning("handing the wheels back failed: %s", exc)
+                self.relay.probe(dev)
+            else:
+                self.apply_stored(dev.id)
 
     async def _profiles_reset(self, info):
         loop = asyncio.get_event_loop()
@@ -446,6 +508,10 @@ class Router:
 
     def _apply_defaults(self, dev):
         self.engine.sync(dev)               # the store holds no button choices now: hand them all back
+        try:
+            self.relay.release(dev, reset=True)
+        except Exception as exc:
+            log.warning("handing the wheels back failed: %s", exc)
         if dev.thumb_wheel:
             self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)

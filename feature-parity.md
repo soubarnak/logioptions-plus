@@ -315,6 +315,12 @@ a remap do something.
     string the Windows agent returns for an unsupported card; else `NOT_SUPPORTED`).
 - **Scroll relay** (optional, 5.2 depends on it for wheel speed/direction): divert
   `0x2121` hi-res wheel events and re-emit `REL_WHEEL_HI_RES` with scaling.
+  Built (ticket #25, `opl_agent/wheel_relay.py`): a wheel whose speed is not neutral is diverted
+  (`0x2121` target bit, `0x2150` reporting mode 1) and re-emitted as `REL_(H)WHEEL_HI_RES` plus
+  whole-notch `REL_(H)WHEEL`; direction is applied in software while diverted. Speed controls are
+  reported on only when the virtual device can be created; `OPL_WHEEL_RELAY=0` turns the relay off.
+  The speed range (assumed 0..1, 0.5 = unchanged, 1 = 4x) and the thumb scale (`divertedResolution`
+  units per notch) still need confirming on hardware.
 - **Swap left/right** (finding 9): implement as a device-level remap through `0x1b04`
   (`remap` CID `0x50` ↔ `0x51`) when the device reports `remap` capability; otherwise fall
   back to `xinput set-button-map` on X11 and document the Wayland limitation. Persist in

@@ -168,6 +168,11 @@ class InputEngine:
             except Exception:
                 log.debug("closing the virtual device failed", exc_info=True)
 
+    def owns_thumb(self, dev_id):
+        """Whether a thumb action card is bound on `dev_id`: the engine then owns the thumb wheel."""
+        with self._lock:
+            return profiles.THUMB_KEY in self._active.get(dev_id, {})
+
     # ---- assignments -----------------------------------------------------------
     def _divertable(self, dev, cid):
         try:

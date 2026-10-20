@@ -197,6 +197,7 @@ class Agent:
             await self._srv.wait_closed()
         for c in list(self.server.connections):
             c.writer.close()
+        self.router.relay.close()           # hand the wheels back while the transport is still open
         self.reg.close()
         self.router.engine.close()
 

@@ -185,11 +185,15 @@ def test_failed_undivert_is_a_failure_and_the_button_keeps_working(client, bolt,
     assert wait_for(lambda: len(uinput.keys()) >= 4)
 
 
-def test_no_virtual_device_means_no_diversion(client, bolt, uinput):
-    uinput.fail_create = True
-    assert assign(client, BACK, COPY)["result"]["code"] == "FAULTED"
-    assert bolt.mouse.diverted == set()
-    assert assigned_card_id(client, BACK) == "card-back"
+def test_no_virtual_device_means_no_diversion(agent_factory, bolt, uinput):
+    uinput.fail_create = True               # the device is created when the agent starts (wheel speed probes it)
+    client = agent_factory().client()
+    try:
+        assert assign(client, BACK, COPY)["result"]["code"] == "FAULTED"
+        assert bolt.mouse.diverted == set()
+        assert assigned_card_id(client, BACK) == "card-back"
+    finally:
+        client.close()
 
 
 def test_a_failed_injection_does_not_stop_later_presses(client, bolt, uinput):
