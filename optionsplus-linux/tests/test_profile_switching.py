@@ -8,8 +8,8 @@ import time
 import pytest
 
 from tests.fakes.hidpp_device import F_REPROG, F_WAKE
-from tests.test_app_profiles import (FIREFOX, RELOAD, RELOAD_KEYS, TERMINAL, assign_to, press, settled,
-                                     windows)  # noqa: F401  (windows is a fixture)
+from tests.test_app_profiles import (FIREFOX, RELOAD, RELOAD_KEYS, TERMINAL, assign_to, install_apps, press,
+                                     settled, windows)  # noqa: F401  (windows is a fixture)
 from tests.test_button_remap import BACK, COPY, assign
 from tests.test_gestures import (ACTIONS, GESTURE, KEY_OF, NOTCH, assign_gesture, assign_thumb, gesture_card,
                                  keys_down, settle, swipe)
@@ -17,7 +17,8 @@ from tests.test_wake_reapply import wait_for
 
 
 @pytest.fixture
-def tracked(agent_factory, windows):
+def tracked(agent_factory, windows, workdir):
+    install_apps(workdir)                   # a profile can only be made for an installed application
     return agent_factory(window_source=windows, focus_seconds=0.02, focus_retry=(0.05, 0.2))
 
 
@@ -79,7 +80,7 @@ def test_a_button_held_while_its_card_goes_away_does_not_swallow_the_next_press(
     assert wait_for(lambda: uinput.keys() == RELOAD_KEYS)
     windows.focus(("x", "XTerm"))                       # Back is the mouse's again, with the release unseen
     assert wait_for(lambda: bolt.mouse.diverted == set())
-    assert BACK not in tracked.agent.router.engine._held.get("dev00000000", set())
+    assert wait_for(lambda: BACK not in tracked.agent.router.engine._held.get("dev00000000", set()))
     bolt.mouse.held.clear()
     windows.focus(("Navigator", "firefox"))
     assert wait_for(lambda: bolt.mouse.diverted == {BACK})

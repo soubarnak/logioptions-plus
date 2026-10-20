@@ -695,7 +695,7 @@ class Router:
             await self._broadcast_profiles()
         return "SUCCESS", info, ""
 
-    def _reset_app(self, app, devices, unlink):
+    def _reset_app(self, app, devices, unlink=None):
         """Blocking: forget the application's buttons for `devices` (and the UI's id `unlink`), and
         change the mouse when that application's profile is in force."""
         with self._switch_lock:
