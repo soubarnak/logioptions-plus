@@ -236,6 +236,8 @@ class ProfileStore:
             log.warning("ignoring unreadable %s: %s", self.path, exc)
 
     def _save(self):
+        """Write profiles.json; raises OSError (after putting the in-memory state back as the
+        caller found it) so a choice that could not be kept is never reported as stored."""
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
@@ -244,14 +246,26 @@ class ProfileStore:
             os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("cannot save profiles: %s", exc)
+            raise
+
+    def _change(self, mutate):
+        """Apply `mutate()` to the cards, save, and undo it when saving fails."""
+        before = copy.deepcopy((self.cards, self.apps))
+        mutate()
+        try:
+            self._save()
+        except OSError:
+            self.cards, self.apps = before
+            raise
 
     def get(self, slot_id):
         return self.cards.get(slot_id)
 
     def set(self, slot_id, card, app_id=None):
         """Keep `card` for a slot, in the default profile or in application `app_id`'s."""
-        (self.apps.setdefault(app_id, {}) if app_id else self.cards)[slot_id] = copy.deepcopy(card)
-        self._save()
+        def put():
+            (self.apps.setdefault(app_id, {}) if app_id else self.cards)[slot_id] = copy.deepcopy(card)
+        self._change(put)
 
     def app_cards(self, app_id):
         return self.apps.get(app_id) or {}
@@ -264,25 +278,25 @@ class ProfileStore:
     def remove_app_buttons(self, app_id, predicate):
         """Forget the application's cards for the slots `predicate` accepts; an application
         left with none has no profile any more."""
-        cards = self.apps.get(app_id) or {}
-        gone = [s for s in cards if predicate(s)]
-        for s in gone:
-            del cards[s]
-        if not cards:
-            self.apps.pop(app_id, None)
+        gone = [s for s in self.apps.get(app_id) or {} if predicate(s)]
+
+        def drop():
+            cards = self.apps.get(app_id) or {}
+            for s in gone:
+                del cards[s]
+            if not cards:
+                self.apps.pop(app_id, None)
         if gone:
-            self._save()
+            self._change(drop)
 
     def remove(self, slot_id):
-        if self.cards.pop(slot_id, None) is not None:
-            self._save()
+        if slot_id in self.cards:
+            self._change(lambda: self.cards.pop(slot_id))
 
     def remove_matching(self, predicate):
         gone = [s for s in self.cards if predicate(s)]
-        for s in gone:
-            del self.cards[s]
         if gone:
-            self._save()
+            self._change(lambda: [self.cards.pop(s) for s in gone])
 
 
 def profiles(devices, store=None, live=None, active_app=None):

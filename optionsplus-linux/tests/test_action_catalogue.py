@@ -1,6 +1,7 @@
 """Action picker catalogue (ticket #20): served from the fetched depot through the Linux filter.
 
 Seam: the agent socket, against the synthetic depot of tests/fakes/depot.py."""
+import json
 import os
 import shutil
 
@@ -69,15 +70,72 @@ def test_recommended_actions_are_served_and_filtered(client):
     assert ids(slot["cards"]) == ["card_play"]
 
 
-def test_predefined_macros_drop_hidden_cards_and_emptied_macros(client):
+def test_a_macro_with_any_hidden_step_is_dropped_whole(client):
+    # macros_preset_test holds a hidden step: half a macro would do the wrong thing
     infos = client.call("GET", "/macros/predefined")["payload"]["macroInfos"]
-    assert [i["id"] for i in infos] == ["macros_preset_test"]
+    assert [i["id"] for i in infos] == ["macros_preset_ok"]
     assert ids(infos[0]["cards"]) == ["card_play", "card_snip"]
 
 
-def test_macro_assignments_are_served(client):
+def test_macro_assignments_only_name_macros_that_are_served(client):
     vals = client.call("GET", "/macro_assignments/all")["payload"]["macroAssignmentVals"]
-    assert [(v["macroId"], v["slotId"]) for v in vals] == [("macros_preset_test", "046d_4242_c82")]
+    assert [(v["macroId"], v["slotId"]) for v in vals] == [("macros_preset_ok", "046d_4242_c83")]
+
+
+def test_a_hidden_step_nested_at_any_depth_drops_the_macro(agent_factory, workdir):
+    ok, bad = fx.keystroke_card("ok", "N"), fx.keystroke_card("card_cortana", "N")
+    step = fx.keystroke_card("step", "N", nestedCards={"d": ok, "x": bad}, nestedCardsOrder=["d", "x"])
+    path = os.path.join(workdir, "depots", "logioptionsplus", "data", "macros", "more_win.json")
+    with open(path, "w") as fh:
+        json.dump({"macroInfos": [{"id": "macros_nested", "name": "N", "cards": [step]}]}, fh)
+    c = agent_factory().client()
+    try:
+        infos = c.call("GET", "/macros/predefined")["payload"]["macroInfos"]
+        assert "macros_nested" not in [i["id"] for i in infos]
+    finally:
+        c.close()
+
+
+def test_macros_named_for_windows_only_features_are_hidden(agent_factory, workdir):
+    path = os.path.join(workdir, "depots", "logioptionsplus", "data", "macros", "more_win.json")
+    with open(path, "w") as fh:
+        json.dump({"macroInfos": [{"id": "macros_preset_browser_copilot", "name": "N",
+                                   "cards": [fx.keystroke_card("plain", "N")]}]}, fh)
+    c = agent_factory().client()
+    try:
+        infos = c.call("GET", "/macros/predefined")["payload"]["macroInfos"]
+        assert "macros_preset_browser_copilot" not in [i["id"] for i in infos]
+    finally:
+        c.close()
+
+
+def card_with(macro, cid="card_x"):
+    return fx.keystroke_card(cid, "N", macro=macro)
+
+
+def test_windows_only_cards_are_hidden_by_what_they_launch_not_only_by_id():
+    from opl_agent import actions
+    hidden = [
+        card_with({"type": "APP", "app": {"executablePath": "C:\\Windows\\explorer.exe"}}),
+        card_with({"type": "APP", "app": {"executablePath": "%windir%\\system32\\calc"}}),
+        card_with({"type": "OPEN_FILE_FOLDER", "openFileFolder": {"appName": "Microsoft OneDrive"}}),
+        fx.keystroke_card("win_action_center", "N"),
+        fx.keystroke_card("win_dictation", "N"),
+        fx.keystroke_card("win_settings", "N"),
+        fx.keystroke_card("card_global_presets_this_pc", "N"),
+        fx.keystroke_card("presets_search", "N"),
+    ]
+    for card in hidden:
+        assert not actions.is_linux_card(card), card["id"]
+    assert actions.is_linux_card(card_with({"type": "OPEN_WEB_PAGE", "openWebPage": {"url": "https://example.org/a.exe.html"}}))
+
+
+def test_icon_paths_cannot_leave_the_depot(client, workdir):
+    from opl_agent import actions
+    assert actions._icon_dir("pipeline://system_actions/") != ""
+    for uri in ("pipeline://system_actions/../..", "pipeline://system_actions/../logioptionsplus/data",
+                "pipeline://../depots/", "pipeline://logioptionsplus/../../../"):
+        assert actions._icon_dir(uri) == "", uri
 
 
 def test_default_assignments_merge_control_and_slot_defaults(client):

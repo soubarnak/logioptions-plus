@@ -285,6 +285,12 @@ a remap do something.
 - Icons: cards reference `pipeline://system_actions/<icon>`. Find the depot that holds
   `system_actions` (look in `offline.json` for a depot named `system_actions`; add it to
   `payload/depots.json`) and resolve it with the existing `pipeline://` resolver.
+  **User action pending:** the `system_actions` depot is not pinned yet. Its URL, size and
+  SHA-256 must be read by the maintainer from the offline installer's `offline.json` and added
+  to `optionsplus-linux/data/depots.json` (then checked with `tools/verify-depot-urls.py`).
+  Until then the action cards show without icons; nothing else depends on it.
+- Macros are served whole or not at all: a predefined macro with any hidden or Windows-only
+  step (at any depth) is dropped, with its assignments. Icon locations never leave their depot.
 - Search in the picker is client-side once the lists are non-empty.
 
 ### 5.2 Engine

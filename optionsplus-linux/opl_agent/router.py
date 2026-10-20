@@ -422,10 +422,10 @@ class Router:
                     try:
                         await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
                     except input_engine.Unsupported as exc:
-                        return "NOT_SUPPORTED", None, str(exc)
+                        return await self._profiles_failed(handled, "NOT_SUPPORTED", str(exc))
                     except Exception as exc:
                         log.warning("button write failed: %s", exc)
-                        return "FAULTED", None, "device write failed: %s" % exc
+                        return await self._profiles_failed(handled, "FAULTED", "device write failed: %s" % exc)
                     asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
                     handled = payload
                     continue
@@ -434,16 +434,26 @@ class Router:
                 card = await loop.run_in_executor(None, apply_fn, dev, arg)
             except Exception as exc:
                 log.warning("%s write failed: %s", what, exc)
-                return "FAULTED", None, "device write failed: %s" % exc
+                return await self._profiles_failed(handled, "FAULTED", "device write failed: %s" % exc)
             if card is None:
                 continue
-            self.store.set(asg["slotId"], card)
+            try:
+                self.store.set(asg["slotId"], card)
+            except OSError as exc:
+                return await self._profiles_failed(handled, "FAULTED", "cannot save the setting: %s" % exc)
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
         if handled is None:
             return None
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
+
+    async def _profiles_failed(self, stored, code, what):
+        """Reply to a batch that stopped part way: what the earlier operations stored stays, so
+        the UI is told about it rather than left showing the old profiles."""
+        if stored is not None:
+            await self._broadcast_profiles()
+        return code, None, what
 
     def _button_target(self, slot_id):
         """(device, control key) for a button or thumb wheel action slot of a connected device, else None."""
