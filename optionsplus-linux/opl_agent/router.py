@@ -979,8 +979,12 @@ class Router:
             if parts[1] not in reg.devices:
                 return "INVALID_DEVICE", None, "unknown device id"
             if self.server is not None:
-                self.server.broadcast("/dfu/update/available",
-                                      {"@type": TYPE + "google.protobuf.BoolValue", "value": False})
+                # the UI ends "Checking for updates..." only on a Device.Info that names the device
+                dev = reg.devices[parts[1]]
+                self.server.broadcast("/dfu/update/available", {
+                    "@type": TYPE + "logi.protocol.devices.Device.Info",
+                    "id": dev.id, "state": dev.info()["state"],
+                    "fwUpdate": {"requireFwUpdate": False}})
             return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info"}, ""
 
         # /battery/<id>/state

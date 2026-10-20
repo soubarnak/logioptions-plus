@@ -103,6 +103,9 @@ def test_device_info_route_reports_battery_and_firmware(client):
     assert reply["result"]["code"] == "SUCCESS"
     assert info["id"] == "dev00000000"
     assert info["firmwareVersion"] == "RBM 12.34.B0567"
+    # the SETTINGS page reads the version from the DEVIO interface
+    (iface,) = info["activeInterfaces"]
+    assert iface["type"] == "DEVIO" and iface["firmwareVersion"] == "RBM 12.34.B0567"
     assert info["batteryStatus"] == {"stateOfCharge": 73, "chargingStatus": "DISCHARGING"}
 
 
@@ -328,7 +331,11 @@ def test_dfu_check_answers_success_and_pushes_no_update(client, agent):
         assert not reply["payload"].get("requireFwUpdate")
         push = other.recv()
         assert push["path"] == "/dfu/update/available"
-        assert push["payload"]["value"] is False
+        # a Device.Info naming the device, the shape that clears the UI's "checking" state
+        assert push["payload"]["@type"] == TYPE + "logi.protocol.devices.Device.Info"
+        assert push["payload"]["id"] == device_id(client)
+        assert push["payload"]["state"] == "ACTIVE"
+        assert push["payload"]["fwUpdate"]["requireFwUpdate"] is False
     finally:
         other.close()
 

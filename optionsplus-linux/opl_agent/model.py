@@ -138,6 +138,11 @@ class Device:
             "firstConnectedTimestamp": str(self.first_connected),
             **self._battery_fields(),
         }
+        if self.connected and out["firmwareVersion"]:
+            # SETTINGS reads the version from the DEVIO interface, not the top-level field
+            out["activeInterfaces"] = [{"type": "DEVIO", "id": self.id, "pid": self.pid,
+                                        "firmwareVersion": out["firmwareVersion"],
+                                        "connectionType": "WIRELESS"}]
         caps = out.setdefault("capabilities", {})
         caps["scrollWheelCapabilities"] = self._scroll_capabilities()
         if self.easy_switch:
