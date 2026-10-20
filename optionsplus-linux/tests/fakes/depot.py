@@ -26,8 +26,8 @@ def keystroke_card(cid, name, **extra):
     return card
 
 
-def system_card(cid, name, action):
-    return keystroke_card(cid, name, macro={"type": "SYSTEM", "system": {"action": action}})
+def system_card(cid, name, action, **extra):
+    return keystroke_card(cid, name, macro={"type": "SYSTEM", "system": {"action": action}}, **extra)
 
 
 # Invented catalogue: card_task_view, card_quick_launch and card_cortana model entries Linux cannot run.
@@ -36,7 +36,8 @@ def system_card(cid, name, action):
 def catalogue_cards():
     return [
         keystroke_card("card_play", "NAME_PLAY"),
-        system_card("card_next_desktop", "NAME_NEXT_DESKTOP", "SWITCH_BETWEEN_DESKTOPS_RIGHT"),
+        system_card("card_next_desktop", "NAME_NEXT_DESKTOP", "SWITCH_BETWEEN_DESKTOPS_RIGHT",
+                    tags=["PRESET_TAG_DESKTOP"]),
         system_card("card_snip", "NAME_SNIP_WINDOWS", "WINDOWS_SCREEN_CAPTURE"),
         system_card("card_task_view", "NAME_TASK_VIEW", "TASK_VIEW"),
         keystroke_card("card_quick_launch", "NAME_QUICK",
@@ -45,20 +46,53 @@ def catalogue_cards():
     ]
 
 
+ENCRYPTED_WRAPPER = b"\x21\x05\x21\x20\x82\x00\x00\x00" + bytes(range(200, 256))
+DEFAULT_APP = "420fd454-0c36-499d-bde4-146823b16147"
+OTHER_APP = "app_test"
+KEY = "PRESET_TAG_KEY_OR_BUTTON"
+DESKTOP = "PRESET_TAG_DESKTOP"
+
+
+def info_table(per_app):
+    """Logitech's rap table shape: {"data": {app: {"infoList": [{"id", "infos"}]}}}."""
+    return json.dumps({"data": {app: {"infoList": [{"id": i, "infos": infos} for i, infos in rows]}
+                                for app, rows in per_app.items()}})
+
+
+def add_rap_tables(data):
+    """Tag and recommendation tables, shaped like the real ones. c195 has a recommendation row
+    but no tag row (the control tag row applies, as for the real gesture button); c86 has a tag
+    row but no recommendation row (the control row applies). The other-device rows and the mac
+    file must never reach this device's picker."""
+    rap = os.path.join(data, "rap")
+    _write(os.path.join(rap, "available_card_tags_slot.json"), info_table({
+        DEFAULT_APP: [("046d_4242_c83", [KEY]), ("046d_4242_c86", [DESKTOP]), ("other-9999_c83", [KEY])],
+        OTHER_APP: [("046d_4242_c83", [DESKTOP])]}))
+    _write(os.path.join(rap, "available_card_tags_control.json"), info_table({
+        DEFAULT_APP: [("83", [KEY, DESKTOP]), ("195", [DESKTOP])]}))
+    _write(os.path.join(rap, "recommendations_slot_win.json"), info_table({
+        DEFAULT_APP: [("046d_4242_c83", ["card_play", "card_task_view", "card_not_in_presets"]),
+                      ("046d_4242_c195", ["card_snip"]),
+                      ("other-9999_c83", ["card_play"])]}))
+    _write(os.path.join(rap, "recommendations_control_win.json"), info_table({
+        DEFAULT_APP: [("195", ["card_next_desktop"]), ("86", ["card_next_desktop"])]}))
+    _write(os.path.join(rap, "recommendations_slot_osx.json"), info_table({
+        DEFAULT_APP: [("046d_4242_c83", ["card_mac_only"])]}))
+
+
 def add_catalogue(main):
     """Card presets, recommended actions, defaults and macros, with Windows-only entries."""
     data = os.path.join(main, "data")
     cards = catalogue_cards()
     _write(os.path.join(data, "card_presets", "card_presets_win.json"),
            json.dumps({"cards": cards[:4]}))
-    _write(os.path.join(data, "card_presets", "card_presets_001.json"),
+    # Logitech's card_presets_001.json is an encrypted wrapper, not JSON: it must be skipped quietly.
+    _write(os.path.join(data, "card_presets", "card_presets_001.json"), ENCRYPTED_WRAPPER)
+    _write(os.path.join(data, "card_presets", "card_presets_002.json"),
            json.dumps({"cards": cards[4:] + [cards[0]]}))
     _write(os.path.join(data, "card_presets", "card_presets_osx.json"),
            json.dumps({"cards": [keystroke_card("card_mac_only", "NAME_PLAY")]}))
-    _write(os.path.join(data, "rap", "rac_win.json"), json.dumps({
-        "recommendedCards": {"racList": [{"appId": "app_test", "slotCardList": [
-            {"slotId": "046d_4242_c83", "cards": [cards[0], cards[3]]}]}]},
-        "availableCards": {"racList": []}}))
+    add_rap_tables(data)
     _write(os.path.join(data, "defaults", "defaults_control_win.json"), json.dumps({"assignments": [
         {"slotId": "046d_4242_c83", "cardId": "card-back"}]}))
     _write(os.path.join(data, "defaults", "defaults_slot_win.json"), json.dumps({"assignments": [

@@ -62,12 +62,62 @@ def test_icon_uri_is_blank_when_system_actions_is_not_installed(agent_factory, w
         c.close()
 
 
-def test_recommended_actions_are_served_and_filtered(client):
-    payload = client.call("GET", "/rac", {"deviceId": "dev00000000"})["payload"]
-    assert payload["@type"] == TYPE + "logi.protocol.rap.RACContainer"
-    slot = payload["recommendedCards"]["racList"][0]["slotCardList"][0]
-    assert slot["slotId"] == "046d_4242_c83"
-    assert ids(slot["cards"]) == ["card_play"]
+def rac(client):
+    reply = client.call("GET", "/rac", {"deviceId": "dev00000000"})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert reply["payload"]["@type"] == TYPE + "logi.protocol.rap.RACContainer"
+    return reply["payload"]
+
+
+def slots(container, key, app=fx.DEFAULT_APP):
+    """{slotId: [card ids]} of one app in availableCards or recommendedCards."""
+    racs = {r["appId"]: r for r in container[key]["racList"]}
+    return {s["slotId"]: ids(s["cards"]) for s in racs[app]["slotCardList"]} if app in racs else None
+
+
+def test_available_actions_are_composed_from_the_slot_tags_and_hide_windows_only_cards(client):
+    # c83 takes KEY cards (task_view is hidden on Linux); c86 takes DESKTOP cards; the rows of
+    # another device and the cards of a mac-only file are not offered
+    got = slots(rac(client), "availableCards")
+    assert got["046d_4242_c83"] == ["card_play", "card_snip"]
+    assert got["046d_4242_c86"] == ["card_next_desktop"]
+    assert not any(s.startswith("other-") for s in got)
+
+
+def test_a_slot_without_a_tag_row_uses_the_control_tag_row(client):
+    assert slots(rac(client), "availableCards")["046d_4242_c195"] == ["card_next_desktop"]
+
+
+def test_default_app_comes_first_and_app_rows_follow(client):
+    racs = rac(client)["availableCards"]["racList"]
+    assert [r["appId"] for r in racs] == [fx.DEFAULT_APP, fx.OTHER_APP]
+    assert slots(rac(client), "availableCards", fx.OTHER_APP) == {"046d_4242_c83": ["card_next_desktop"]}
+
+
+def test_recommended_actions_resolve_to_served_cards(client):
+    # unknown ids and hidden cards are dropped; c86 has no slot row so the control row applies
+    got = slots(rac(client), "recommendedCards")
+    assert got["046d_4242_c83"] == ["card_play"]
+    assert got["046d_4242_c195"] == ["card_snip"]
+    assert got["046d_4242_c86"] == ["card_next_desktop"]
+
+
+def test_served_actions_carry_the_resolved_icon_location(client, workdir):
+    card = rac(client)["availableCards"]["racList"][0]["slotCardList"][0]["cards"][0]
+    assert card["icons"]["uri"] == "file://" + os.path.join(workdir, "depots", "system_actions") + "/"
+
+
+def test_a_device_without_rows_gets_no_slots_not_an_error(client):
+    from opl_agent import actions
+    assert actions.rac({"slotPrefix": "nothing-0000"})["availableCards"] == {"racList": []}
+
+
+def test_the_encrypted_preset_file_is_skipped_without_a_warning(client, caplog):
+    from opl_agent import actions, resources
+    path = os.path.join(resources.DATA_DIR, "card_presets", "card_presets_001.json")
+    with caplog.at_level("WARNING"):
+        assert actions._read(path) is None
+    assert caplog.records == []
 
 
 def test_a_macro_with_any_hidden_step_is_dropped_whole(client):
@@ -166,7 +216,7 @@ def test_catalogue_is_empty_not_an_error_when_the_depot_has_none(agent_factory, 
     c = agent_factory().client()
     try:
         assert presets(c) == []
-        assert c.call("GET", "/rac", {"deviceId": "x"})["result"]["code"] == "SUCCESS"
+        assert rac(c)["availableCards"] == {"racList": []}
         assert c.call("GET", "/unified_profiles/assignment/default")["payload"]["assignments"] == []
     finally:
         c.close()
