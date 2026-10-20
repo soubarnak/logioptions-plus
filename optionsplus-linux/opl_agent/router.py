@@ -23,16 +23,18 @@ log = logging.getLogger("opl.router")
 TYPE = responses.TYPE
 
 
-def _state_dir():
+def _state_dir(explicit=None):
+    if explicit:
+        return explicit
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     return os.environ.get("OPL_STATE_DIR") or os.path.join(base, "optionsplus-linux")
 
 
 class Router:
-    def __init__(self, registry):
+    def __init__(self, registry, state_dir=None):
         self.reg = registry
         self.server = None          # set by main; used for change broadcasts
-        self.config_path = os.path.join(_state_dir(), "configuration.json")
+        self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
         try:
             with open(self.config_path) as fh:

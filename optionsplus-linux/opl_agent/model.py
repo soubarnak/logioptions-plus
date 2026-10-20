@@ -123,7 +123,8 @@ class Device:
 class Registry:
     """Owns open HID++ transports and the set of live devices."""
 
-    def __init__(self):
+    def __init__(self, transport=None):
+        self.transport = transport or hidpp.HIDRAW   # node discovery + open
         self.devices = {}          # id -> Device
         self._fds = {}             # node.path -> fd
         self._receivers = []
@@ -131,7 +132,7 @@ class Registry:
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
-            fd = hidpp.open_node(node.path)
+            fd = self.transport.open(node.path)
             self._fds[node.path] = fd
         return fd
 
@@ -140,7 +141,7 @@ class Registry:
         self.devices.clear()
         n = 0
         try:
-            nodes = hidpp.list_receivers_and_devices()
+            nodes = self.transport.list_nodes()
         except Exception:
             log.exception("HID++ discovery failed")
             return
