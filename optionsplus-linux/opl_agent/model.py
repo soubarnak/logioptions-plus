@@ -63,6 +63,7 @@ class Device:
         self.first_connected = int(time.time())
         self.serial = ""
         self.fw = ""
+        self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.catalogue = resources.catalogue_entry(pid) or {}
 
@@ -115,7 +116,23 @@ class Device:
             "resourcesAvailable": resources.depot_installed(self.depot),
             "fetchResource": False,
             "firstConnectedTimestamp": str(self.first_connected),
+            **self._battery_fields(),
         }
+
+    def _battery_fields(self):
+        """Capability flags and level that make the UI show the battery indicator."""
+        bc = self.battery_caps
+        if bc is None and not self.battery_cache:
+            return {}
+        out = {"capabilities": {"hasBatteryStatus": True}}
+        if bc is not None:
+            out["capabilities"].update({
+                "unifiedBattery": True,
+                "battery": {"rechargeable": bc["rechargeable"], "stateOfCharge": bc["soc"],
+                            "showBatteryStatus": False, "supportedLevels": bc["levels"]}})
+        if self.battery_cache and self.battery_cache.get("percent") is not None:
+            out["batteryDischargeLevel"] = int(self.battery_cache["percent"])
+        return out
 
     def permanent(self):
         """logi.protocol.devices.DevicePermanentData for /devices/ever_connected/list."""
@@ -189,6 +206,10 @@ class Registry:
                 except Exception:
                     pass
                 self.devices[dev_id] = d
+                try:
+                    d.battery_caps = hidpp.get_battery_caps(fd, idx)
+                except Exception:
+                    pass
                 try:
                     self.refresh_battery(dev_id)
                 except Exception:

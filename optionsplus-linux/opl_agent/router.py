@@ -82,6 +82,13 @@ class Router:
                 info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
                 out.append(("/devices/state/changed", info))
             return out
+        if path == "/battery/state/changed":
+            return [(path, self.reg.battery(i)[0]) for i in self.reg.devices
+                    if self.reg.devices[i].battery_cache]
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "battery" and parts[2:] == ["state", "changed"]:
+            if parts[1] in self.reg.devices and self.reg.devices[parts[1]].battery_cache:
+                return [(path, self.reg.battery(parts[1])[0])]
         return []
 
     async def handle(self, verb, path, payload):

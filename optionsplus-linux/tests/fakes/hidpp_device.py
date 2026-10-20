@@ -26,6 +26,7 @@ class SimulatedMouse:
     def __init__(self):
         self.battery_percent = 73
         self.charging = False
+        self.battery_caps = (0x0F, 0x03)           # levels crit/low/good/full; rechargeable + SoC
         self.dpi = 1000
         self.default_dpi = 1000
         self.smartshift = {"mode": 2, "threshold": 30, "torque": 0}
@@ -64,7 +65,7 @@ class SimulatedMouse:
                 return bytes([3])                     # mouse
         elif fid == 0x1004:
             if fn == 0:
-                return bytes([0x0F, 0x02])            # state of charge reported
+                return bytes(self.battery_caps)
             if fn == 1:
                 return bytes([self.battery_percent, 4, 1 if self.charging else 0, 0])
         elif fid == 0x2201:
