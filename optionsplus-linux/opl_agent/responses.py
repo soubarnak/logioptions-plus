@@ -75,7 +75,6 @@ BOOT = {
     "/device_recommendation_enabled": {"@type": TYPE + "logi.protocol.util.BoolValue", "value": False},
     "/accounts/cn_idaas_status": {"@type": TYPE + "logi.protocol.accounts.CnIdaasStatus"},
     "/accounts/email_subscription/is_opted_in": {"@type": TYPE + "google.protobuf.BoolValue", "value": False},
-    "/devices/support/info": {"@type": TYPE + "logi.protocol.devices_support.Device.Support"},
     "/webcams/in_configuration_devices": {"@type": TYPE + "logi.protocol.devices.InConfigurationDevices"},
     "/macros/device/predefined_ids": {"@type": TYPE + "logi.protocol.rap.Data"},
     "/macros/custom_categories/storage": {"@type": TYPE + "logi.protocol.macros_categories.CustomCategories"},

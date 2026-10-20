@@ -91,6 +91,21 @@ def test_device_list_comes_from_the_simulated_mouse(client):
     assert info["thumbnail"].startswith("file://") and info["thumbnail"].endswith("thumb.png")
 
 
+def test_device_support_info_names_the_notes_anchor_for_the_model(client):
+    reply = client.call("GET", "/devices/support/info", {"modelId": fx.MODEL_ID.upper()})
+    info = reply["payload"]
+    assert reply["result"]["code"] == "SUCCESS"
+    assert info["modelId"] == fx.MODEL_ID and info["displayName"] == fx.DISPLAY_NAME
+    assert info["supportPageId"] == "test-mouse-x1"          # slug of the display name
+
+
+def test_device_support_info_for_an_unknown_model_is_empty(client):
+    for payload in ({"modelId": "2nosuch"}, {}):
+        info = client.call("GET", "/devices/support/info", payload)["payload"]
+        assert not info.get("supportPageId") and not info.get("modelId")
+        assert info["@type"].endswith("logi.protocol.devices_support.Device.Support")
+
+
 def test_ever_connected_list_has_the_mouse(client):
     reply = client.call("GET", "/devices/ever_connected/list")
     (dev,) = reply["payload"]["devices"]

@@ -18,9 +18,9 @@ test('support pages open the README support section', () => {
 
 test('device support opens the device notes for the model', () => {
   assert.deepEqual(rewrite('https://support.logi.com/hc/?mID=mx-master-3s'),
-    open(`${GH}/wiki/Devices#mx-master-3s`));
+    open(`${GH}/blob/main/docs/devices.md#mx-master-3s`));
   assert.deepEqual(rewrite('https://support.logi.com/hc/en-us?mID=MX%20Master%203S&x=1'),
-    open(`${GH}/wiki/Devices#mx-master-3s`));
+    open(`${GH}/blob/main/docs/devices.md#mx-master-3s`));
   // no model: falls back to the support section
   assert.deepEqual(rewrite('https://support.logi.com/hc/?mID='), open(`${GH}#support`));
 });

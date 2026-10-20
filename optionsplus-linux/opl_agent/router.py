@@ -17,6 +17,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 
 from . import actions, applications, easy_switch, engine as input_engine, focus, model, profiles, resources, responses, stubs, swap, updates, wheel_relay
@@ -209,6 +210,9 @@ class Router:
                 self._set_config(payload)
             return "SUCCESS", self.config, ""
 
+        if verb == "GET" and path == "/devices/support/info":
+            return "SUCCESS", self._device_support(payload), ""
+
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
@@ -340,6 +344,20 @@ class Router:
             if removed:
                 update["removedProfileIds"] = list(removed)
             self.server.broadcast("/v2/profiles/update", update)
+
+    @staticmethod
+    def _device_support(payload):
+        """Reply to GET /devices/support/info. The UI uses supportPageId only to build the
+        device support link; the bootstrap turns that id into the anchor of our device notes,
+        so it is the slug of the display name and not Logitech's support page number."""
+        reply = {"@type": TYPE + "logi.protocol.devices_support.Device.Support"}
+        model_id = payload.get("modelId") if isinstance(payload, dict) else None
+        entry = resources.catalogue_entry_by_model(model_id)
+        name = entry.get("displayName") if entry else None
+        slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+        if slug:
+            reply.update(modelId=entry["modelId"], displayName=name, supportPageId=slug)
+        return reply
 
     def _push_done(self, task):
         self._pushes.discard(task)

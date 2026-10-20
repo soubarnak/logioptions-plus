@@ -562,7 +562,7 @@ rewrites by host/path, so no asar patching:
 | UI link | Target |
 |---|---|
 | `https://support.logi.com/hc/*`, `https://www.logitech.com/support*` | `https://github.com/soubarnak/logioptions-plus#support` |
-| device support page (`support.logi.com/hc/?mID=<supportPageId>`) | `https://github.com/soubarnak/logioptions-plus/wiki/Devices#<model>` (or README device table) |
+| device support page (`support.logi.com/hc/?mID=<supportPageId>`) | `https://github.com/soubarnak/logioptions-plus/blob/main/docs/devices.md#<model>` (or README device table) |
 | `https://marketplace.logi.com/releasenotes/optionsplus/` | `https://github.com/soubarnak/logioptions-plus/releases` |
 | `https://feedback.logitech.com/s3/*` | `https://github.com/soubarnak/logioptions-plus/issues/new/choose` |
 | EULA / privacy | unchanged (Logitech's terms apply to Logitech's payload) |

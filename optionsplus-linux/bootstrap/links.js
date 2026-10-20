@@ -36,7 +36,7 @@ function rewrite(raw) {
 
   if (host === 'support.logi.com') {
     const slug = deviceSlug(u.searchParams.get('mID') || '');
-    return open(slug ? `${GH}/wiki/Devices#${slug}` : `${GH}#support`);
+    return open(slug ? `${GH}/blob/main/docs/devices.md#${slug}` : `${GH}#support`);
   }
   if (host === 'www.logitech.com' && /^\/([a-z]{2}-[a-z]{2}\/)?support(\/|$)/.test(path)) {
     return open(`${GH}#support`);

@@ -51,7 +51,7 @@ speak HID++ 2.0 through a Bolt or Unifying receiver, over Bluetooth, or by cable
 too, but only the features their firmware reports are offered, and none of them has been tried.
 Add notes for your model through a
 [device support request](https://github.com/soubarnak/logioptions-plus/issues/new/choose); they
-are collected in the [Devices wiki](https://github.com/soubarnak/logioptions-plus/wiki/Devices).
+are collected in the [device notes](docs/devices.md).
 
 | Feature | MX Master 3S (Bolt) | Notes |
 |---|---|---|
@@ -390,8 +390,7 @@ inventories).
   desktop or compositor, the device and connection (for example "MX Master 3S on Bolt"), what you
   did and what you expected, and `~/.local/state/optionsplus-linux/agent.log`. Attach the log
   yourself; the app does not attach it. Remove anything you do not want public first.
-- Device notes for your model are in the
-  [Devices wiki](https://github.com/soubarnak/logioptions-plus/wiki/Devices).
+- Device notes for your model are in [docs/devices.md](docs/devices.md).
 - Not supported here: Logitech's cloud services, and anything that needs a Logitech account.
 
 ## License

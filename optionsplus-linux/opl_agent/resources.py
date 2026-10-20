@@ -157,6 +157,17 @@ def catalogue_entry(pid, vid=0x046D):
     return _load_catalogue().get("%04x_%04x" % (vid, pid))
 
 
+def catalogue_entry_by_model(model_id):
+    """Catalogue entry whose modelId is `model_id` (case-insensitive), or None."""
+    want = (model_id or "").strip().lower()
+    if not want:
+        return None
+    for entry in _load_catalogue().values():
+        if str(entry.get("modelId", "")).lower() == want:
+            return entry
+    return None
+
+
 def depot_installed(depot):
     return bool(depot) and os.path.isfile(os.path.join(depot_root(depot), "manifest.json"))
 
