@@ -313,6 +313,11 @@ class Updater:
         finally:
             self._installing = False
         if code == 0:
+            stale = await asyncio.get_running_loop().run_in_executor(None, self._still_running_version)
+            if stale:
+                self._set_state("UPDATER_ERROR", "xbps-install finished but %s %s is still installed. "
+                                "To update by hand run: %s" % (PACKAGE, stale, SUDO_COMMAND))
+                return
             self._set_state("RESTARTING")
             return
         if code in POLKIT_NOT_AUTHORIZED:
@@ -320,6 +325,17 @@ class Updater:
         elif code is not None:
             why = "xbps-install failed (exit status %d)" % code
         self._set_state("UPDATER_ERROR", "%s. To update by hand run: %s" % (why, SUDO_COMMAND))
+
+    def _still_running_version(self):
+        """The running version when xbps reports it as still the installed one, else None
+        (also None when the query cannot tell: a restart then is the better bet)."""
+        status, out = self.runner.run_output(["xbps-query", "-p", "pkgver", PACKAGE])
+        pkgver = out.strip()
+        prefix = PACKAGE + "-"
+        if status != 0 or not pkgver.startswith(prefix):
+            return None
+        installed = pkgver[len(prefix):].rsplit("_", 1)[0]
+        return installed if installed == __version__ else None
 
     def restart_now(self):
         """Relaunch UI and agent through the launcher once this agent has exited."""
