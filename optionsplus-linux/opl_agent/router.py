@@ -16,7 +16,7 @@ import json
 import logging
 import os
 
-from . import profiles, resources, responses
+from . import profiles, resources, responses, updates
 
 log = logging.getLogger("opl.router")
 
@@ -31,8 +31,10 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None):
+    def __init__(self, registry, state_dir=None, updater=None, os_release_path=None):
         self.reg = registry
+        self.updater = updater or updates.Updater()
+        self.os_release_path = os_release_path or updates.OS_RELEASE
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
@@ -89,6 +91,11 @@ class Router:
 
         if verb == "GET" and path == "/v2/profiles":
             return "SUCCESS", profiles.profiles(self.reg.devices.values()), ""
+
+        if verb == "GET" and path == "/system/info":
+            return "SUCCESS", updates.system_info(self.os_release_path), ""
+        if verb == "GET" and path == "/updates/info":
+            return "SUCCESS", self.updater.info(), ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":

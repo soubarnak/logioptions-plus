@@ -16,7 +16,7 @@ import asyncio
 import logging
 import os
 
-from . import resources
+from . import resources, updates
 from .ipc import Server
 from .model import Registry
 from .router import Router
@@ -53,11 +53,17 @@ class Agent:
     is the production wiring."""
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
-                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS):
+                 depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS,
+                 build_id=None, payload_path=None, os_release_path=None,
+                 release_base_url=None, clock=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
-        self.router = Router(self.reg, state_dir=state_dir)
+        updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
+                                  payload_path=payload_path, release_base_url=release_base_url,
+                                  clock=clock, state_dir=state_dir)
+        self.router = Router(self.reg, state_dir=state_dir, updater=updater,
+                             os_release_path=os_release_path)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         self.poll_seconds = poll_seconds
