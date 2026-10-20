@@ -12,9 +12,10 @@ was left diverted by a crashed agent ends up as the store says.
 """
 
 import logging
+import queue
 import threading
 
-from . import hidpp, keymap, profiles, uinput
+from . import hidpp, keymap, profiles, sysactions, uinput
 
 log = logging.getLogger("opl.engine")
 
@@ -34,24 +35,84 @@ def resolve_card(card):
     return card or {}
 
 
-def compile_card(card):
-    """The events a press of `card` injects, as [(ev_type, code, value)]; raises Unsupported."""
+# Mouse button hidUsage (HID usage page 9) -> BTN_*; the WIN_ actions are what the kernel sends today.
+_MOUSE_BUTTONS = {1: uinput.BTN_LEFT, 2: uinput.BTN_RIGHT, 3: uinput.BTN_MIDDLE,
+                  4: uinput.BTN_SIDE, 5: uinput.BTN_EXTRA}
+_MOUSE_ACTIONS = {"WIN_BACK": uinput.BTN_SIDE, "WIN_FORWARD": uinput.BTN_EXTRA}
+
+
+def _tap(codes):
+    """Events of a chord: pressed in order, released in reverse."""
+    ev = uinput.EV_KEY
+    return [(ev, k, 1) for k in codes] + [(ev, k, 0) for k in reversed(codes)]
+
+
+def _key_event(usage, down):
+    """The event for a HID keyboard usage going down or up; raises Unsupported when it has no key."""
+    key = keymap.linux_key(usage)
+    if key is None:
+        raise Unsupported("key code %r has no Linux equivalent" % (usage,))
+    return (uinput.EV_KEY, key, 1 if down else 0)
+
+
+def _compile_sequence(seq):
+    steps = []
+    for lst in seq.get("componentLists") or []:
+        for comp in lst.get("components") or []:
+            if "delay" in comp:
+                steps.append(("wait", max(0, int((comp["delay"] or {}).get("durationMs") or 0)) / 1000.0))
+            elif "keyboard" in comp:
+                kbd = comp["keyboard"] or {}
+                steps.append(("emit", [_key_event(kbd.get("hidUsage"), kbd.get("isDown"))]))
+            elif "mouse" in comp:
+                btn = (comp["mouse"] or {}).get("button") or {}
+                code = _MOUSE_BUTTONS.get(btn.get("hidUsage"))
+                if code is None:
+                    raise Unsupported("this mouse action in a macro is not supported")
+                steps.append(("emit", [(uinput.EV_KEY, code, 1 if btn.get("isDown") else 0)]))
+            else:
+                raise Unsupported("a %s step in a macro is not supported" % (next(iter(comp), "this kind of")))
+    return steps
+
+
+def compile_card(card, table=None):
+    """The steps a press of `card` plays: ("emit", events), ("wait", seconds) or ("system", action).
+    Raises Unsupported. System actions are resolved when pressed, so the user's file applies live."""
+    table = table or sysactions.ActionTable()
     macro = resolve_card(card).get("macro") or {}
     kind = macro.get("type")
-    if kind != "KEYSTROKE":
-        raise Unsupported("%s actions are not supported yet" % (kind or "this kind of"))
-    ks = macro.get("keystroke") or {}
-    key = keymap.linux_key(ks.get("code"))
-    if key is None:
-        raise Unsupported("key code %r has no Linux equivalent" % (ks.get("code"),))
-    mods = []
-    for usage in ks.get("modifiers") or []:
-        if usage not in keymap.MODIFIER_USAGES:
-            raise Unsupported("modifier %r is not a modifier key" % (usage,))
-        mods.append(keymap.linux_key(usage))
-    ev = uinput.EV_KEY
-    return ([(ev, m, 1) for m in mods] + [(ev, key, 1), (ev, key, 0)]
-            + [(ev, m, 0) for m in reversed(mods)])
+    if kind == "KEYSTROKE":
+        ks = macro.get("keystroke") or {}
+        key = keymap.linux_key(ks.get("code"))
+        if key is None:
+            raise Unsupported("key code %r has no Linux equivalent" % (ks.get("code"),))
+        mods = []
+        for usage in ks.get("modifiers") or []:
+            if usage not in keymap.MODIFIER_USAGES:
+                raise Unsupported("modifier %r is not a modifier key" % (usage,))
+            mods.append(keymap.linux_key(usage))
+        return [("emit", _tap(mods + [key]))]
+    if kind == "MOUSE":
+        mouse = macro.get("mouse") or {}
+        code = (_MOUSE_BUTTONS.get(mouse.get("hidUsage")) if mouse.get("action") == "BUTTON"
+                else _MOUSE_ACTIONS.get(mouse.get("action")))
+        if code is None:
+            raise Unsupported("mouse action %r is not supported" % (mouse.get("action"),))
+        return [("emit", _tap([code]))]
+    if kind == "SYSTEM":
+        action = (macro.get("system") or {}).get("action")
+        if table.chord(action) is None:
+            raise Unsupported("%s has no Linux keystroke; set one in actions.toml" % (action,))
+        return [("system", action)]
+    if kind == "MEDIA":
+        usage = (macro.get("media") or {}).get("usage")
+        key = sysactions.MEDIA_KEYS.get(usage)
+        if key is None:
+            raise Unsupported("media action %r is not supported" % (usage,))
+        return [("emit", _tap([key]))]
+    if kind == "INPUT_SEQUENCE":
+        return _compile_sequence(macro.get("inputSequence") or {})
+    raise Unsupported("%s actions are not supported yet" % (kind or "this kind of"))
 
 
 def _cid_of(slot_id):
@@ -61,11 +122,15 @@ def _cid_of(slot_id):
 class InputEngine:
     """Per-device diversions and the actions behind them. Methods that talk to the mouse block."""
 
-    def __init__(self, registry, store, sink_factory=None):
+    def __init__(self, registry, store, sink_factory=None, actions_path=None):
         self.reg = registry
         self.store = store
         self.sink_factory = sink_factory or uinput.open_default
+        self.table = sysactions.ActionTable(actions_path)
         self._sink = None
+        self._plays = queue.Queue()     # steps of presses, played one press at a time
+        self._player = None
+        self._stop = threading.Event()
         self._lock = threading.RLock()
         self._active = {}               # dev_id -> {cid: events}
         self._held = {}                 # dev_id -> set of cids held down now
@@ -80,6 +145,8 @@ class InputEngine:
             return self._sink
 
     def close(self):
+        self._stop.set()
+        self._plays.put(None)
         with self._lock:
             sink, self._sink = self._sink, None
         if sink is not None:
@@ -101,7 +168,7 @@ class InputEngine:
     def assign(self, dev, cid, card):
         """Make button `cid` run `card`. Blocking. Raises Unsupported for a card or button that
         cannot, any other error when the device write fails; nothing changes then."""
-        events = compile_card(card)
+        events = compile_card(card, self.table)
         self._divertable(dev, cid)
         self.sink()                     # never divert a button that could not be injected for
         self.reg.set_divert(dev.id, cid, True)
@@ -130,7 +197,7 @@ class InputEngine:
             if card.get("id") == defaults.get(slot_id):
                 continue
             try:
-                out[_cid_of(slot_id)] = compile_card(card)
+                out[_cid_of(slot_id)] = compile_card(card, self.table)
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
         return out
@@ -174,10 +241,53 @@ class InputEngine:
             pressed = held - self._held.get(dev_id, set())
             self._held[dev_id] = held
             actions = [self._active.get(dev_id, {}).get(cid) for cid in sorted(pressed)]
-        for events in actions:
-            if not events:
-                continue
+        for steps in actions:
+            if steps:
+                self._start_player()
+                self._plays.put(steps)
+
+    # ---- playback ------------------------------------------------------------------
+    def _start_player(self):
+        with self._lock:
+            if self._player is None:
+                self._player = threading.Thread(target=self._play_loop, name="opl-play", daemon=True)
+                self._player.start()
+
+    def _play_loop(self):
+        while not self._stop.is_set():
+            steps = self._plays.get()
+            if steps is None:
+                return
             try:
-                self.sink().emit(events)
+                self._play(steps)
             except Exception as exc:
-                log.warning("injecting for %s failed: %s", dev_id, exc)
+                log.warning("running the card failed: %s", exc)
+
+    def _play(self, steps):
+        """Run the steps in order. Keys still down when the run ends or fails are released."""
+        down = []
+        try:
+            for kind, arg in steps:
+                if kind == "wait":
+                    if self._stop.wait(arg):
+                        return
+                    continue
+                if kind == "system":
+                    chord = self.table.chord(arg)
+                    if chord is None:
+                        log.warning("system action %s has no keystroke any more", arg)
+                        continue
+                    arg = _tap(chord)
+                self.sink().emit(arg)
+                for ev_type, code, value in arg:
+                    if ev_type == uinput.EV_KEY:
+                        if value:
+                            down.append(code)
+                        elif code in down:
+                            down.remove(code)
+        finally:
+            for code in reversed(down):
+                try:
+                    self.sink().emit([(uinput.EV_KEY, code, 0)])
+                except Exception:
+                    log.debug("releasing key %d failed", code, exc_info=True)
