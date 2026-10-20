@@ -68,6 +68,11 @@ def env(tmp_path):
     e.pop("OPL_NO_SANDBOX", None)
     for k in ("OPL_ASAR", "OPL_DATA_DIR", "OPL_DEPOT_DIR", "OPL_PAYLOAD_DIR"):
         e.pop(k, None)
+    e["OPL_SYSTEM_PAYLOAD_DIR"] = str(tmp_path / "system")
+    payload = tmp_path / "data" / "optionsplus-linux" / "payload"      # an installed payload
+    payload.mkdir(parents=True)
+    (payload / "app.asar").write_text("x")
+    (payload / "payload.json").write_text("{}")
     yield e
     for pid in subprocess.run(["pgrep", "-f", str(agent)], capture_output=True, text=True).stdout.split():
         try:
@@ -109,7 +114,7 @@ def test_exports_payload_paths_for_the_agent_and_ui(env):
     _, out = launch(env)
     payload = Path(env["XDG_DATA_HOME"]) / "optionsplus-linux" / "payload"
     assert out["env"]["OPL_ASAR"] == str(payload / "app.asar")
-    assert out["env"]["OPL_DATA_DIR"] == str(payload / "data")
+    assert out["env"]["OPL_DATA_DIR"] == str(payload / "depots" / "logioptionsplus" / "data")
     assert out["env"]["OPL_DEPOT_DIR"] == str(payload / "depots")
 
 
