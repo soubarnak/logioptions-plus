@@ -15,15 +15,23 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 import asyncio
 import logging
 import os
+import sys
 
 from . import resources, updates
-from .ipc import Server
+from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
 
 log = logging.getLogger("opl.main")
 
+TYPE = "type.googleapis.com/"
+
 POLL_SECONDS = 30
+
+
+def _battery_key(reg, dev_id):
+    b = reg.devices[dev_id].battery_cache or {}
+    return (b.get("percent"), bool(b.get("charging")))
 
 
 async def _poll(server, reg, interval=POLL_SECONDS):
@@ -32,16 +40,19 @@ async def _poll(server, reg, interval=POLL_SECONDS):
     while True:
         await asyncio.sleep(interval)
         for dev_id in list(reg.devices):
-            prev = (reg.devices[dev_id].battery_cache or {}).get("percent")
+            prev = _battery_key(reg, dev_id)
             try:
                 await loop.run_in_executor(None, reg.refresh_battery, dev_id)
             except Exception:
                 continue
-            now = (reg.devices[dev_id].battery_cache or {}).get("percent")
-            if now != prev:
+            if _battery_key(reg, dev_id) != prev:
                 pl, _ = reg.battery(dev_id)
                 server.broadcast("/battery/state/changed", pl)
                 server.broadcast("/battery/%s/state/changed" % dev_id, pl)
+                info = reg.devices[dev_id].info()
+                info["batteryStatus"] = reg.battery_status_for_info(dev_id)
+                info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+                server.broadcast("/devices/state/changed", info)
 
 
 class Agent:
@@ -49,11 +60,13 @@ class Agent:
 
     Everything environment-specific is injectable so tests can run it in
     process: `transport` (HID++ node discovery and I/O, default real hidraw),
-    `socket_path`, `state_dir`, `depot_dir` and `data_dir`. With no arguments it
+    `socket_path`, `state_dir`, `depot_dir`, `data_dir`, `runner` (launches
+    desktop tools) and `app_dirs` (.desktop directories). With no arguments it
     is the production wiring."""
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
                  depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS,
+                 runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
                  release_base_url=None, clock=None):
         if depot_dir is not None or data_dir is not None:
@@ -62,8 +75,8 @@ class Agent:
         updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
                                   payload_path=payload_path, release_base_url=release_base_url,
                                   clock=clock, state_dir=state_dir)
-        self.router = Router(self.reg, state_dir=state_dir, updater=updater,
-                             os_release_path=os_release_path)
+        self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
+                             updater=updater, os_release_path=os_release_path)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
         updater.broadcast = self.server.broadcast
@@ -102,6 +115,9 @@ async def main():
         level=os.environ.get("OPL_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if socket_alive(socket_path()):
+        log.info("agent already running on %s; exiting", socket_path())
+        return
     agent = Agent()
     await agent.start()
     try:
@@ -111,6 +127,8 @@ async def main():
 
 
 if __name__ == "__main__":
+    if "--is-running" in sys.argv[1:]:
+        sys.exit(0 if socket_alive(socket_path()) else 1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

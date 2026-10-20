@@ -11,12 +11,14 @@ SUBSCRIBE/UNSUBSCRIBE are handled by the IPC Server itself; this router only
 sees GET/SET/REMOVE/OPTIONS.
 """
 
+import asyncio
 import copy
 import json
 import logging
 import os
 
-from . import profiles, resources, responses, updates
+from . import applications, model, profiles, resources, responses, stubs, updates
+from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
 
@@ -31,12 +33,18 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None, updater=None, os_release_path=None):
+    def __init__(self, registry, state_dir=None, runner=None, app_dirs=None,
+                 updater=None, os_release_path=None):
         self.reg = registry
         self.updater = updater or updates.Updater()
         self.os_release_path = os_release_path or updates.OS_RELEASE
+        self.runner = runner or SubprocessRunner()
+        self.app_dirs = app_dirs         # None: system, per-user and Flatpak locations
+        self.apps = None                 # last scan result; None until first scan
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
+        self.store = profiles.ProfileStore(_state_dir(state_dir))
+        self.reg.on_discovered.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
         try:
             with open(self.config_path) as fh:
@@ -69,6 +77,8 @@ class Router:
         if path == "/lps/endpoint/info_changed":
             return [("/lps/endpoint/info_changed",
                      {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"})]
+        if path == "/applications/installed" and self.apps is not None:
+            return [(path, applications.payload(self.apps))]
         if path == "/devices/state/changed":
             out = []
             for d in self.reg.devices.values():
@@ -79,6 +89,13 @@ class Router:
                 info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
                 out.append(("/devices/state/changed", info))
             return out
+        if path == "/battery/state/changed":
+            return [(path, self.reg.battery(i)[0]) for i in self.reg.devices
+                    if self.reg.devices[i].battery_cache]
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "battery" and parts[2:] == ["state", "changed"]:
+            if parts[1] in self.reg.devices and self.reg.devices[parts[1]].battery_cache:
+                return [(path, self.reg.battery(parts[1])[0])]
         return []
 
     async def handle(self, verb, path, payload):
@@ -91,8 +108,21 @@ class Router:
             lang = (self.config.get("language") or {}).get("value", "en-US")
             return "SUCCESS", resources.localized_packages(payload, lang), ""
 
+        if path == "/applications/scan/installed" and verb == "SET":
+            await self._scan_applications(announce=True)
+            return "SUCCESS", payload, ""
+        if verb == "GET" and path in ("/applications/installed", "/applications/all"):
+            if self.apps is None:
+                await self._scan_applications(announce=False)
+            return "SUCCESS", applications.payload(self.apps), ""
+
         if verb == "GET" and path == "/v2/profiles":
-            return "SUCCESS", profiles.profiles(self.reg.devices.values()), ""
+            return "SUCCESS", await self._profiles_payload(), ""
+
+        if verb == "SET" and path.startswith("/v2/profiles/"):
+            r = await self._profiles_set(path, payload)
+            if r is not None:
+                return r
 
         if verb == "GET" and path == "/system/info":
             return "SUCCESS", updates.system_info(self.os_release_path), ""
@@ -125,6 +155,12 @@ class Router:
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
+        stub = stubs.lookup(verb, path)
+        if stub is not None:
+            return stub[0], stub[1], ""
+        if verb == "SET" and path == "/system/open_settings":
+            self._open_settings()
+            return "SUCCESS", payload, ""
         if path in responses.ERRORS:
             return responses.ERRORS[path], None, ""
         if verb == "SET" and path in responses.SET_ECHO:
@@ -145,9 +181,127 @@ class Router:
         # Several boot sagas issue a SET without catching a failure; one
         # rejected SET cancels the whole saga tree. Accept unknown SETs.
         if verb == "SET":
-            log.info("unhandled SET %s accepted", path)
+            log.warning("unhandled SET %s accepted (feature not implemented)", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    # ---- profiles / pointer speed ---------------------------------------
+    def _read_live(self):
+        """Blocking: current DPI and range per device, for seeding cards."""
+        live = {}
+        for dev_id in list(self.reg.devices):
+            try:
+                live[dev_id] = {"dpi": self.reg.read_dpi(dev_id)["dpi"],
+                                "range": self.reg.dpi_range(dev_id)}
+            except Exception as exc:
+                log.debug("no live DPI for %s: %s", dev_id, exc)
+        return live
+
+    async def _profiles_payload(self):
+        live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
+        return profiles.profiles(self.reg.devices.values(), self.store, live)
+
+    async def _broadcast_profiles(self):
+        if self.server is not None:
+            self.server.broadcast("/v2/profiles/update", await self._profiles_payload())
+
+    def _device_for_slot(self, slot_id):
+        for dev in self.reg.devices.values():
+            if slot_id == profiles.mouse_settings_slot(dev.slot_prefix):
+                return dev
+        return None
+
+    def _apply_pointer(self, dev, value):
+        """Blocking: write DPI for slider `value`; returns the card read back."""
+        rng = self.reg.dpi_range(dev.id)
+        dpi = self.reg.write_dpi(dev.id, profiles.dpi_from_value(value, rng))
+        return profiles.mouse_settings_card(profiles.value_from_dpi(dpi, rng), dpi)
+
+    def apply_stored(self, dev_id):
+        """Blocking: reapply stored settings to a device (discovery, reconnect)."""
+        dev = self.reg.devices.get(dev_id)
+        card = self.store.get(profiles.mouse_settings_slot(dev.slot_prefix)) if dev else None
+        value = profiles.pointer_value(card) if card else None
+        if value is not None:
+            self._apply_pointer(dev, value)
+
+    async def _profiles_set(self, path, payload):
+        loop = asyncio.get_event_loop()
+        if path == "/v2/profiles/reset":
+            return await self._profiles_reset(payload or {})
+        payload = payload or {}
+        entries = [op.get("set") for op in payload.get("ops") or [] if op.get("set")]
+        if "assignment" in payload:
+            entries.append(payload)
+        handled = None
+        for entry in entries:
+            asg = entry.get("assignment") or {}
+            dev = self._device_for_slot(asg.get("slotId", ""))
+            value = profiles.pointer_value(asg.get("card") or entry.get("card") or {})
+            if dev is None or value is None:
+                continue
+            try:
+                card = await loop.run_in_executor(None, self._apply_pointer, dev, value)
+            except Exception as exc:
+                log.warning("pointer speed write failed: %s", exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+            self.store.set(asg["slotId"], card)
+            asg["card"], asg["cardId"] = card, card["id"]
+            handled = payload
+        if handled is None:
+            return None
+        await self._broadcast_profiles()
+        return "SUCCESS", handled, ""
+
+    async def _profiles_reset(self, info):
+        loop = asyncio.get_event_loop()
+        for dev in list(self.reg.devices.values()):
+            if info.get("deviceId") and info["deviceId"] != dev.id:
+                continue
+            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+            try:
+                await loop.run_in_executor(None, self._apply_defaults, dev)
+            except Exception as exc:
+                log.warning("applying defaults failed: %s", exc)
+                return "FAULTED", None, "device write failed: %s" % exc
+        await self._broadcast_profiles()
+        return "SUCCESS", info, ""
+
+    def _apply_defaults(self, dev):
+        value = profiles.default_pointer_value(dev.depot)
+        if value is not None:
+            self._apply_pointer(dev, value)
+        else:
+            self.reg.write_dpi(dev.id, self.reg.read_dpi(dev.id)["default"])
+
+    def _open_settings(self):
+        """Open the desktop's mouse settings if a known tool is installed."""
+        tools = [["gnome-control-center", "mouse"], ["systemsettings", "kcm_mouse"]]
+        if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+            tools.reverse()
+        for argv in tools:
+            if self.runner.which(argv[0]):
+                self.runner.run(argv)
+                return
+        log.info("no known desktop mouse settings tool; nothing to open")
+
+    async def _scan_applications(self, announce):
+        """Scan off the event loop. An unreadable tree or a scan error counts
+        as "nothing found": the completion broadcast is sent regardless, so the
+        UI's scanning spinner always stops."""
+        dirs = self.app_dirs if self.app_dirs is not None else applications.default_dirs()
+        try:
+            self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
+        except Exception as exc:
+            log.warning("application scan failed: %s", exc)
+            self.apps = []
+        if announce and self.server is not None:
+            # after the SET reply, which the caller is about to send
+            asyncio.get_event_loop().call_soon(self._announce_applications)
+
+    def _announce_applications(self):
+        for path in ("/applications/installed", "/applications"):
+            self.server.broadcast(path, applications.payload(self.apps))
 
     def _set_config(self, payload):
         for k, v in payload.items():
@@ -196,6 +350,18 @@ class Router:
             if sub == "easy_switch":
                 return "NO_SUCH_PATH", None, ""   # matches real agent for BLE devices
             return "NO_SUCH_PATH", None, ""
+
+        # Firmware update check: report "no update" with the current version.
+        # Real DFU is out of scope (needs Logitech's signed payloads).
+        if parts[:2] == ["dfu", "update"] and parts[2:] == ["available"]:
+            return "SUCCESS", {"@type": TYPE + "google.protobuf.BoolValue", "value": False}, ""
+        if parts[0] == "dfu" and len(parts) == 3 and parts[2] == "info":
+            dev = reg.devices.get(parts[1])
+            if dev is None:
+                return "NO_SUCH_PATH", None, ""
+            return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info",
+                               "requireFwUpdate": False, "dfuResult": "SUCCESS",
+                               "eligibleVersion": model.format_firmware(dev.fw)}, ""
 
         # /battery/<id>/state
         if parts[0] == "battery" and len(parts) >= 3 and parts[2] == "state":

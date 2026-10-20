@@ -52,7 +52,6 @@ BOOT = {
     "/lps/endpoint/info": {"@type": TYPE + "logi.protocol.lps.Endpoint.Information", "state": "LOADED"},
     "/lps/enable_notification": {"@type": TYPE + "google.protobuf.BoolValue", "value": False},
     "/lps/status": {"@type": TYPE + "logi.protocol.lps.ServiceStatus", "status": 1, "uptime": 0, "version": ""},
-    "/applications/all": {"@type": TYPE + "logi.protocol.applications.Applications", "applications": []},
     # per-device app profiles: none until app integration exists; the device
     # resource saga fails (and shows "Download failed") if these error
     "/applications/predefined": {"@type": TYPE + "logi.protocol.applications.Applications", "applications": []},
@@ -100,10 +99,4 @@ SET_ECHO = {"/scarif/event", "/system/settings", "/mouse/global/swap",
 
 # Routes the real agent rejects; the UI treats the code as "feature absent".
 ERRORS = {
-    "/beta_testing/features": "NO_SUCH_PATH",
-    "/get_secure_input_app_name": "NO_SUCH_PATH",
-    "/accounts/user_info": "NOT_READY",
-    "/accounts/email_subscription": "NOT_READY",
-    "/migration/reports": "NOT_READY",
-    "/unified_profiles/activities": "INVALID_ARG",
 }

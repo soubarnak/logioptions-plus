@@ -1,0 +1,13 @@
+#!/bin/sh
+# xbps REMOVE hook: drop the removed udev rule from the running system.
+# Touches nothing in users' home directories, so settings and data stay.
+# Usage: REMOVE <action> <pkgname> <version> <update> <arch>
+case "$1" in
+    post)
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload 2>/dev/null || true
+            udevadm trigger --subsystem-match=hidraw --subsystem-match=misc --action=add 2>/dev/null || true
+        fi
+        ;;
+esac
+exit 0

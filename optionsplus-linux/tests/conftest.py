@@ -79,9 +79,10 @@ def agent_factory(workdir, bolt, releases, clock, os_release):
     def make(**overrides):
         kw = dict(transport=bolt, socket_path=os.path.join(workdir, "s"),
                   state_dir=os.path.join(workdir, "state"), depot_dir=depot,
-              release_base_url=releases.base_url, clock=clock,
-              os_release_path=os_release,
-              payload_path=os.path.join(workdir, "payload.json"))
+                  app_dirs=[os.path.join(workdir, "applications")],
+                  release_base_url=releases.base_url, clock=clock,
+                  os_release_path=os_release,
+                  payload_path=os.path.join(workdir, "payload.json"))
         kw.update(overrides)
         running = RunningAgent(**kw).start()
         started.append(running)

@@ -39,6 +39,18 @@ CONN_BOLT = "BLE_PRO"
 CONN_USB = "USB"
 
 
+def format_firmware(fw):
+    """Windows-style firmware string from DeviceFwInfo (0x0003) entities.
+
+    "RBM 22.01.B0006": name, major.minor, then "B" and the 4-digit build.
+    Uses the main application entity (type 0), else the first one.
+    """
+    if not fw or not isinstance(fw, list):
+        return ""
+    ent = next((e for e in fw if e.get("type") == 0), fw[0])
+    return "%s %s.B%04X" % (ent["name"], ent["version"], ent["build"])
+
+
 class Device:
     def __init__(self, dev_id, node, index, name, dtype, pid):
         self.id = dev_id
@@ -51,6 +63,7 @@ class Device:
         self.first_connected = int(time.time())
         self.serial = ""
         self.fw = ""
+        self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.catalogue = resources.catalogue_entry(pid) or {}
 
@@ -103,7 +116,23 @@ class Device:
             "resourcesAvailable": resources.depot_installed(self.depot),
             "fetchResource": False,
             "firstConnectedTimestamp": str(self.first_connected),
+            **self._battery_fields(),
         }
+
+    def _battery_fields(self):
+        """Capability flags and level that make the UI show the battery indicator."""
+        bc = self.battery_caps
+        if bc is None and not self.battery_cache:
+            return {}
+        out = {"capabilities": {"hasBatteryStatus": True}}
+        if bc is not None:
+            out["capabilities"].update({
+                "unifiedBattery": True,
+                "battery": {"rechargeable": bc["rechargeable"], "stateOfCharge": bc["soc"],
+                            "showBatteryStatus": False, "supportedLevels": bc["levels"]}})
+        if self.battery_cache and self.battery_cache.get("percent") is not None:
+            out["batteryDischargeLevel"] = int(self.battery_cache["percent"])
+        return out
 
     def permanent(self):
         """logi.protocol.devices.DevicePermanentData for /devices/ever_connected/list."""
@@ -128,6 +157,7 @@ class Registry:
         self.devices = {}          # id -> Device
         self._fds = {}             # node.path -> fd
         self._receivers = []
+        self.on_discovered = []    # callables(dev_id), run in scan() for each new device
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
@@ -178,10 +208,19 @@ class Registry:
                     pass
                 self.devices[dev_id] = d
                 try:
+                    d.battery_caps = hidpp.get_battery_caps(fd, idx)
+                except Exception:
+                    pass
+                try:
                     self.refresh_battery(dev_id)
                 except Exception:
                     pass
                 log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
+                for hook in list(self.on_discovered):
+                    try:
+                        hook(dev_id)
+                    except Exception:
+                        log.exception("discovery hook failed for %s", dev_id)
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):
@@ -238,6 +277,23 @@ class Registry:
         d = self.devices.get(dev_id)
         fd = self._fds.get(d.node.path)
         hidpp.set_dpi(fd, d.index, int(dpi))
+
+    def dpi_range(self, dev_id):
+        """Blocking read of the sensor's DPI list: {values, min, max, step}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi_list(self._fds[d.node.path], d.index)
+
+    def read_dpi(self, dev_id):
+        """Blocking read of the current and default DPI: {dpi, default, ...}."""
+        d = self.devices[dev_id]
+        return hidpp.get_dpi(self._fds[d.node.path], d.index)
+
+    def write_dpi(self, dev_id, dpi):
+        """Blocking 0x2201 write; returns the DPI read back from the device."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        hidpp.set_dpi(fd, d.index, int(dpi))
+        return hidpp.get_dpi(fd, d.index)["dpi"]
 
     def close(self):
         for fd in self._fds.values():
