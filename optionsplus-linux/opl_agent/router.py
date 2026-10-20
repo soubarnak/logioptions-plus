@@ -11,14 +11,13 @@ SUBSCRIBE/UNSUBSCRIBE are handled by the IPC Server itself; this router only
 sees GET/SET/REMOVE/OPTIONS.
 """
 
+import asyncio
 import copy
 import json
 import logging
 import os
 
-import asyncio
-
-from . import applications, profiles, resources, responses
+from . import applications, model, profiles, resources, responses
 
 log = logging.getLogger("opl.router")
 
@@ -202,6 +201,18 @@ class Router:
             if sub == "easy_switch":
                 return "NO_SUCH_PATH", None, ""   # matches real agent for BLE devices
             return "NO_SUCH_PATH", None, ""
+
+        # Firmware update check: report "no update" with the current version.
+        # Real DFU is out of scope (needs Logitech's signed payloads).
+        if parts[:2] == ["dfu", "update"] and parts[2:] == ["available"]:
+            return "SUCCESS", {"@type": TYPE + "google.protobuf.BoolValue", "value": False}, ""
+        if parts[0] == "dfu" and len(parts) == 3 and parts[2] == "info":
+            dev = reg.devices.get(parts[1])
+            if dev is None:
+                return "NO_SUCH_PATH", None, ""
+            return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info",
+                               "requireFwUpdate": False, "dfuResult": "SUCCESS",
+                               "eligibleVersion": model.format_firmware(dev.fw)}, ""
 
         # /battery/<id>/state
         if parts[0] == "battery" and len(parts) >= 3 and parts[2] == "state":
