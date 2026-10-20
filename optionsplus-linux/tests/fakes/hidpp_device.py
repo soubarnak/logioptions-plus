@@ -72,12 +72,13 @@ class SimulatedMouse:
         # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
         self.hosts = [
             {"name": b"Desk PC", "paired": True, "bus": 5, "os": 1},
-            {"name": b"Laptop", "paired": True, "bus": 5, "os": 6},
+            {"name": b"Laptop", "paired": True, "bus": 5, "os": 3},
             {"name": b"", "paired": False, "bus": 0, "os": 0}]
         self.current_host = 0
         self.max_host_name = 32
         self.fail_host_switch = False               # answer setCurrentHost with an error
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
+        self.fail_host_os_read = False              # answer getHostOsVersion (fn5) with an error
         self.host_caps = 0x03                       # 0x1815 capability flags: bit0 read names, bit1 write names
         self.name_reads, self.name_writes = [], []  # (host, offset) / (host, offset, name bytes) requests seen
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
@@ -254,7 +255,7 @@ class SimulatedMouse:
             # fn4 setHostFriendlyName(host, offset, 14 name bytes).
             if fn == 0:
                 return bytes([self.host_caps, 0, len(self.hosts), self.current_host])
-            if fn in (1, 2, 3, 4) and params[0] >= len(self.hosts):
+            if fn in (1, 2, 3, 4, 5) and params[0] >= len(self.hosts):
                 return 2
             if fn == 1:
                 h = self.hosts[params[0]]
@@ -265,6 +266,11 @@ class SimulatedMouse:
             if fn == 3:
                 self.name_reads.append((params[0], params[1]))
                 return bytes([params[0], params[1]]) + self.hosts[params[0]]["name"][params[1]:params[1] + 14]
+            if fn == 5:
+                # getHostOsVersion(host) -> [os type, major, minor, build]
+                if self.fail_host_os_read:
+                    return 5
+                return bytes([self.hosts[params[0]]["os"], 10, 0, 0])
             if fn == 4:
                 if self.fail_host_name_write:
                     return 5

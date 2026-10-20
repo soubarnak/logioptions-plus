@@ -969,14 +969,22 @@ def get_host_name(fd, idx, host, length):
     return raw.decode("utf-8", "replace")
 
 
+def get_host_os(fd, idx, host):
+    """0x1815 fn5 getHostOsVersion(host) -> OS type byte (0 unknown); 0 when the read fails."""
+    try:
+        return _fcall(fd, idx, F_HOSTS_INFO, 5, bytes([host]))[0]
+    except HidppError:
+        return 0
+
+
 def get_hosts(fd, idx):
     """0x1814 + 0x1815 -> {"current", "max_name", "can_get_name", "can_set_name",
     "hosts": [{index, paired, bus, os, name, max_name}]}.
 
     0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
-    [host, status, bus type, pages, name length, max name length]. The OS type comes from
-    getHostOsVersion, a function this client does not call yet (its number is unconfirmed, and
-    a wrong one would move or delete a host), so the OS type is always unknown (0)."""
+    [host, status, bus type, pages, name length, max name length], fn5 getHostOsVersion(host)
+    [os type, major, minor, build]. A host whose OS cannot be read (error reply or timeout)
+    gets type 0, unknown."""
     count, current = get_current_host(fd, idx)
     flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
     can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
@@ -985,7 +993,7 @@ def get_hosts(fd, idx):
         d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
         name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": 0, "name": name,
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": get_host_os(fd, idx, i), "name": name,
                       "max_name": d[5] or 32})
     return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
             "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}

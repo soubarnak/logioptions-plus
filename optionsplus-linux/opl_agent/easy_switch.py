@@ -9,12 +9,30 @@ TYPE = "type.googleapis.com/"
 
 # HostInfo.BusType and HostInfo.OSType enum names, by the value the mouse reports.
 BUS_TYPES = ["INVALID", "UNIFYING", "USB", "BT", "BLE", "BLEPRO"]
-OS_TYPES = ["UNKNOWN", "WINDOWS", "WINDOWS_EMBEDDED", "LINUX", "CHROME",
-            "ANDROID", "MACOS", "IOS", "WEBOS", "TIZEN"]
+# getHostOsVersion osType 1..9 (0 is unknown). The spelling the UI renders is still to be
+# confirmed live: bare proto names or the strings file keys, which carry OS_ in front.
+OS_PREFIX = ""
+_OS_BASE = ["WINDOWS", "MACOS", "LINUX", "ANDROID", "IOS", "CHROME", "WEBOS", "TIZEN",
+            "WINDOWS_EMBEDDED"]
+
+
+def os_names(prefix):
+    """OS names by osType, index 0 unknown (None), spelled with `prefix`."""
+    return [None] + [prefix + n for n in _OS_BASE]
+
+
+OS_NAMES = os_names(OS_PREFIX)
 
 
 def _enum(names, value):
     return names[value] if 0 <= value < len(names) else names[0]
+
+
+def _host_os(value):
+    """{"type": name} for a known OS type, else None so the entry carries no `os`."""
+    if isinstance(value, int) and 0 < value < len(OS_NAMES):
+        return {"type": OS_NAMES[value]}
+    return None
 
 
 def _slot(by_index, host):
@@ -25,20 +43,26 @@ def _slot(by_index, host):
 
 def hosts_payload(dev, state):
     """HostInfo.Hosts for one device from hidpp.get_hosts()."""
+    hosts = []
+    for h in state["hosts"]:
+        entry = {
+            "index": h["index"],
+            "paired": h["paired"],
+            "connected": h["index"] == state["current"],
+            "busType": _enum(BUS_TYPES, h["bus"]),
+            "name": h["name"],
+        }
+        host_os = _host_os(h["os"])
+        if host_os:
+            entry["os"] = host_os
+        hosts.append(entry)
     return {
         "@type": TYPE + "logi.protocol.devices.HostInfo.Hosts",
         "deviceId": dev.id,
         "serialNumber": dev.serial,
         "capabilities": {"canGetName": state["can_get_name"], "canSetName": state["can_set_name"]},
         "maxNameLength": state["max_name"],
-        "hosts": [{
-            "index": h["index"],
-            "paired": h["paired"],
-            "connected": h["index"] == state["current"],
-            "busType": _enum(BUS_TYPES, h["bus"]),
-            "name": h["name"],
-            "os": {"type": _enum(OS_TYPES, h["os"])},
-        } for h in state["hosts"]],
+        "hosts": hosts,
     }
 
 
