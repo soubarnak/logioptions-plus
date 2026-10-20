@@ -1,5 +1,7 @@
 """Easy-Switch tab (ticket #16): host slots, names and switching through 0x1814 / 0x1815."""
 
+from opl_agent import easy_switch
+
 TYPE = "type.googleapis.com/"
 
 
@@ -29,10 +31,83 @@ def test_lists_the_host_slots_with_names_and_the_current_host(client):
     assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
     assert [h["paired"] for h in p["hosts"]] == [True, True, False]
     assert [h["connected"] for h in p["hosts"]] == [True, False, False]
-    assert [h["os"]["type"] for h in p["hosts"]] == ["UNKNOWN"] * 3     # the OS is not read from the mouse
+    assert [h["os"]["type"] for h in p["hosts"][:2]] == ["WINDOWS", "LINUX"]     # read with getHostOsVersion
+    assert "os" not in p["hosts"][2]                                            # type 0 is unknown: omitted
     assert p["maxNameLength"] == 32
     assert p["capabilities"]["canGetName"] is True and p["capabilities"]["canSetName"] is True
     assert not p["capabilities"].get("canDelete")
+
+
+def test_a_host_os_the_mouse_reports_is_named_with_the_chosen_spelling(agent_factory, bolt):
+    bolt.mouse.hosts[0]["os"] = 7
+    c = agent_factory().client()
+    try:
+        assert hosts(c)["hosts"][0]["os"]["type"] == easy_switch.OS_NAMES[7]
+        assert easy_switch.OS_NAMES[7].endswith("IOS")
+    finally:
+        c.close()
+
+
+def test_the_os_names_can_be_switched_to_the_prefixed_strings_keys():
+    assert easy_switch.os_names("OS_")[3] == "OS_LINUX"
+    assert easy_switch.os_names("OS_")[2] == "OS_WINDOWS_EMBEDDED"
+    assert easy_switch.os_names("")[3] == "LINUX"
+
+
+def test_an_unknown_or_out_of_range_host_os_is_omitted(agent_factory, bolt):
+    bolt.mouse.hosts[0]["os"] = 200
+    c = agent_factory().client()
+    try:
+        assert "os" not in hosts(c)["hosts"][0]
+    finally:
+        c.close()
+
+
+def test_a_host_os_reply_for_another_host_is_ignored(agent_factory, bolt):
+    bolt.mouse.host_os_echo = 1
+    c = agent_factory().client()
+    try:
+        assert "os" not in hosts(c)["hosts"][0]
+    finally:
+        c.close()
+
+
+def test_the_os_is_only_read_for_paired_hosts(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1815)
+    os_reads = [w for w in bolt.writes if w[2] == index and w[3] >> 4 == 7]
+    assert len(os_reads) == 2
+
+
+def test_a_silent_host_os_read_is_tried_once_then_skipped(agent_factory, bolt):
+    bolt.mouse.host_os_silent = True
+    c = agent_factory().client()
+    try:
+        p = hosts(c)
+        assert all("os" not in h for h in p["hosts"])
+        assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
+        index = bolt.mouse.features.index(0x1815)
+        assert len([w for w in bolt.writes if w[2] == index and w[3] >> 4 == 7]) == 1
+    finally:
+        c.close()
+
+
+def test_reading_the_hosts_sends_only_getHostInfo_to_0x1814(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1814)
+    assert {w[3] >> 4 for w in bolt.writes if w[2] == index} <= {0}
+    assert not bolt.mouse.host_writes
+
+
+def test_a_failing_host_os_read_omits_os_and_keeps_the_rest(agent_factory, bolt):
+    bolt.mouse.fail_host_os_read = True
+    c = agent_factory().client()
+    try:
+        p = hosts(c)
+        assert all("os" not in h for h in p["hosts"])
+        assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
+    finally:
+        c.close()
 
 
 def test_the_tab_is_advertised_in_device_capabilities(client):
@@ -239,4 +314,5 @@ def test_reading_the_hosts_only_uses_known_0x1815_functions(client, bolt):
     hosts(client)
     index = bolt.mouse.features.index(0x1815)
     used = {w[3] >> 4 for w in bolt.writes if w[2] == index}
-    assert used <= {0, 1, 3}        # an unconfirmed function number could move or delete a host
+    assert not bolt.mouse.host_writes               # never moveHost (5), deleteHost (6), setHostOsVersion (8)
+    assert used <= {0, 1, 3, 7}     # an unconfirmed function number could move or delete a host

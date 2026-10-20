@@ -937,6 +937,7 @@ def parse_diverted_buttons(params):
 
 NAME_CHUNK = 14             # name bytes in one getHostFriendlyName reply / setHostFriendlyName request
 HOST_NAME_CAN_GET, HOST_NAME_CAN_SET = 0x01, 0x02      # 0x1815 fn0 capability flags
+HOST_OS_TIMEOUT = 0.5       # getHostOsVersion: a mouse without it should answer with an error, not stall
 HOST_SWITCH_TIMEOUT = 0.5   # a mouse that switches away does not answer; wait this long for an error
 
 
@@ -969,23 +970,48 @@ def get_host_name(fd, idx, host, length):
     return raw.decode("utf-8", "replace")
 
 
+def get_host_os(fd, idx, host):
+    """0x1815 fn7 getHostOsVersion(host) -> reply [host, os type, major, minor, patch];
+    -> the OS type, 0 (unknown) on an error reply or a reply for another host, None on a
+    timeout (the caller stops asking: every further host would wait as long)."""
+    try:
+        p = _fcall(fd, idx, F_HOSTS_INFO, 7, bytes([host]), timeout=HOST_OS_TIMEOUT)
+    except HidppTimeout:
+        return None
+    except HidppError:
+        return 0
+    return p[1] if len(p) >= 2 and p[0] == host else 0
+
+
 def get_hosts(fd, idx):
     """0x1814 + 0x1815 -> {"current", "max_name", "can_get_name", "can_set_name",
     "hosts": [{index, paired, bus, os, name, max_name}]}.
 
     0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
-    [host, status, bus type, pages, name length, max name length]. The OS type comes from
-    getHostOsVersion, a function this client does not call yet (its number is unconfirmed, and
-    a wrong one would move or delete a host), so the OS type is always unknown (0)."""
+    [host, status, bus type, pages, name length, max name length], fn3 getHostFriendlyName,
+    fn7 getHostOsVersion(host) [host, os type, major, minor, patch], read for paired hosts only.
+    The other 0x1815 functions are fn2 getHostDescriptor, fn4 setHostFriendlyName, fn5 moveHost,
+    fn6 deleteHost and fn8 setHostOsVersion; this reader never sends fn5, fn6 or fn8 (writes).
+    Sources: the Logitech agent log string Feature1815HostsInfos::GetHostOSVersion and the
+    OpenLogi function table (AprilNEA/OpenLogi PR 1824). A host whose OS cannot be read, or whose
+    reply names another host, gets type 0, unknown."""
     count, current = get_current_host(fd, idx)
     flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
     can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
     hosts = []
+    read_os = True
     for i in range(count):
         d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
         name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": 0, "name": name,
+        # fn7 is not gated on the feature version: a mouse without it answers with an error,
+        # which reads as unknown, and a silent one costs one timeout (read_os then goes off)
+        os_type = 0
+        if paired and read_os:
+            os_type = get_host_os(fd, idx, i)
+            if os_type is None:
+                read_os, os_type = False, 0
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": os_type, "name": name,
                       "max_name": d[5] or 32})
     return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
             "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}
