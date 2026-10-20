@@ -6,8 +6,9 @@ contains those files; the xbps template (or the user) unpacks them from
 Logitech's own download, one directory per depot, into DEPOT_DIR, and the
 agent serves them from there at runtime.
 
-DEPOT_DIR defaults to /usr/lib/optionsplus-linux/logitech/depots
-(override: OPL_DEPOT_DIR). The main "logioptionsplus" depot holds data/ with
+DEPOT_DIR defaults to the depots/ directory of the fetched payload (paths.payload_dir():
+the user's XDG data directory, else the system-wide /usr/lib/optionsplus-linux/logitech;
+override: OPL_DEPOT_DIR). The main "logioptionsplus" depot holds data/ with
 the strings and the device catalogue; OPL_DATA_DIR overrides that data/
 directory alone, and its parent then stands in for the logioptionsplus depot.
 """
@@ -17,10 +18,12 @@ import json
 import logging
 import os
 
+from . import paths
+
 log = logging.getLogger("opl.resources")
 
 TYPE = "type.googleapis.com/"
-DEPOT_DIR = os.environ.get("OPL_DEPOT_DIR", "/usr/lib/optionsplus-linux/logitech/depots")
+DEPOT_DIR = os.environ.get("OPL_DEPOT_DIR") or os.path.join(paths.payload_dir(), "depots")
 DATA_DIR = os.environ.get("OPL_DATA_DIR", os.path.join(DEPOT_DIR, "logioptionsplus", "data"))
 MAIN_DEPOT = "logioptionsplus"
 
