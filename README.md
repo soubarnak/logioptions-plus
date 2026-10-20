@@ -43,6 +43,31 @@ OPL_ASAR=/path/to/app.asar OPL_DATA_DIR=/path/to/logioptionsplus/data OPL_DEPOT_
 
 `optionsplus-linux/.claude/skills/verify/SKILL.md` describes how the harness drives the UI.
 
+## Local package
+
+`tools/build-xbps.sh` builds `build/optionsplus-linux-<version>_1.noarch.xbps` from a checkout
+(needs only `xbps-create`; no void-packages). The version lives in
+`optionsplus-linux/opl_agent/__init__.py`. The build fails if the package holds any file outside
+the allow-list in `tools/check-package-contents.py` or anything that looks like Logitech payload.
+
+```bash
+tools/build-xbps.sh
+cd build && xbps-rindex -a optionsplus-linux-*.noarch.xbps
+sudo xbps-install -R "$PWD" optionsplus-linux
+```
+
+The package installs the agent and bootstrap under `/usr/lib/optionsplus-linux`, the
+`optionsplus-linux` launcher and `optionsplus-agent` command, a udev rule (access through the
+`input` group; `uaccess` where elogind is present), an XDG autostart entry for the agent and a menu
+entry. Join the `input` group on systems without elogind: `sudo usermod -aG input $USER`.
+
+The launcher uses the newest installed `electron3x`, starts the agent when its socket is not
+answering (a stale socket is replaced), and runs the UI with the Chromium sandbox on. Only if
+Void's Electron cannot sandbox, set `OPL_NO_SANDBOX=1` to add `--no-sandbox`. Removing the package
+removes the rule, autostart and menu entries; settings and downloaded data in your home stay.
+
+Tests: `python3 -m pytest optionsplus-linux/tests`.
+
 ## Packaging and updates
 
 Releases will be signed xbps packages attached to GitHub releases, installable with
