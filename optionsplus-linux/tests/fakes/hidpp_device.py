@@ -17,7 +17,8 @@ MOUSE_NAME = "Test Mouse X1"
 MOUSE_INDEX = 1
 
 # feature index -> HID++ 2.0 feature id (index 0 is always Root)
-FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110]
+FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020]
+F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
 
 
 class SimulatedMouse:
@@ -104,13 +105,6 @@ class _Handle:
     def write(self, data):
         self.rx._on_write(bytes(data))
 
-    def drain(self):
-        try:
-            while True:
-                self.rx._out.get_nowait()
-        except queue.Empty:
-            pass
-
     def read(self, timeout):
         try:
             return self.rx._out.get(timeout=max(timeout, 0))
@@ -145,6 +139,11 @@ class SimulatedBolt:
     def emit(self, report):
         """Queue an unsolicited report, as the device would send."""
         self._out.put(bytes(report))
+
+    def emit_event(self, feature_id, function=0, params=b"", index=MOUSE_INDEX):
+        """Queue an unsolicited feature event (software id 0) from the mouse."""
+        head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
+        self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
 
     # -- device side ------------------------------------------------------
     def _reply(self, request, params):

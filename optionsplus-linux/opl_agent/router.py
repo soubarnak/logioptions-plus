@@ -42,6 +42,7 @@ class Router:
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
         self.reg.on_discovered.append(self.apply_stored)
+        self.reg.on_resumed.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
         try:
             with open(self.config_path) as fh:

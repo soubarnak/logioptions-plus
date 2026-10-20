@@ -34,6 +34,9 @@ def _dtype(raw):
         return HIDPP_TYPE.get(raw.lower(), "MOUSE")
     return "MOUSE"
 
+# Features whose events mean the mouse lost state: wireless status (wake), config change.
+RESUME_FEATURES = (0x1D4B, 0x0020)
+
 # Connection enum names (logi.protocol.devices.Device.Interface.Connection).
 CONN_BOLT = "BLE_PRO"
 CONN_USB = "USB"
@@ -64,6 +67,7 @@ class Device:
         self.serial = ""
         self.fw = ""
         self.battery_caps = None     # 0x1004 capabilities {levels, rechargeable, soc}
+        self.event_features = {}     # feature index -> 0x1d4b / 0x0020 (resume events)
         self.battery_cache = None    # last {percent, charging, status} from HID++
         self.catalogue = resources.catalogue_entry(pid) or {}
 
@@ -158,11 +162,13 @@ class Registry:
         self._fds = {}             # node.path -> fd
         self._receivers = []
         self.on_discovered = []    # callables(dev_id), run in scan() for each new device
+        self.on_resumed = []       # callables(dev_id), after a wake or config-change event
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
-            fd = self.transport.open(node.path)
+            fd = hidpp.Reader(self.transport.open(node.path))
+            fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx))
             self._fds[node.path] = fd
         return fd
 
@@ -215,12 +221,36 @@ class Registry:
                     self.refresh_battery(dev_id)
                 except Exception:
                     pass
+                for fid in RESUME_FEATURES:
+                    try:
+                        d.event_features[hidpp.feature_index(fd, idx, fid)] = fid
+                    except hidpp.HidppError:
+                        pass
                 log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
                 for hook in list(self.on_discovered):
                     try:
                         hook(dev_id)
                     except Exception:
                         log.exception("discovery hook failed for %s", dev_id)
+
+    def _on_event(self, node, index, feature_index):
+        """Reader listener (own thread): the mouse woke or changed configuration."""
+        for dev_id, d in list(self.devices.items()):
+            if d.node.path != node.path or d.index != index:
+                continue
+            fid = d.event_features.get(feature_index)
+            if fid is None:
+                continue
+            log.info("device %s: event 0x%04x, reapplying settings", dev_id, fid)
+            try:
+                self.refresh_battery(dev_id)
+            except Exception as exc:
+                log.debug("battery refresh after event failed: %s", exc)
+            for hook in list(self.on_resumed):
+                try:
+                    hook(dev_id)
+                except Exception:
+                    log.exception("resume hook failed for %s", dev_id)
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):
