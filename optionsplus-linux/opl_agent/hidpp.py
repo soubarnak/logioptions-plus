@@ -926,6 +926,11 @@ def pairing_cancel(fd, feature_index):
     call(fd, DEV_RECEIVER, feature_index, 1)
 
 
+def _device_gone(err):
+    """True when `err` says nothing answers at the device index any more."""
+    return isinstance(err, HidppTimeout) or (err.version == 1 and err.name == "UNKNOWN_DEVICE")
+
+
 def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
     """Ping device indices 1..max_devices; return those that answer.
 
@@ -940,12 +945,18 @@ def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
         d = {"index": i, "protocol": proto, "wpid": None, "name": None, "type": None}
         if bolt is not None:
             d["wpid"] = _pairing_wpid(fd, i, bolt)
+        gone = False
         if proto[0] >= 2:
             for key, fn in (("name", get_device_name), ("type", get_device_type)):
                 try:
                     d[key] = fn(fd, i)
                 except HidppError as e:
                     log.debug("%s idx %d: %s", key, i, e)
+                    if _device_gone(e):
+                        gone = True
+                        break
+        if gone:
+            continue        # it answered the ping, then switched off: not a device with a blank name
         out.append(d)
     return out
 
