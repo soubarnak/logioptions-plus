@@ -704,6 +704,19 @@ class Registry:
         if hidpp.get_cid_diverted(fd, d.index, cid) != bool(divert):
             hidpp.set_cid_diverted(fd, d.index, cid, divert)
 
+    def remap_of(self, dev_id, cid):
+        """Blocking: the control id button `cid` currently acts as (itself unless remapped)."""
+        d = self.devices[dev_id]
+        return hidpp.get_cid_remap(self._fds[d.node.path], d.index, cid)
+
+    def set_remap(self, dev_id, cid, target):
+        """Blocking: make button `cid` act as button `target`; reads back, raises when it did
+        not take. Writes only when the device is not already as asked."""
+        d = self.devices[dev_id]
+        fd = self._fds[d.node.path]
+        if hidpp.get_cid_remap(fd, d.index, cid) != target:
+            hidpp.set_cid_remap(fd, d.index, cid, target)
+
     def read_thumb(self, dev_id):
         """Blocking 0x2150 status read: {mode, invert, smooth}."""
         d = self.devices[dev_id]

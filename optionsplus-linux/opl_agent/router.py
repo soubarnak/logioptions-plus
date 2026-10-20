@@ -17,7 +17,7 @@ import json
 import logging
 import os
 
-from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, updates
+from . import actions, applications, easy_switch, engine as input_engine, model, profiles, resources, responses, stubs, swap, updates
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
@@ -45,6 +45,7 @@ class Router:
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
         self.engine = input_engine.InputEngine(self.reg, self.store, input_factory)
+        self.button_swap = swap.ButtonSwap(self.reg, _state_dir(state_dir), self.runner)
         self.reg.on_discovered.append(self.apply_stored)
         self.reg.on_resumed.append(self.apply_stored)
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
@@ -136,6 +137,11 @@ class Router:
             r = await self._profiles_set(path, payload)
             if r is not None:
                 return r
+
+        parts = path.strip("/").split("/")
+        if verb in ("GET", "SET") and parts[0] == "mouse" and parts[-1] == "swap" \
+                and (len(parts) == 2 or len(parts) == 3 and (parts[1] == "global" or parts[1] in self.reg.devices)):
+            return await self._swap_route(verb, payload)
 
         if verb == "GET" and path == "/system/info":
             return "SUCCESS", updates.system_info(self.os_release_path), ""
@@ -329,6 +335,23 @@ class Router:
             self.engine.sync(dev)
         except Exception as exc:
             log.warning("reapplying button diversions failed: %s", exc)
+        try:
+            self.button_swap.apply_stored(dev)
+        except Exception as exc:
+            log.warning("reapplying the button swap failed: %s", exc)
+
+    async def _swap_route(self, verb, payload):
+        if verb == "SET":
+            wanted = (payload or {}).get("state") == swap.STATE_RIGHT
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, self.button_swap.set, wanted)
+            except swap.SwapUnsupported as exc:
+                return "NOT_SUPPORTED", None, str(exc)
+            except Exception as exc:
+                log.warning("swapping the buttons failed: %s", exc)
+                return "FAULTED", None, "could not swap the buttons: %s" % exc
+        return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
+                           "state": self.button_swap.state}, ""
 
     async def _profiles_set(self, path, payload):
         loop = asyncio.get_event_loop()
