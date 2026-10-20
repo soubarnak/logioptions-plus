@@ -921,7 +921,6 @@ def parse_diverted_buttons(params):
 NAME_CHUNK = 14             # name bytes in one getHostFriendlyName reply / setHostFriendlyName request
 HOST_NAME_CAN_GET, HOST_NAME_CAN_SET = 0x01, 0x02      # 0x1815 fn0 capability flags
 HOST_SWITCH_TIMEOUT = 0.5   # a mouse that switches away does not answer; wait this long for an error
-FN_HOST_OS = 5              # getHostOsVersion; the function number is an assumption, see easy_switch.py
 
 
 def get_current_host(fd, idx):
@@ -959,7 +958,8 @@ def get_hosts(fd, idx):
 
     0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
     [host, status, bus type, pages, name length, max name length]. The OS type comes from
-    getHostOsVersion where the mouse has it, else it is unknown (0)."""
+    getHostOsVersion, a function this client does not call yet (its number is unconfirmed, and
+    a wrong one would move or delete a host), so the OS type is always unknown (0)."""
     count, current = get_current_host(fd, idx)
     flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
     can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
@@ -968,14 +968,7 @@ def get_hosts(fd, idx):
         d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
         name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
-        os_type = 0
-        if paired:
-            try:
-                os_type = _fcall(fd, idx, F_HOSTS_INFO, FN_HOST_OS, bytes([i]))[1]
-            except HidppError as exc:
-                if isinstance(exc, HidppTimeout):
-                    raise
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": os_type, "name": name,
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": 0, "name": name,
                       "max_name": d[5] or 32})
     return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
             "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}

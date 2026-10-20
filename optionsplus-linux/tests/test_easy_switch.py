@@ -29,7 +29,7 @@ def test_lists_the_host_slots_with_names_and_the_current_host(client):
     assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
     assert [h["paired"] for h in p["hosts"]] == [True, True, False]
     assert [h["connected"] for h in p["hosts"]] == [True, False, False]
-    assert p["hosts"][0]["os"]["type"] == "WINDOWS" and p["hosts"][1]["os"]["type"] == "MACOS"
+    assert [h["os"]["type"] for h in p["hosts"]] == ["UNKNOWN"] * 3     # the OS is not read from the mouse
     assert p["maxNameLength"] == 32
     assert p["capabilities"]["canGetName"] is True and p["capabilities"]["canSetName"] is True
     assert not p["capabilities"].get("canDelete")
@@ -233,3 +233,10 @@ def _until_reply(client, mid):
         if m.get("msgId") == mid and "result" in m:
             return [p for p in pushes if p.get("verb") == "BROADCAST"]
         pushes.append(m)
+
+
+def test_reading_the_hosts_only_uses_known_0x1815_functions(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1815)
+    used = {w[3] >> 4 for w in bolt.writes if w[2] == index}
+    assert used <= {0, 1, 3}        # an unconfirmed function number could move or delete a host

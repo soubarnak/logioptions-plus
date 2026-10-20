@@ -238,10 +238,10 @@ class SimulatedMouse:
             # Layout after Solaar's HostsInfo: fn0 [capability flags, 0, host count, current host],
             # fn1 getHostInfo(host) [host, status, bus, pages, name length, max name length],
             # fn2 getHostDescriptor, fn3 getHostFriendlyName(host, offset) [host, offset, 14 name bytes],
-            # fn4 setHostFriendlyName(host, offset, 14 name bytes). fn5 stands for getHostOsVersion.
+            # fn4 setHostFriendlyName(host, offset, 14 name bytes).
             if fn == 0:
                 return bytes([self.host_caps, 0, len(self.hosts), self.current_host])
-            if fn in (1, 2, 3, 4, 5) and params[0] >= len(self.hosts):
+            if fn in (1, 2, 3, 4) and params[0] >= len(self.hosts):
                 return 2
             if fn == 1:
                 h = self.hosts[params[0]]
@@ -262,8 +262,6 @@ class SimulatedMouse:
                 h["name"] = (h["name"][:params[1]] + chunk.rstrip(b"\0"))[:h.get("max_name", self.max_host_name)]
                 h["paired"] = True
                 return bytes([params[0], params[1]])
-            if fn == 5:
-                return bytes([params[0], self.hosts[params[0]]["os"]])
         return 7                                      # INVALID_FUNCTION_ID
 
 
