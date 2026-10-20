@@ -17,6 +17,7 @@ log = logging.getLogger("opl.applications")
 
 TYPE = "type.googleapis.com/"
 ICON_EXTS = (".png", ".svg", ".xpm")
+WM_CLASS_KEY = "startupWMClass"
 _FIELD_CODE = re.compile(r"%[a-zA-Z%]")
 
 
@@ -86,6 +87,11 @@ def _executable(exec_line):
         argv = cmd.split()
     if not argv:
         return cmd, ""
+    if os.path.basename(argv[0]) == "env":       # env [-opts] [VAR=value ...] program: the program is the app
+        rest = [a for a in argv[1:]]
+        while rest and (rest[0].startswith("-") or "=" in rest[0]):
+            rest.pop(0)
+        argv = rest or argv
     prog = argv[0]
     return cmd, prog if os.path.isabs(prog) else (shutil.which(prog) or prog)
 
@@ -117,8 +123,11 @@ def scan(dirs):
                 "poster": icon, "posterPath": icon, "posterUrl": icon,
                 "isInstalled": True,
             }
+            if entry.get("StartupWMClass"):
+                found[app_id][WM_CLASS_KEY] = entry["StartupWMClass"]    # for focus matching, not for the UI
     return sorted(found.values(), key=lambda a: (a["name"].lower(), a["applicationId"]))
 
 
 def payload(apps):
-    return {"@type": TYPE + "logi.protocol.applications.Applications", "applications": list(apps)}
+    return {"@type": TYPE + "logi.protocol.applications.Applications",
+            "applications": [{k: v for k, v in a.items() if k != WM_CLASS_KEY} for a in apps]}

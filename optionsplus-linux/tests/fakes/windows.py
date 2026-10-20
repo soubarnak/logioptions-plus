@@ -25,7 +25,8 @@ class FakeWindows:
 class FakeXprop:
     """Answers `xprop` command lines from a table of canned output, like the real tool would."""
 
-    def __init__(self, active="0x42", props=None, pid_exe=None):
+    def __init__(self, active="0x42", props=None, pid_exe=None, machine=None):
+        self.machine = machine
         self.active = active
         self.props = props or {}                  # window id -> (WM_CLASS text, pid or None)
         self.calls = []
@@ -40,5 +41,7 @@ class FakeXprop:
             cls, pid = self.props.get(argv[2], (None, None))
             out = ('WM_CLASS(STRING) = %s\n' % cls) if cls else "WM_CLASS:  not found.\n"
             out += ("_NET_WM_PID(CARDINAL) = %d\n" % pid) if pid else "_NET_WM_PID:  not found.\n"
+            if self.machine:
+                out += 'WM_CLIENT_MACHINE(STRING) = "%s"\n' % self.machine
             return out
         raise AssertionError(argv)
