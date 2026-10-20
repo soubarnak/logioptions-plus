@@ -219,3 +219,68 @@ def test_readme_documents_repo_install_and_fingerprint():
     assert "/etc/xbps.d/20-optionsplus-linux.conf" in t
     assert "releases/latest/download" in t
     assert re.search(r"optionsplus-linux-[0-9][0-9.]*_1\.noarch", t)
+
+
+def _readme():
+    return README.read_text()
+
+
+def test_readme_install_commands_and_every_architecture():
+    t = _readme()
+    assert "xbps-install -S optionsplus-linux" in t
+    assert "xbps-install -Su" in t
+    assert "https://github.com/soubarnak/logioptions-plus/releases/latest/download" in t
+    for arch in ARCHES:
+        assert re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(arch), t), arch
+    assert "i686-musl" not in t           # no such Void architecture
+
+
+def test_readme_environment_variables_exist_in_the_code():
+    sources = [*(ROOT / "opl_agent").glob("*.py"), *(ROOT / "bin").glob("*"),
+               ROOT / "bootstrap" / "main.js", *TOOLS.glob("*")]
+    known = set()
+    for path in sources:
+        if path.is_file():
+            known |= set(re.findall(r"OPL_[A-Z0-9_]+", path.read_text(errors="replace")))
+    mentioned = set(re.findall(r"OPL_[A-Z0-9_]+", _readme()))
+    assert "OPL_WHEEL_RELAY" in mentioned and "OPL_PAYLOAD_DIR" in mentioned
+    assert not mentioned - known, mentioned - known
+
+
+def test_readme_names_where_things_live():
+    t = _readme()
+    for needle in ("~/.local/state/optionsplus-linux", "agent.log", "~/.config/optionsplus-linux",
+                   "actions.toml", "~/.local/share/optionsplus-linux/payload", "optionsplus-fetch-payload"):
+        assert needle in t, needle
+
+
+def test_readme_has_the_support_section_the_ui_links_point_at():
+    # bootstrap/links.js sends support links to <repo>#support
+    assert re.search(r"^## Support$", _readme(), re.M)
+    assert "#support" in (ROOT / "bootstrap" / "links.js").read_text()
+
+
+def test_readme_sections_in_order():
+    heads = re.findall(r"^## (.+)$", _readme(), re.M)
+    wanted = ["What it is", "Supported devices", "Requirements", "Install", "Updating", "Usage",
+              "Troubleshooting", "Building locally", "Development", "Support", "License"]
+    at = [next(i for i, h in enumerate(heads) if h == w or h.startswith(w + " ")) for w in wanted]
+    assert at == sorted(at)
+
+
+def test_readme_default_chords_match_the_code():
+    from opl_agent import sysactions
+    t = _readme()
+    for action, text in (("SWITCH_BETWEEN_DESKTOPS_RIGHT", "super+page_down"),
+                         ("SWITCH_BETWEEN_DESKTOPS_LEFT", "super+page_up"),
+                         ("SWITCH_APPS", "alt+tab"), ("LOCK", "super+l"),
+                         ("SHOW_DESKTOP", "super+d")):
+        assert sysactions.parse_chord(text) == sysactions.DEFAULTS[action], action
+        assert text in t.lower().replace(" ", ""), text
+
+
+def test_readme_states_the_limits_honestly():
+    t = _readme()
+    for needle in ("SHUT_DOWN", "KEY_POWER", "CONSOLE_CLIENT", "Ctrl+Alt+T", "Solaar", "logiops",
+                   "fwupd", "not affiliated", "schema_defaults.py", "protodefaults.py", "unverified"):
+        assert needle in t, needle
