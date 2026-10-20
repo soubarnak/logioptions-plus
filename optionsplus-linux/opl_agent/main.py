@@ -27,11 +27,44 @@ log = logging.getLogger("opl.main")
 TYPE = "type.googleapis.com/"
 
 POLL_SECONDS = 30
+RESCAN_SECONDS = 2.0     # also the longest a switched-off mouse can stay on screen
 
 
 def _battery_key(reg, dev_id):
     b = reg.devices[dev_id].battery_cache or {}
     return (b.get("percent"), bool(b.get("charging")))
+
+
+def _device_info(reg, dev_id):
+    info = reg.devices[dev_id].info()
+    bs = reg.battery_status_for_info(dev_id)
+    if bs:
+        info["batteryStatus"] = bs
+    info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+    return info
+
+
+async def _watch(server, reg, interval=RESCAN_SECONDS):
+    """Rescan on hidraw node add/remove and every `interval` (a mouse switching
+    on or off leaves the receiver's node alone); announce what changed."""
+    loop = asyncio.get_event_loop()
+    wait = getattr(reg.transport, "wait_change", None)
+    while True:
+        if wait is not None:
+            await loop.run_in_executor(None, wait, interval)
+        else:
+            await asyncio.sleep(interval)
+        try:
+            events = await loop.run_in_executor(None, reg.rescan)
+        except Exception:
+            log.exception("rescan failed")
+            continue
+        for d in events["removed"]:
+            info = d.info()
+            info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+            server.broadcast("/devices/state/deactivated", info)
+        for dev_id in events["added"] + events["returned"]:
+            server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
 
 
 async def _poll(server, reg, interval=POLL_SECONDS):
@@ -49,10 +82,7 @@ async def _poll(server, reg, interval=POLL_SECONDS):
                 pl, _ = reg.battery(dev_id)
                 server.broadcast("/battery/state/changed", pl)
                 server.broadcast("/battery/%s/state/changed" % dev_id, pl)
-                info = reg.devices[dev_id].info()
-                info["batteryStatus"] = reg.battery_status_for_info(dev_id)
-                info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
-                server.broadcast("/devices/state/changed", info)
+                server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
 
 
 class Agent:
@@ -66,6 +96,7 @@ class Agent:
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
                  depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS,
+                 rescan_seconds=RESCAN_SECONDS,
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
                  release_base_url=None, clock=None):
@@ -81,6 +112,8 @@ class Agent:
         self.router.server = self.server
         updater.broadcast = self.server.broadcast
         self.poll_seconds = poll_seconds
+        self.rescan_seconds = rescan_seconds
+        self._watcher = None
         self._srv = None
         self._poller = None
         self._updates = None
@@ -92,6 +125,7 @@ class Agent:
         self._srv = await self.server.start()
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
         self._updates = asyncio.ensure_future(self.router.updater.run())
+        self._watcher = asyncio.ensure_future(_watch(self.server, self.reg, self.rescan_seconds))
 
     async def serve_forever(self):
         async with self._srv:
@@ -102,6 +136,8 @@ class Agent:
             self._poller.cancel()
         if self._updates:
             self._updates.cancel()
+        if self._watcher:
+            self._watcher.cancel()
         if self._srv:
             self._srv.close()
             await self._srv.wait_closed()
