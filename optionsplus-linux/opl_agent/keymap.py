@@ -31,6 +31,10 @@ _TABLE.update({
     116: 134, 117: 138, 118: 130, 119: 132, 120: 128, 121: 129,      # Open Help Props Front Stop Again
     122: 131, 123: 137, 124: 133, 125: 135, 126: 136,                # Undo Cut Copy Paste Find
     127: 113, 128: 115, 129: 114,                                    # Mute Volume up / down
+    133: 121,                                                        # KP comma
+    135: 89, 136: 93, 137: 124, 138: 92, 139: 94, 140: 95,           # International 1..6: Ro Kana Yen Henkan Muhenkan KPJPComma
+    144: 122, 145: 123, 146: 90, 147: 91, 148: 85,                   # Language 1..5: Hangeul Hanja Katakana Hiragana Zenkaku
+    156: 355,                                                        # Clear
     224: 29, 225: 42, 226: 56, 227: 125, 228: 97, 229: 54, 230: 100, 231: 126,   # Ctrl Shift Alt Meta, L then R
 })
 for _i, _key in enumerate([59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88]):     # F1..F12
