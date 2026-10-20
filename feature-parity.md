@@ -327,6 +327,23 @@ a remap do something.
   device support cannot swap from an app; use the desktop's own setting.** The X11 swap is
   reapplied only when a mouse connects, not at login without one.
 
+#### 5.2.1 Gesture and thumb wheel cards (ticket #23) - what is assumed
+
+- The gesture button (CID 195 on the MX Master line) is diverted with `0x1b04`
+  `setCidReporting` flags `divert | rawXY` (0x01 | 0x10, valid bits 0x02 | 0x20), only on controls
+  whose control info flags2 (byte 8) bit 0 says raw XY. Event fn1 carries `dx, dy` as signed
+  big-endian words. A swipe fires its action once the travel on the stronger axis reaches the
+  threshold; release without a swipe runs the click action. Unconfirmed on hardware.
+- Threshold: mid point of `gestureInfo.x|y.actionThreshold` (device units) of the card, else 50 counts.
+- Card layout is assumed: `nestedCards` keyed by `up|down|left|right|click` (a token of the key or of
+  the nested card id is enough). The real Windows layout of ADAPTER_4WAYS / ADAPTER_2WAYS has not
+  been captured; check it against the UI once and adjust `opl_agent/gestures.py`.
+- Thumb wheel (`<prefix>_thumb_wheel_adapter`, ADAPTER_2WAYS): reporting mode 1 (diverted) in
+  `0x2150` fn2; event fn0 rotation is a signed big-endian word, positive taken as right; one action
+  per reporting unit. Sign and unit are unconfirmed on hardware.
+- Manual: hold the gesture button and move left on a compositor with a "desktop left" key bound
+  (for example Ctrl+Alt+Left on KDE or GNOME-with-extension): the desktop must switch.
+
 ### 5.3 Acceptance
 
 Assign "Copy" to the Back button → `0x1b04` divert visible in the log → pressing Back in a

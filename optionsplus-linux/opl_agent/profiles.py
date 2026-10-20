@@ -41,15 +41,27 @@ def default_assignments(slot_prefix, depot):
                         "card": card})
         wheel = settings.get("mouseThumbWheelAction")
         if wheel:
-            out.append({"slotId": slot_prefix + "_thumb_wheel_adapter", "cardId": wheel.get("id", ""),
+            out.append({"slotId": slot_prefix + THUMB_ADAPTER_SUFFIX, "cardId": wheel.get("id", ""),
                         "card": wheel})
     return out
 
 
-def is_button_slot(slot_id, slot_prefix):
-    """True for a control's slot, <slotPrefix>_c<controlId>."""
+THUMB_ADAPTER_SUFFIX = "_thumb_wheel_adapter"
+THUMB_KEY = "thumb"             # control_key of the thumb wheel's action slot
+
+
+def control_key(slot_id, slot_prefix):
+    """What a button-like slot controls: the control id (int) of <slotPrefix>_c<controlId>,
+    THUMB_KEY for the thumb wheel's action slot, else None."""
+    if slot_id == slot_prefix + THUMB_ADAPTER_SUFFIX:
+        return THUMB_KEY
     head, _, cid = slot_id.rpartition("_c")
-    return head == slot_prefix and cid.isdigit()
+    return int(cid) if head == slot_prefix and cid.isdigit() else None
+
+
+def is_button_slot(slot_id, slot_prefix):
+    """True for a control's slot, <slotPrefix>_c<controlId>, and the thumb wheel's action slot."""
+    return control_key(slot_id, slot_prefix) is not None
 
 
 def _with_chosen_buttons(assignments, store, slot_prefix):

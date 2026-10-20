@@ -754,13 +754,13 @@ def set_wheel(fd, idx, hires=None, invert=None):
 # ThumbWheel (0x2150)
 # --------------------------------------------------------------------------
 
-THUMB_NATIVE, THUMB_DIVERTED = 1, 2     # reporting modes: HID native / sent to software
+THUMB_NATIVE, THUMB_DIVERTED = 0, 1     # reporting modes: HID native / sent to software (as Solaar)
 
 
 def get_thumbwheel(fd, idx):
     """fn1 getThumbwheelStatus -> {mode, invert, smooth}.
 
-    mode is 1 (native HID) or 2 (diverted), invert is the direction flag.
+    mode is 0 (native HID) or 1 (diverted), invert is the direction flag.
     The smooth byte follows invert; not confirmed on hardware, see
     feature-parity.md section 4."""
     p = _fcall(fd, idx, F_THUMB_WHEEL, 1)
@@ -778,7 +778,9 @@ def set_thumbwheel(fd, idx, invert, smooth, mode=THUMB_NATIVE):
 # --------------------------------------------------------------------------
 
 CTRL_REPROGRAMMABLE, CTRL_DIVERTABLE = 0x10, 0x20      # control info flags1
+CTRL_RAW_XY = 0x01              # control info flags2 (byte 8): can report raw XY while held
 REPORT_DIVERT = 0x01            # setCidReporting flags: the divert value; the change bit is value << 1
+REPORT_RAW_XY = 0x10            # same byte: divert raw XY motion; the change bit is value << 1
 
 
 def get_controls(fd, idx):
@@ -789,14 +791,15 @@ def get_controls(fd, idx):
         p = _fcall(fd, idx, F_REPROG_CONTROLS, 1, bytes([i]))
         cid, flags = struct.unpack(">H", p[:2])[0], p[4]
         out[cid] = {"reprogrammable": bool(flags & CTRL_REPROGRAMMABLE),
-                    "divertable": bool(flags & CTRL_DIVERTABLE)}
+                    "divertable": bool(flags & CTRL_DIVERTABLE),
+                    "raw_xy": bool(len(p) > 8 and p[8] & CTRL_RAW_XY)}
     return out
 
 
 def get_cid_reporting(fd, idx, cid):
-    """fn2 getCidReporting(cid) -> (diverted to software, the control id it acts as)."""
+    """fn2 getCidReporting(cid) -> (diverted to software, raw XY diverted, the control id it acts as)."""
     p = _fcall(fd, idx, F_REPROG_CONTROLS, 2, struct.pack(">H", cid))
-    return bool(p[2] & REPORT_DIVERT), (struct.unpack(">H", p[3:5])[0] or cid)
+    return bool(p[2] & REPORT_DIVERT), bool(p[2] & REPORT_RAW_XY), (struct.unpack(">H", p[3:5])[0] or cid)
 
 
 def get_cid_diverted(fd, idx, cid):
@@ -806,7 +809,7 @@ def get_cid_diverted(fd, idx, cid):
 
 def get_cid_remap(fd, idx, cid):
     """The control id `cid` acts as: itself unless remapped."""
-    return get_cid_reporting(fd, idx, cid)[1]
+    return get_cid_reporting(fd, idx, cid)[2]
 
 
 def set_cid_remap(fd, idx, cid, target):
@@ -818,15 +821,29 @@ def set_cid_remap(fd, idx, cid, target):
         raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request
 
 
-def set_cid_diverted(fd, idx, cid, divert):
-    """fn3 setCidReporting(cid, flags, remap): divert the control or hand it back. The device
-    state is read back; raises HidppError when it did not take."""
+def set_cid_diverted(fd, idx, cid, divert, raw_xy=None):
+    """fn3 setCidReporting(cid, flags, remap): divert the control or hand it back; `raw_xy` True or
+    False also diverts or releases its raw motion, None leaves that alone. The device state is read
+    back; raises HidppError when it did not take."""
     flags = (REPORT_DIVERT << 1) | (REPORT_DIVERT if divert else 0)
+    if raw_xy is not None:
+        flags |= (REPORT_RAW_XY << 1) | (REPORT_RAW_XY if raw_xy else 0)
     # a request that names no target resets the remap, so say the one the control has now
     remap = get_cid_remap(fd, idx, cid)
     _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, remap))
-    if get_cid_diverted(fd, idx, cid) != bool(divert):
+    got_divert, got_raw, _ = get_cid_reporting(fd, idx, cid)
+    if got_divert != bool(divert) or (raw_xy is not None and got_raw != bool(raw_xy)):
         raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request
+
+
+def parse_raw_xy(params):
+    """Event 1 params (divertedRawXYEvent) -> (dx, dy), signed big-endian words."""
+    return struct.unpack(">hh", bytes(params[:4]).ljust(4, b"\0"))
+
+
+def parse_thumb_rotation(params):
+    """0x2150 event 0 params -> the signed rotation, in the wheel's reporting units."""
+    return struct.unpack(">h", bytes(params[:2]).ljust(2, b"\0"))[0]
 
 
 def parse_diverted_buttons(params):

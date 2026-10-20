@@ -74,7 +74,7 @@ def test_smooth_writes_through_2150_and_keeps_direction(client, bolt):
 
 def test_write_never_diverts_the_wheel(client, bolt):
     put(client, dir="NATURAL", isSmooth=True)
-    assert bolt.mouse.thumb["mode"] == 1          # native HID reporting, no relay yet
+    assert bolt.mouse.thumb["mode"] == 0          # native HID reporting while no action card is assigned
 
 
 def test_speed_is_not_adjustable_without_the_relay(client):
