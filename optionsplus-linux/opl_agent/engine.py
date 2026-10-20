@@ -115,16 +115,16 @@ def compile_card(card, table=None):
     raise Unsupported("%s actions are not supported yet" % (kind or "this kind of"))
 
 
-def compile_binding(card):
+def compile_binding(card, table=None):
     """What a press does: the events of a plain card, a `gestures.Gesture` for a four-way card,
     a `gestures.Thumb` for a two-way card. Raises Unsupported when any action cannot run."""
     kind = gestures.kind(card)
     if kind is None:
-        return compile_card(card)
+        return compile_card(card, table)
     nested = gestures.nested_actions(card)
     if not nested:
         raise Unsupported("this action card has no actions assigned")
-    actions = {word: compile_card(sub) for word, sub in nested.items()}
+    actions = {word: compile_card(sub, table) for word, sub in nested.items()}
     if kind == gestures.FOUR_WAYS:
         return gestures.Gesture(actions, gestures.swipe_limit(card))
     return gestures.Thumb(actions)
@@ -207,7 +207,7 @@ class InputEngine:
         """Make control `key` (a control id, or profiles.THUMB_KEY) run `card`. Blocking. Raises
         Unsupported for a card or control that cannot, any other error when the device write
         fails; nothing changes then."""
-        binding = compile_binding(card)
+        binding = compile_binding(card, self.table)
         self._check(dev, key, binding)
         self.sink()                     # never divert a control that could not be injected for
         self._write(dev, key, binding)
@@ -216,7 +216,7 @@ class InputEngine:
 
     def validate(self, dev, key, card):
         """Raise Unsupported unless control `key` could run `card`; touches nothing."""
-        self._check(dev, key, compile_binding(card))
+        self._check(dev, key, compile_binding(card, self.table))
         self.sink()
 
     def release(self, dev, key):
@@ -244,7 +244,7 @@ class InputEngine:
             if key is None or card.get("id") == defaults.get(slot_id):
                 continue
             try:
-                out[key] = compile_binding(card)
+                out[key] = compile_binding(card, self.table)
             except Unsupported as exc:
                 log.warning("button %s: %s", slot_id, exc)
         return out
