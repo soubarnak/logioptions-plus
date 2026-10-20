@@ -226,3 +226,12 @@ def test_an_old_stored_dir_spelling_is_still_understood(client, bolt):
     change(client, dir="NORMAL")
     assert not bolt.mouse.wheel_mode & INVERT_BIT
     assert current(client)["dir"] == "STANDARD"
+
+
+def test_reset_clears_the_wheel_bits_the_mouse_holds_even_when_the_wheel_is_not_diverted(client, bolt):
+    bolt.mouse.wheel_mode = HIRES_BIT | INVERT_BIT           # not diverted: nothing of ours holds the wheel
+    reply = client.call("SET", "/v2/profiles/reset", {
+        "@type": TYPE + "logi.protocol.profiles_v2.ProfileResetInfo", "profileId": DEFAULT_PROFILE})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.wheel_mode & (HIRES_BIT | INVERT_BIT) == 0
+    assert bolt.mouse.wheel_mode & 0x01 == 0                  # and the wheel is not diverted

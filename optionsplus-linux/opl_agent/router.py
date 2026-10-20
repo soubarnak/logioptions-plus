@@ -807,6 +807,8 @@ class Router:
             self.relay.release(dev, reset=True)
         except Exception as exc:
             log.warning("handing the wheels back failed: %s", exc)
+        if dev.scroll_caps["highResolution"]:
+            self.reg.divert_wheel(dev.id, None, invert=False, hires=False)    # the relay only writes a wheel it holds
         if dev.thumb_wheel:
             self.reg.write_thumb(dev.id, False, False)
         value = profiles.default_pointer_value(dev.depot)
