@@ -16,7 +16,8 @@ import json
 import logging
 import os
 
-from . import profiles, resources, responses
+from . import profiles, resources, responses, stubs
+from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.router")
 
@@ -31,8 +32,9 @@ def _state_dir(explicit=None):
 
 
 class Router:
-    def __init__(self, registry, state_dir=None):
+    def __init__(self, registry, state_dir=None, runner=None):
         self.reg = registry
+        self.runner = runner or SubprocessRunner()
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.config = copy.deepcopy(responses.BOOT["/configuration"])
@@ -99,6 +101,12 @@ class Router:
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
+        stub = stubs.lookup(verb, path)
+        if stub is not None:
+            return stub[0], stub[1], ""
+        if verb == "SET" and path == "/system/open_settings":
+            self._open_settings()
+            return "SUCCESS", payload, ""
         if path in responses.ERRORS:
             return responses.ERRORS[path], None, ""
         if verb == "SET" and path in responses.SET_ECHO:
@@ -119,9 +127,20 @@ class Router:
         # Several boot sagas issue a SET without catching a failure; one
         # rejected SET cancels the whole saga tree. Accept unknown SETs.
         if verb == "SET":
-            log.info("unhandled SET %s accepted", path)
+            log.warning("unhandled SET %s accepted (feature not implemented)", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    def _open_settings(self):
+        """Open the desktop's mouse settings if a known tool is installed."""
+        tools = [["gnome-control-center", "mouse"], ["systemsettings", "kcm_mouse"]]
+        if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+            tools.reverse()
+        for argv in tools:
+            if self.runner.which(argv[0]):
+                self.runner.run(argv)
+                return
+        log.info("no known desktop mouse settings tool; nothing to open")
 
     def _set_config(self, payload):
         for k, v in payload.items():
