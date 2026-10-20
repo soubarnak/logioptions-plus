@@ -336,6 +336,11 @@ def test_dfu_check_answers_success_and_pushes_no_update(client, agent):
         assert push["payload"]["id"] == device_id(client)
         assert push["payload"]["state"] == "ACTIVE"
         assert push["payload"]["fwUpdate"]["requireFwUpdate"] is False
+        # the whole record, so a UI that merges the push does not blank the device
+        assert push["payload"]["connected"] is True
+        assert push["payload"]["firmwareVersion"] == "RBM 12.34.B0567"
+        (iface,) = push["payload"]["activeInterfaces"]
+        assert iface["type"] == "DEVIO"
     finally:
         other.close()
 

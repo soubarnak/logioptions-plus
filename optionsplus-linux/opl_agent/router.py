@@ -53,6 +53,8 @@ class Router:
         self.window_probe = None         # set while the tracker idles (no profile): reads the focused window on demand
         self.server = None          # set by main; used for change broadcasts
         self._pushes = set()             # broadcasts queued behind a reply (kept so they are not collected)
+        self._push_futures = set()       # threadsafe broadcasts, so cancel_pushes reaches them too
+        self._stopping = False           # set by cancel_pushes: nothing is scheduled after it
         self._push_lock = None           # serialises snapshot+send, so pushes reach the UI in order
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
@@ -345,18 +347,24 @@ class Router:
 
     def _push_done(self, task):
         self._pushes.discard(task)
-        if not task.cancelled() and task.exception() is not None:
+        if not self._stopping and not task.cancelled() and task.exception() is not None:
             log.warning("profile push failed: %s", task.exception())
 
     def cancel_pushes(self):
-        """Event loop: cancel broadcasts still queued behind a reply (agent stopping)."""
+        """Event loop: cancel broadcasts still queued behind a reply (agent stopping), and
+        schedule no more."""
+        self._stopping = True
         for task in list(self._pushes):
             task.cancel()
+        for fut in list(self._push_futures):
+            fut.cancel()
 
     def _broadcast_after_reply(self):
         """Push the profiles once the current reply is out. The UI drops a profiles push for a
         slot whose own SET is still pending, so a push sent before the reply leaves the device
         picture one change behind."""
+        if self._stopping:
+            return
         task = asyncio.get_running_loop().create_task(self._broadcast_profiles())
         self._pushes.add(task)
         task.add_done_callback(self._push_done)
@@ -364,17 +372,20 @@ class Router:
     def _schedule_broadcast(self):
         """Any thread: push the profiles to the UI from the event loop. Never waits."""
         loop = self.loop
-        if loop is None or self.server is None:
+        if loop is None or self.server is None or self._stopping:
             return
+        coro = self._broadcast_profiles()
         try:
-            fut = asyncio.run_coroutine_threadsafe(self._broadcast_profiles(), loop)
-            fut.add_done_callback(self._future_done)
-        except RuntimeError:
-            pass                         # the loop is closed: the agent is stopping
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:             # the loop is closed: the agent is stopping
+            coro.close()
+            return
+        self._push_futures.add(fut)
+        fut.add_done_callback(self._future_done)
 
-    @staticmethod
-    def _future_done(fut):
-        if not fut.cancelled() and fut.exception() is not None:
+    def _future_done(self, fut):
+        self._push_futures.discard(fut)
+        if not self._stopping and not fut.cancelled() and fut.exception() is not None:
             log.warning("profile push failed: %s", fut.exception())
 
     def _card_gone(self, dev_id, slot_id, app, message):
@@ -999,13 +1010,18 @@ class Router:
         if verb == "SET" and parts[0] == "dfu" and len(parts) == 3 and parts[2] == "check":
             if parts[1] not in reg.devices:
                 return "INVALID_DEVICE", None, "unknown device id"
-            if self.server is not None:
-                # the UI ends "Checking for updates..." only on a Device.Info that names the device
-                dev = reg.devices[parts[1]]
-                self.server.broadcast("/dfu/update/available", {
-                    "@type": TYPE + "logi.protocol.devices.Device.Info",
-                    "id": dev.id, "state": dev.info()["state"],
-                    "fwUpdate": {"requireFwUpdate": False}})
+            if self.server is not None and not self._stopping:
+                # the UI ends "Checking for updates..." only on a Device.Info that names the device.
+                # It carries the whole record: ipc.fill pads a bare one with defaults the UI may merge.
+                info = reg.devices[parts[1]].info()
+                bs = reg.battery_status_for_info(parts[1])
+                if bs:
+                    info["batteryStatus"] = bs
+                info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+                info["fwUpdate"] = {"requireFwUpdate": False}
+                # after the reply, like the profile pushes
+                asyncio.get_running_loop().call_soon(
+                    self.server.broadcast, "/dfu/update/available", info)
             return "SUCCESS", {"@type": TYPE + "logi.protocol.dfu.Info"}, ""
 
         # /battery/<id>/state

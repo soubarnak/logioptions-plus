@@ -88,3 +88,44 @@ def test_a_termination_signal_stops_gracefully_and_hands_the_wheels_back(sig, wo
             p.kill()
     assert p.returncode == 0, out
     assert "NATIVE" in out
+
+
+def test_no_profile_push_is_scheduled_once_the_router_is_stopping(caplog, bolt):
+    import asyncio
+    import logging
+    import threading
+    from opl_agent import model
+    from opl_agent.router import Router
+
+    class Server:
+        def broadcast(self, path, payload=None):
+            pass
+
+    class Quiet(Router):
+        sent = 0
+
+        async def _broadcast_profiles(self, removed=()):
+            await asyncio.sleep(30)          # a push still in flight when the agent stops
+
+    async def run():
+        router = Quiet(model.Registry(transport=bolt))
+        router.loop, router.server = asyncio.get_running_loop(), Server()
+        router._broadcast_after_reply()
+        threading.Thread(target=router._schedule_broadcast).start()
+        await asyncio.sleep(0.2)
+        queued, threaded = set(router._pushes), set(router._push_futures)
+        assert len(queued) == 1 and len(threaded) == 1
+        router.cancel_pushes()
+        # nothing is scheduled any more, from the loop or from a worker thread
+        router._broadcast_after_reply()
+        t = threading.Thread(target=router._schedule_broadcast)
+        t.start()
+        t.join()
+        await asyncio.sleep(0.2)
+        assert not router._pushes and not router._push_futures
+        assert all(f.cancelled() for f in threaded)
+        assert all(f.cancelled() for f in queued)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+    assert "profile push failed" not in caplog.text
