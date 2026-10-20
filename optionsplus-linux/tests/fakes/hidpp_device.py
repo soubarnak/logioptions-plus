@@ -27,9 +27,9 @@ F_HIRES_WHEEL, F_THUMB_WHEEL = 0x2121, 0x2150
 CONTROLS = [
     (80, 80, 0x01, 1, 1, 1, 0),                 # left button: fixed
     (81, 81, 0x01, 2, 1, 1, 0),                 # right button: fixed
-    (82, 82, 0x31, 3, 2, 2, 0),                 # back
-    (83, 83, 0x31, 4, 2, 2, 0),                 # forward
-    (86, 86, 0x31, 5, 2, 2, 0),                 # middle
+    (82, 82, 0x31, 3, 2, 2, 0),                 # middle (0x52 on a real mouse)
+    (83, 83, 0x31, 4, 2, 2, 0),                 # back (0x53)
+    (86, 86, 0x31, 5, 2, 2, 0),                 # forward (0x56)
     (195, 195, 0x31, 6, 3, 4, 0x01),            # gesture button
 ]
 DIVERT = 0x01                                   # setCidReporting flags: divert; the change bit is DIVERT << 1
@@ -68,6 +68,7 @@ class SimulatedMouse:
         self.thumb = {"mode": 0, "invert": 0, "smooth": 0}
         self.thumb_diverted_units = 14              # getThumbwheelInfo: units per notch while diverted
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
+        self.thumb_ignores_mode = False             # accept setThumbwheelReporting but keep the reporting mode
         # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
         self.hosts = [
             {"name": b"Desk PC", "paired": True, "bus": 5, "os": 1},
@@ -184,7 +185,8 @@ class SimulatedMouse:
             if fn == 2:
                 if self.fail_thumb_write:
                     return 5                          # ERR_BUSY
-                t.update(mode=params[0], invert=params[1] & 1, smooth=params[2] & 1)
+                t.update(mode=t["mode"] if self.thumb_ignores_mode else params[0],
+                         invert=params[1] & 1, smooth=params[2] & 1)
                 return bytes([t["mode"], t["invert"], t["smooth"]])
         elif fid == F_REPROG:
             if fn == 0:
@@ -281,18 +283,29 @@ class _Handle:
 
     def __init__(self, receiver):
         self.rx = receiver
+        self._pending = False       # a report was handed out and its routing is not known to be done
 
     def write(self, data):
         self.rx._on_write(bytes(data))
 
     def read(self, timeout):
+        # asking again means the previous report was routed: `_out.unfinished_tasks` is what is
+        # still queued or being routed, which is what `RunningAgent.settle` waits on
+        self._done()
         try:
-            return self.rx._out.get(timeout=max(timeout, 0))
+            item = self.rx._out.get(timeout=max(timeout, 0))
         except queue.Empty:
             return None
+        self._pending = True
+        return item
+
+    def _done(self):
+        if self._pending:
+            self._pending = False
+            self.rx._out.task_done()
 
     def close(self):
-        pass
+        self._done()
 
 
 class SimulatedBolt:

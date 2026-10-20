@@ -15,7 +15,7 @@ from tests.fakes.windows import FakeWindows, FakeXprop
 from tests.test_applications import write_desktop
 from tests.test_button_remap import (BACK, BACK_DEFAULT, COPY, DEFAULT_PROFILE, FORWARD, KEY_C,
                                      KEY_LEFTCTRL, KEY_V, PASTE, assign, assigned_card_id, keystroke, slot)
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 TYPE = "type.googleapis.com/"
 KEY_F5 = 63
@@ -78,9 +78,10 @@ def press(bolt, uinput, cid, count):
 
 
 def settled(windows):
-    """Wait until the tracker has polled at least twice more, so a scripted change was seen."""
+    """Wait until the tracker has polled a few more times, so a scripted change was seen. A tracker
+    that idles (no application has a profile) does not poll; there is nothing to see then."""
     n = windows.polls
-    assert wait_for(lambda: windows.polls >= n + 3)
+    wait_for(lambda: windows.polls >= n + 3, timeout=1)
     time.sleep(0.1)
 
 
@@ -293,6 +294,29 @@ def test_x11_source_asks_about_the_window_only_when_it_changes():
     assert len(xprop.calls) == 3                 # root, window, root
     xprop.active = "0x43"
     assert src.active().wm_class == ("b", "B")
+
+
+def test_x11_source_looks_again_when_a_window_id_may_have_been_reused():
+    now = [0.0]
+    xprop = FakeXprop(active="0x42", props={"0x42": ('"a", "A"', 1)})
+    src = focus.X11Source(run=xprop, exe_of=lambda pid: "", clock=lambda: now[0])
+    assert src.active().wm_class == ("a", "A")
+    xprop.props["0x42"] = ('"b", "B"', 2)             # the window closed and X handed its id to another
+    assert src.active().wm_class == ("a", "A")        # not yet: asking every poll costs a process each
+    now[0] += focus.X11Source.RECHECK
+    assert src.active().wm_class == ("b", "B")
+
+
+def test_x11_source_survives_a_class_that_is_not_utf8(monkeypatch):
+    import subprocess
+    seen = {}
+
+    def run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, stdout="")
+    monkeypatch.setattr(subprocess, "run", run)
+    focus._xprop(["xprop", "-root"])
+    assert seen["errors"] == "replace"
 
 
 def test_default_source_needs_a_display_and_xprop():

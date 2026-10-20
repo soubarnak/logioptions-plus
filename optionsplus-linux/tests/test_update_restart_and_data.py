@@ -1,7 +1,7 @@
 """Restart after an update."""
 
 from tests.fakes.runner import FakeRunner
-from tests.test_updates import wait_for
+from tests.harness import wait_for
 
 
 # ---- restart ---------------------------------------------------------------

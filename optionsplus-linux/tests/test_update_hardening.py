@@ -8,7 +8,8 @@ import pytest
 
 from opl_agent import updates
 from tests.fakes.runner import FakeRunner
-from tests.test_updates import check, wait_for
+from tests.harness import wait_for
+from tests.test_updates import check
 
 
 def test_restart_now_tells_the_ui_to_quit_and_the_agent_leaves_despite_the_open_client(agent_factory):

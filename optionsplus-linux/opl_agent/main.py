@@ -123,8 +123,22 @@ async def _track_focus(router, source, interval=FOCUS_SECONDS, retry=(RETRY_FIRS
     last = object()
     fails = 0
     wait, retry_at = retry[0], None     # retry_at: when to try the same window again, None: not needed
+    idle = False                        # no application has a profile: nothing to follow
     while True:
         await asyncio.sleep(interval * min(2 ** max(0, fails - 3), FOCUS_RETRY_MAX / interval))
+        wants = getattr(router, "has_app_profiles", None)
+        if wants is not None and not wants():
+            if not idle:                # the last profile is gone: the default one takes over
+                idle, last = True, None
+                router.window_probe = source.active     # a profile made now asks the source itself
+                try:
+                    await loop.run_in_executor(None, router.on_focus, None)
+                except Exception:
+                    log.exception("switching profile failed")
+            continue                    # and no window is looked at while none could matter
+        if idle:
+            idle, last = False, object()
+            router.window_probe = None
         try:
             window = await loop.run_in_executor(None, source.active)
         except Exception as exc:

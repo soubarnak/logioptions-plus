@@ -10,7 +10,7 @@ import pytest
 
 from tests.fakes.hidpp_device import F_WAKE
 from tests.test_button_remap import BACK, FORWARD, assign
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 # Linux evdev codes, from linux/input-event-codes.h
 CTRL, SHIFT, ALT, META, TAB, F4 = 29, 42, 56, 125, 15, 62
@@ -54,7 +54,7 @@ def press_and_read(client, bolt, uinput, c, count, cid=BACK):
     assert assign(client, cid, c)["result"]["code"] == "SUCCESS"
     bolt.press_button(cid)
     assert wait_for(lambda: len(uinput.keys()) >= count), uinput.keys()
-    time.sleep(0.1)
+    bolt.settle()
     return uinput.keys()
 
 
@@ -176,7 +176,7 @@ def press_once(bolt, uinput, cid=BACK):
     bolt.press_button(cid)
     bolt.release_button(cid)
     assert wait_for(lambda: len(uinput.keys()) > before)
-    time.sleep(0.1)
+    bolt.settle()
     return uinput.keys()[before:]
 
 
@@ -285,7 +285,7 @@ def test_the_macro_keeps_working_after_a_failed_run(client, bolt, uinput):
     uinput.fail_emit_on = 1
     bolt.press_button(BACK)
     bolt.release_button(BACK)
-    time.sleep(0.2)
+    bolt.settle()
     uinput.events.clear()
     assert press_once(bolt, uinput) == tap(KEY_C)
 

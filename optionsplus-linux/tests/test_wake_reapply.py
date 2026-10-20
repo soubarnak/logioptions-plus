@@ -4,20 +4,12 @@ import time
 
 import pytest
 
+from tests.harness import wait_for
 from tests.fakes import depot as fx
 from tests.fakes.hidpp_device import F_CONFIG_CHANGE, F_WAKE
 from tests.test_pointer_speed import slider
 
 DEV = "dev00000000"
-
-
-def wait_for(cond, timeout=5):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return cond()
 
 
 @pytest.mark.parametrize("feature", [F_WAKE, F_CONFIG_CHANGE])
@@ -45,7 +37,7 @@ def test_unrelated_event_does_not_touch_the_mouse(client, bolt):
     slider(client, 0.5)
     bolt.mouse.dpi = 1000
     bolt.emit_event(0x1004)                    # a battery event, not wake or config change
-    time.sleep(0.4)
+    bolt.settle()
     assert bolt.mouse.dpi == 1000
 
 
@@ -53,7 +45,7 @@ def test_event_from_another_device_index_is_ignored(client, bolt):
     slider(client, 0.5)
     bolt.mouse.dpi = 1000
     bolt.emit_event(F_WAKE, index=4)
-    time.sleep(0.4)
+    bolt.settle()
     assert bolt.mouse.dpi == 1000
 
 

@@ -50,6 +50,7 @@ class Router:
         self._switch_lock = threading.RLock()
         self.loop = None                 # the event loop, set by main; worker threads schedule broadcasts on it
         self._focused = None             # the window that has the focus, when known
+        self.window_probe = None         # set while the tracker idles (no profile): reads the focused window on demand
         self.server = None          # set by main; used for change broadcasts
         self.config_path = os.path.join(_state_dir(state_dir), "configuration.json")
         self.store = profiles.ProfileStore(_state_dir(state_dir))
@@ -58,6 +59,8 @@ class Router:
         self.relay = wheel_relay.WheelRelay(self.reg, self.engine.sink,
                                             enabled=os.environ.get("OPL_WHEEL_RELAY", "1") != "0")
         self.relay.thumb_owned = self.engine.owns_thumb     # a thumb action card outranks thumb speed
+        self.engine.held_elsewhere = lambda dev_id, key: (
+            key == profiles.THUMB_KEY and self.relay.holds(dev_id, wheel_relay.THUMB))
         self.engine.on_stale.append(self._card_gone)
         self.button_swap = swap.ButtonSwap(self.reg, _state_dir(state_dir), self.runner)
         self.reg.on_discovered.append(self.apply_stored)
@@ -379,7 +382,9 @@ class Router:
         self.relay.release(dev, wheel_relay.WHEEL)         # no relay now: nothing may stay diverted
         state = self.reg.write_scroll(dev.id, ratchet=req["ratchet"], threshold=req["threshold"],
                                       hires=req["hires"], invert=req["invert"])
-        return profiles.scroll_card(state)
+        prior = self.store.get(profiles.scroll_slot(dev.slot_prefix))
+        kept = (profiles.scroll_request(prior) or {}).get("speed") if prior else None
+        return profiles.scroll_card(state, kept or 0)      # the speed chosen before stays stored
 
     def _thumb_device_for_slot(self, slot_id):
         for dev in self.reg.devices.values():
@@ -399,7 +404,9 @@ class Router:
         cur = self.reg.read_thumb(dev.id)
         st = self.reg.write_thumb(dev.id, cur["invert"] if invert is None else invert,
                                   cur["smooth"] if smooth is None else smooth)
-        return profiles.thumb_wheel_card(st["invert"], st["smooth"])
+        prior = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix))
+        return profiles.thumb_wheel_card(st["invert"], st["smooth"],
+                                         (profiles.thumb_speed(prior) if prior else None) or 0)
 
     def apply_stored(self, dev_id):
         """Blocking: reapply stored settings to a device (discovery, reconnect)."""
@@ -429,13 +436,19 @@ class Router:
             self.engine.sync(dev)
         except Exception as exc:
             log.warning("reapplying button diversions failed: %s", exc)
-        tcard = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix)) if dev and dev.thumb_wheel else None
+        scard = self.store.get(profiles.scroll_slot(dev.slot_prefix))
+        stored = {wheel_relay.WHEEL: (profiles.scroll_request(scard) or {}).get("speed") if scard else None,
+                  wheel_relay.THUMB: None}
+        tcard = self.store.get(profiles.thumb_wheel_slot(dev.slot_prefix)) if dev.thumb_wheel else None
+        stored[wheel_relay.THUMB] = profiles.thumb_speed(tcard) if tcard else None
+        self.relay.recover(dev, stored)     # a diversion a crashed agent left that no stored speed asks for
         if tcard is not None:
             try:
                 self._apply_thumb(dev, tcard)
             except Exception as exc:
                 log.warning("reapplying thumb wheel settings failed: %s", exc)
         self._settle_thumb(dev)
+        self.relay.reassert_later(dev.id)
         try:
             self.button_swap.apply_stored(dev)
         except Exception as exc:
@@ -728,11 +741,20 @@ class Router:
             self._schedule_broadcast()       # worker thread: the loop does the sending
         return True
 
+    def has_app_profiles(self):
+        """Whether any application has a profile of its own: only then does the focus matter."""
+        return bool(self.store.apps)
+
     def _refocus(self):
         """Blocking, under the switch lock: bring the profile in force in line with the focused
         window. Returns whether the profile in force changed."""
         if self.apps is None:
             self.apps = applications.scan(self._app_dirs())
+        if self.window_probe is not None:       # nobody has watched the focus while no profile existed
+            try:
+                self._focused = self.window_probe()
+            except Exception as exc:
+                log.debug("cannot tell the focused window: %s", exc)
         app = focus.match_profile(self._focused, sorted(self.store.apps), self.apps)
         if app == self.engine.active_app:
             return False

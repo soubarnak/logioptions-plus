@@ -9,21 +9,13 @@ import time
 
 import pytest
 
+from tests.harness import wait_for
 from tests.fakes.hidpp_device import F_WAKE
 from tests.fakes.runner import FakeRunner
 
 TYPE = "type.googleapis.com/logi.protocol.mouse.MouseButtonSwap"
 LEFT, RIGHT = 80, 81
 SWAPPED = {LEFT: RIGHT, RIGHT: LEFT}
-
-
-def wait_for(cond, timeout=5):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return cond()
 
 
 def swap(client, state, path="/mouse/global/swap"):

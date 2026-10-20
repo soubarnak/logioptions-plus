@@ -2,7 +2,6 @@
 XY and a press-and-swipe runs the card of its direction; the thumb wheel's two-way card runs its
 left and right actions. Card layout is an assumption: nested cards keyed by direction word."""
 
-import time
 
 import pytest
 
@@ -10,7 +9,7 @@ from opl_agent import gestures as gestures_mod
 from tests.fakes import depot as fx
 from tests.fakes.hidpp_device import F_WAKE
 from tests.test_button_remap import BACK, DEFAULT_PROFILE, TYPE, assigned_card_id, keystroke, slot
-from tests.test_wake_reapply import wait_for
+from tests.harness import keys_down, wait_for  # noqa: F401  (keys_down is re-exported)
 
 GESTURE = 195
 NOTCH = 14                  # thumb wheel units per notch the simulated mouse reports when diverted
@@ -61,14 +60,6 @@ def swipe(bolt, *moves):
     bolt.release_button(GESTURE)
 
 
-def keys_down(uinput):
-    return [c for c, v in uinput.keys() if v == 1]
-
-
-def settle():
-    time.sleep(0.25)
-
-
 # ---- the gesture button ---------------------------------------------------------
 
 def test_assigning_a_gesture_card_diverts_the_button_with_raw_xy(client, bolt):
@@ -84,7 +75,7 @@ def test_a_swipe_runs_the_action_of_its_direction(client, bolt, uinput, directio
     assign_gesture(client)
     swipe(bolt, move)
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF[direction]]
 
 
@@ -92,7 +83,7 @@ def test_motion_over_several_reports_adds_up(client, bolt, uinput):
     assign_gesture(client)
     swipe(bolt, (-20, 0), (-20, 3), (-20, -2))
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["left"]]
 
 
@@ -100,7 +91,7 @@ def test_the_stronger_axis_decides_the_direction(client, bolt, uinput):
     assign_gesture(client)
     swipe(bolt, (-30, -90))
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["up"]]
 
 
@@ -108,7 +99,7 @@ def test_a_press_without_movement_runs_the_click_action(client, bolt, uinput):
     assign_gesture(client)
     swipe(bolt)
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["click"]]
 
 
@@ -116,7 +107,7 @@ def test_a_small_wobble_is_still_a_click(client, bolt, uinput):
     assign_gesture(client)
     swipe(bolt, (4, -3), (-5, 2))
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["click"]]
 
 
@@ -124,7 +115,7 @@ def test_a_swipe_runs_one_action_and_no_click_on_release(client, bolt, uinput):
     assign_gesture(client)
     swipe(bolt, (-80, 0), (-80, 0), (0, 90))
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["left"]]
 
 
@@ -133,14 +124,14 @@ def test_each_press_starts_from_zero(client, bolt, uinput):
     swipe(bolt, (-30, 0))                     # below the threshold: a click
     swipe(bolt, (0, 80))
     assert wait_for(lambda: len(keys_down(uinput)) >= 2)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["click"], KEY_OF["down"]]
 
 
 def test_motion_with_the_button_up_is_ignored(client, bolt, uinput):
     assign_gesture(client)
     bolt.emit_event(0x1B04, 1, b"\xff\xb0\x00\x00")       # a stray raw report
-    settle()
+    bolt.settle()
     assert uinput.keys() == []
 
 
@@ -149,7 +140,7 @@ def test_the_threshold_comes_from_the_card_gesture_info(client, bolt, uinput):
     swipe(bolt, (-150, 0))                    # below 200: a click
     swipe(bolt, (-250, 0))
     assert wait_for(lambda: len(keys_down(uinput)) >= 2)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["click"], KEY_OF["left"]]
 
 
@@ -158,7 +149,7 @@ def test_a_gesture_missing_an_action_does_nothing_for_it(client, bolt, uinput):
     swipe(bolt, (80, 0))
     swipe(bolt, (-80, 0))
     assert wait_for(lambda: keys_down(uinput))
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["left"]]
 
 
@@ -167,7 +158,7 @@ def test_assigning_the_default_card_back_undiverts_and_clears_raw_xy(client, bol
     assert assign_gesture(client, GESTURE_DEFAULT)["result"]["code"] == "SUCCESS"
     assert bolt.mouse.diverted == set() and bolt.mouse.raw_xy == set()
     swipe(bolt, (-80, 0))
-    settle()
+    bolt.settle()
     assert uinput.keys() == []
 
 
@@ -248,7 +239,7 @@ def test_a_failed_injection_does_not_stop_later_gestures(client, bolt, uinput):
     assign_gesture(client)
     uinput.fail_emit = True
     swipe(bolt, (80, 0))
-    settle()
+    bolt.settle()
     uinput.fail_emit = False
     swipe(bolt, (80, 0))
     assert wait_for(lambda: keys_down(uinput))
@@ -270,7 +261,7 @@ def test_thumb_wheel_turned_right_and_left_runs_the_two_actions(client, bolt, ui
     bolt.rotate_thumb(NOTCH)
     bolt.rotate_thumb(-NOTCH)
     assert wait_for(lambda: len(keys_down(uinput)) >= 2)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["right"], KEY_OF["left"]]
 
 
@@ -278,7 +269,7 @@ def test_a_turn_of_several_steps_runs_the_action_once_per_step(client, bolt, uin
     assign_thumb(client)
     bolt.rotate_thumb(3 * NOTCH)
     assert wait_for(lambda: len(keys_down(uinput)) >= 3)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == [KEY_OF["right"]] * 3
 
 
@@ -287,7 +278,7 @@ def test_thumb_wheel_default_card_gives_the_wheel_back(client, bolt, uinput):
     assert assign_thumb(client, THUMB_DEFAULT)["result"]["code"] == "SUCCESS"
     assert bolt.mouse.thumb["mode"] == 0
     bolt.rotate_thumb(3)
-    settle()
+    bolt.settle()
     assert uinput.keys() == []
 
 
@@ -338,7 +329,7 @@ def test_a_short_flick_of_the_thumb_wheel_is_not_an_action(client, bolt, uinput)
     assign_thumb(client)
     for _ in range(NOTCH - 1):
         bolt.rotate_thumb(1)              # one reporting unit each: less than a notch in all
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == []
     bolt.rotate_thumb(1)                  # the unit that completes the notch
     assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
@@ -348,7 +339,7 @@ def test_the_thumb_step_is_the_wheels_own_resolution(client, bolt, uinput):
     bolt.mouse.thumb_diverted_units = 28
     assign_thumb(client)
     bolt.rotate_thumb(NOTCH)
-    settle()
+    bolt.settle()
     assert keys_down(uinput) == []
     bolt.rotate_thumb(NOTCH)
     assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
@@ -390,8 +381,19 @@ def test_slots_without_a_word_and_no_directions_are_not_guessed():
 
 
 def test_a_preset_gesture_card_with_no_actions_is_refused_by_name(client):
-    card = {"id": "card_switch_desktops", "attribute": "ADAPTER_4WAYS",
-            "gestureInfo": {"implementation": "CUSTOM_SWITCH_DESKTOPS", "directionLocked": True}}
+    card = {"id": "card_expose", "attribute": "ADAPTER_4WAYS",
+            "gestureInfo": {"implementation": "CUSTOM_APP_EXPOSE_MISSION_CONTROL", "directionLocked": True}}
     reply = assign_gesture(client, card)
     assert reply["result"]["code"] == "NOT_SUPPORTED"
-    assert "CUSTOM_SWITCH_DESKTOPS" in str(reply["result"])
+    assert "CUSTOM_APP_EXPOSE_MISSION_CONTROL" in str(reply["result"])
+
+
+@pytest.mark.parametrize("dx,keys", [(-60, [(125, 1), (104, 1), (104, 0), (125, 0)]),
+                                     (60, [(125, 1), (109, 1), (109, 0), (125, 0)])])
+def test_the_switch_desktops_preset_swipes_to_the_desktop_on_that_side(client, bolt, uinput, dx, keys):
+    card = {"id": "card_switch_desktops", "attribute": "ADAPTER_4WAYS",
+            "gestureInfo": {"implementation": "CUSTOM_SWITCH_DESKTOPS", "directionLocked": True}}
+    assert assign_gesture(client, card)["result"]["code"] == "SUCCESS"
+    swipe(bolt, (dx, 0))
+    assert wait_for(lambda: len(uinput.keys()) >= 4)
+    assert uinput.keys() == keys

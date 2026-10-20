@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 from collections import namedtuple
 
 log = logging.getLogger("opl.focus")
@@ -31,7 +32,8 @@ def _is_launcher(path):
 
 
 def _xprop(argv):
-    return subprocess.run(argv, capture_output=True, text=True, timeout=2, check=True).stdout
+    return subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=2,
+                          check=True).stdout
 
 
 def _exe_of(pid):
@@ -44,13 +46,18 @@ def _exe_of(pid):
 class X11Source:
     """The window named by the root window's _NET_ACTIVE_WINDOW. `run(argv)` returns the
     output of a command line and `exe_of(pid)` the program a process runs; both are
-    injectable. Asks about a window's class and process only when the window changes."""
+    injectable. Asks about a window's class and process only when the window changes, and again
+    every RECHECK seconds for the same id, since X reuses the ids of windows that are gone."""
 
-    def __init__(self, run=None, exe_of=None, hostname=None):
+    RECHECK = 5.0
+
+    def __init__(self, run=None, exe_of=None, hostname=None, clock=None):
         self._run = run or _xprop
         self._exe_of = exe_of or _exe_of
         self._hostname = hostname or socket.gethostname
+        self._clock = clock or time.monotonic
         self._seen = (None, None)               # window id, its Window
+        self._read_at = 0.0
 
     def active(self):
         out = self._run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
@@ -59,7 +66,7 @@ class X11Source:
             self._seen = (None, None)
             return None
         wid = m.group(1)
-        if self._seen[0] == wid:
+        if self._seen[0] == wid and self._clock() - self._read_at < self.RECHECK:
             return self._seen[1]
         out = self._run(["xprop", "-id", wid, "WM_CLASS", "_NET_WM_PID", "WM_CLIENT_MACHINE"])
         cls = re.search(r"WM_CLASS\(\w+\) = (.*)", out)
@@ -69,6 +76,7 @@ class X11Source:
         window = Window(tuple(re.findall(r'"([^"]*)"', cls.group(1))) if cls else (),
                         self._exe_of(int(pid.group(1))) if pid and not remote else "")   # a remote pid is not ours
         self._seen = (wid, window)
+        self._read_at = self._clock()
         return window
 
 

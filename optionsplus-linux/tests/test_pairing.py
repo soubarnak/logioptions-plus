@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from tests.harness import wait_for
 from tests.test_battery import next_push
 
 RCV = "rcv00000000"
@@ -104,15 +105,6 @@ def until_state(client, state):
 
 def status(client):
     return client.call("GET", PAIR)["payload"]
-
-
-def wait_for(cond, timeout=5):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return cond()
 
 
 def start_and_pair(bolt, client):

@@ -3,7 +3,8 @@
 import time
 
 from opl_agent import __version__
-from tests.test_updates import TYPE, check, wait_for
+from tests.harness import wait_for
+from tests.test_updates import TYPE, check
 
 
 def settle(client):

@@ -7,7 +7,7 @@ import logging
 from opl_agent import focus, main, wayland_focus
 from opl_agent.focus import Window
 from tests.fakes.wayland import FakeCompositor
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 
 class Router:
@@ -16,6 +16,17 @@ class Router:
 
     def on_focus(self, window):
         self.seen.append(window)
+
+
+class WantingRouter(Router):
+    """A router that says whether any application has a profile."""
+
+    def __init__(self, wants):
+        super().__init__()
+        self.wants = wants
+
+    def has_app_profiles(self):
+        return self.wants
 
 
 class Script:
@@ -43,6 +54,37 @@ def track(source, seconds=0.5, limit=4, **kw):
         await asyncio.gather(task, return_exceptions=True)
     asyncio.run(run())
     return router
+
+
+def test_no_window_is_looked_at_while_no_application_has_a_profile():
+    source = Script(Window(("kitty",)))
+    router = WantingRouter(False)
+
+    async def run():
+        task = asyncio.ensure_future(main._track_focus(router, source, 0.001))
+        await asyncio.sleep(0.2)
+        assert source.calls == 0
+        router.wants = True
+        await asyncio.sleep(0.2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    assert router.seen == [None, Window(("kitty",))]          # the default first, then the focused window
+
+
+def test_the_last_profile_going_away_puts_the_default_back():
+    source = Script(Window(("kitty",)))
+    router = WantingRouter(True)
+
+    async def run():
+        task = asyncio.ensure_future(main._track_focus(router, source, 0.001))
+        await asyncio.sleep(0.2)
+        router.wants = False
+        await asyncio.sleep(0.2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    assert router.seen == [Window(("kitty",)), None]
 
 
 def test_a_source_that_fails_forever_warns_once_and_falls_back_to_the_default_profile(caplog):

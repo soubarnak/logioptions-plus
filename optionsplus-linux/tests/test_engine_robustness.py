@@ -13,7 +13,7 @@ from tests.fakes.hidpp_device import F_WAKE
 from tests.fakes.uinput import FakeInput
 from tests.test_button_actions import card, delay, kb, sequence
 from tests.test_button_remap import BACK, COPY, FORWARD, KEY_C, KEY_LEFTCTRL, assign, assigned_card_id
-from tests.test_wake_reapply import wait_for
+from tests.harness import wait_for
 
 
 # ---- an engine with a scripted mouse, for the cases the simulated mouse cannot produce ------------
@@ -27,7 +27,7 @@ class StubDev:
 
 class StubReg:
     def __init__(self, cids=(82, 83, 86)):
-        self.on_button_event, self.on_thumb_event = [], []
+        self.on_button_event, self.on_thumb_event, self.on_link_lost = [], [], []
         self._controls = {c: {"divertable": True, "raw_xy": False} for c in cids}
         self.writes = []
         self.fail = {}                  # cid -> exception to raise on its divert write
