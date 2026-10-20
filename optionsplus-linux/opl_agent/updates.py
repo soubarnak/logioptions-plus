@@ -13,9 +13,8 @@ import logging
 import os
 import re
 import urllib.parse
-import xml.etree.ElementTree as ET
 
-from . import __version__, fetch, paths, responses
+from . import __version__, paths, responses
 from .runner import SubprocessRunner
 
 log = logging.getLogger("opl.updates")
@@ -23,15 +22,12 @@ TYPE = responses.TYPE
 APP_ID = "optionsplus-linux"
 DEFAULT_RELEASES_URL = "https://github.com/soubarnak/logioptions-plus/releases"
 OS_RELEASE = "/etc/os-release"
-CHANNELS = ("stable", "testing")
+CHANNELS = ("stable", "testing")   # "testing" is recognised but not supported (see set_channel)
 DEFAULT_SETTINGS = {"checkPeriodically": True, "intervalInSeconds": 86400, "channel": "stable"}
-MAX_FEED_BYTES = 2 * 1024 * 1024
 PACKAGE = "optionsplus-linux"
-INSTALL_ARGV = ["pkexec", "xbps-install", "-Syu", PACKAGE]
+INSTALL_ARGV = ["pkexec", "/usr/bin/xbps-install", "-Syu", PACKAGE]   # absolute: pkexec must not search a user PATH
 SUDO_COMMAND = "sudo xbps-install -Su " + PACKAGE
-FETCH_COMMAND = "optionsplus-fetch-payload"
 LAUNCHER = "optionsplus-linux"
-EXIT_DECLINED = fetch.EXIT_DECLINED
 POLKIT_NOT_AUTHORIZED = (126, 127)          # pkexec: dialog dismissed / not authorized
 
 
@@ -109,27 +105,6 @@ def latest_stable_tag(base_url):
     return urllib.parse.unquote(urllib.parse.urlsplit(location).path.rsplit("/", 1)[-1])
 
 
-def newest_feed_tag(base_url):
-    """Newest of our tags in the releases Atom feed, pre-releases included."""
-    status, _, body = _request("GET", base_url + ".atom")
-    if status != 200:
-        raise UpdateError("release feed unavailable (server answered %d)" % status)
-    try:
-        root = ET.fromstring(body[:MAX_FEED_BYTES])
-    except ET.ParseError as exc:
-        raise UpdateError("release feed is not valid Atom: %s" % exc)
-    tags = []
-    for link in root.iter("{http://www.w3.org/2005/Atom}link"):
-        href = link.get("href") or ""
-        if "/releases/tag/" in href:
-            tag = urllib.parse.unquote(href.rsplit("/", 1)[-1])
-            if parse_tag(tag) is not None:
-                tags.append(tag)
-    if not tags:
-        raise UpdateError("no %s releases in the release feed" % APP_ID)
-    return max(tags, key=parse_tag)
-
-
 class RealClock:
     async def sleep(self, seconds):
         await asyncio.sleep(seconds)
@@ -142,7 +117,7 @@ def state_dir_for(explicit=None):
 
 class Updater:
     def __init__(self, build_id="dev", payload_path=None, release_base_url=None,
-                 clock=None, state_dir=None, runner=None, manifest_path=None):
+                 clock=None, state_dir=None, runner=None):
         self.build_id = build_id
         self.base_url = (release_base_url or DEFAULT_RELEASES_URL).rstrip("/")
         self.clock = clock or RealClock()
@@ -157,11 +132,8 @@ class Updater:
         self._wake = asyncio.Event()
         self.payload_path = payload_path or default_payload_path()
         self.runner = runner or SubprocessRunner()
-        self.manifest_path = manifest_path
         self.on_restart = lambda: None         # wired to the agent: leave so the launcher can start anew
         self._installing = False
-        self._fetching = False
-        self._payload_error = ""
 
     # ---- persisted settings ---------------------------------------------
     def _load_settings(self):
@@ -179,8 +151,6 @@ class Updater:
             iv = saved.get("intervalInSeconds")
             if isinstance(iv, int) and not isinstance(iv, bool) and iv > 0:
                 self.settings["intervalInSeconds"] = iv
-            if saved.get("channel") in CHANNELS:
-                self.settings["channel"] = saved["channel"]
 
     def _save_settings(self):
         try:
@@ -220,12 +190,13 @@ class Updater:
                 "name": self.settings["channel"], "pipelineHost": self.base_url}
 
     def set_channel(self, payload):
+        """Only stable exists: pre-releases would need their own repository, so `testing`
+        is refused rather than pretending to switch."""
         name = payload.get("name") if isinstance(payload, dict) else None
         if not isinstance(name, str) or name not in CHANNELS:
             return "INVALID_ARG"
-        self.settings["channel"] = name
-        self._save_settings()
-        self.broadcast("/updates/channel", self.channel())
+        if name != "stable":
+            return "NOT_SUPPORTED"
         return "SUCCESS"
 
     async def run(self):
@@ -267,13 +238,8 @@ class Updater:
         self.state, self.error_message = state, error
         self.broadcast("/updates/status", self.status())
 
-    def _newest_tag(self):
-        if self.settings["channel"] == "testing":
-            return newest_feed_tag(self.base_url)
-        return latest_stable_tag(self.base_url)
-
     def _check_blocking(self):
-        tag = self._newest_tag()
+        tag = latest_stable_tag(self.base_url)
         remote, local = parse_tag(tag), parse_tag("%s-v%s" % (APP_ID, __version__))
         if remote is None:
             raise UpdateError("unrecognised release tag %r" % tag)
@@ -281,6 +247,8 @@ class Updater:
 
     async def check(self):
         """One update check; every outcome ends in a terminal state."""
+        if self._installing or self.state in ("UPDATE_INSTALLING", "RESTARTING"):
+            return                          # an install in progress owns the state
         if self._checking:
             self._recheck = True            # run once more so a late request is not lost
             return
@@ -290,7 +258,7 @@ class Updater:
                 self._recheck = False
                 self._set_state("CHECKING_FOR_UPDATES")
                 try:
-                    state = await asyncio.get_event_loop().run_in_executor(None, self._check_blocking)
+                    state = await asyncio.get_running_loop().run_in_executor(None, self._check_blocking)
                 except UpdateError as exc:
                     self._set_state("UPDATER_ERROR", str(exc))
                 except Exception as exc:    # never leave the UI on a spinner
@@ -302,7 +270,6 @@ class Updater:
                     break
         finally:
             self._checking = False
-        self.broadcast("/updates/payload", self.payload_status())
 
     def request_check(self):
         asyncio.ensure_future(self.check())
@@ -339,7 +306,7 @@ class Updater:
 
     async def _install(self):
         try:
-            code = await asyncio.get_event_loop().run_in_executor(None, self.runner.run_wait, INSTALL_ARGV)
+            code = await asyncio.get_running_loop().run_in_executor(None, self.runner.run_wait, INSTALL_ARGV)
         except Exception as exc:
             log.exception("update install failed")
             code, why = None, "the update could not be started: %s" % exc
@@ -358,65 +325,8 @@ class Updater:
         """Relaunch UI and agent through the launcher once this agent has exited."""
         launcher = self.runner.which(LAUNCHER)
         if not launcher:
-            return "FAILED", "the %s launcher is not on PATH" % LAUNCHER
+            return "FAULTED", "the %s launcher is not on PATH" % LAUNCHER
         self.runner.run(["env", "OPL_RESTART_WAIT_PID=%d" % os.getpid(), launcher])
+        self.broadcast("/updates/restart_incoming")   # the running UI quits; the new one starts
         self.on_restart()
         return "SUCCESS", ""
-
-    # ---- Logitech data refresh ------------------------------------------
-    def _pinned(self):
-        try:
-            return fetch.load_manifest(self.manifest_path or fetch.default_manifest_path())
-        except fetch.FetchError as exc:
-            log.warning("%s", exc)
-            return None
-
-    def payload_status(self):
-        """Whether the installed package pins newer Logitech data than the user has."""
-        manifest = self._pinned()
-        have = paths.installed_versions(os.path.dirname(self.payload_path))
-        pinned = (manifest or {}).get("dataVersion", "")
-        installed = (have or {}).get("dataVersion", "")
-        offer = bool(manifest and have and _data_newer(manifest, have))
-        st = {"@type": TYPE + "logi.protocol.updates.PayloadStatus", "available": offer,
-              "installedVersion": installed, "pinnedVersion": pinned,
-              "downloading": self._fetching}
-        if self._payload_error:
-            st["errorMessage"] = self._payload_error
-        return st
-
-    def download_payload(self):
-        if self._fetching or not self.payload_status()["available"]:
-            return "INVALID_ARG", "no newer Logitech data is pinned"
-        self._fetching = True
-        self._payload_error = ""
-        self.broadcast("/updates/payload", self.payload_status())
-        asyncio.ensure_future(self._fetch_payload())
-        return "SUCCESS", ""
-
-    async def _fetch_payload(self):
-        try:
-            code = await asyncio.get_event_loop().run_in_executor(None, self.runner.run_wait, [FETCH_COMMAND])
-        except Exception as exc:
-            log.exception("payload fetch failed")
-            code = -1
-        finally:
-            self._fetching = False
-        if code not in (0, EXIT_DECLINED):
-            self._payload_error = "downloading the Logitech data failed (exit status %d)" % code
-        self.broadcast("/updates/payload", self.payload_status())
-
-
-def _version_key(text):
-    nums = re.findall(r"\d+", text or "")
-    return tuple(int(n) for n in nums)
-
-
-def _data_newer(manifest, have):
-    """Newer pinned data: a higher data version, or the same version with different depots."""
-    pin, cur = _version_key(manifest.get("dataVersion")), _version_key(have.get("dataVersion"))
-    if pin != cur:
-        return pin > cur
-    recorded = have.get("depots") or {}
-    return any((recorded.get(d["name"]) or {}).get("sha256") != d["sha256"]
-               for d in manifest["depots"])

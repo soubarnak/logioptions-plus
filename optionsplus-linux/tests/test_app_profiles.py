@@ -46,8 +46,17 @@ def windows():
     return FakeWindows()
 
 
+def install_apps(workdir):
+    """The installed applications a profile can be for; returns their directory."""
+    apps = os.path.join(workdir, "applications")
+    write_desktop(apps, FIREFOX + ".desktop", "Firefox Web Browser", exec_line="/usr/lib/firefox/firefox %u")
+    write_desktop(apps, TERMINAL + ".desktop", "Terminal", exec_line="/usr/bin/gnome-terminal")
+    return apps
+
+
 @pytest.fixture
-def tracked(agent_factory, windows):
+def tracked(agent_factory, windows, workdir):
+    install_apps(workdir)
     return agent_factory(window_source=windows, focus_seconds=0.02)
 
 
@@ -110,7 +119,8 @@ def test_only_buttons_can_differ_per_application(client):
     assert profile(client, FIREFOX) is None
 
 
-def test_application_profiles_persist_across_restart(agent_factory, bolt, windows):
+def test_application_profiles_persist_across_restart(agent_factory, bolt, windows, workdir):
+    install_apps(workdir)
     first = agent_factory(window_source=windows, focus_seconds=0.02)
     c = first.client()
     assign_to(c, FIREFOX, BACK, RELOAD)

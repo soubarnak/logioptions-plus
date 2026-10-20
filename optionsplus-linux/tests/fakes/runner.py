@@ -8,10 +8,11 @@ test can imitate what the real program leaves behind. Nothing here runs anything
 
 
 class FakeRunner:
-    def __init__(self, installed=(), exit_codes=None, effects=None):
+    def __init__(self, installed=(), exit_codes=None, effects=None, outputs=None):
         self.installed = set(installed)
         self.exit_codes = dict(exit_codes or {})
         self.effects = dict(effects or {})
+        self.outputs = dict(outputs or {})           # program name -> stdout `run_output` returns
         self.launched = []
         self.executed = []
 
@@ -27,3 +28,8 @@ class FakeRunner:
         if effect:
             effect()
         return self.exit_codes.get(argv[0], 0)
+
+    def run_output(self, argv):
+        """Like `run_wait`, but also returns what the program printed: (exit status, stdout)."""
+        self.executed.append(list(argv))
+        return self.exit_codes.get(argv[0], 0), self.outputs.get(argv[0], "")

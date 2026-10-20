@@ -65,9 +65,12 @@ def add_catalogue(main):
         {"slotId": "046d_4242_c83", "cardId": "card-forward"}]}))
     _write(os.path.join(data, "macros", "macros_predefined_win.json"), json.dumps({"macroInfos": [
         {"id": "macros_preset_test", "name": "MACRO_NAME_TEST", "cards": [cards[0], cards[2], cards[3]]},
+        {"id": "macros_preset_ok", "name": "MACRO_NAME_OK", "cards": [cards[0], cards[2]]},
         {"id": "macros_preset_all_hidden", "name": "MACRO_NAME_HIDDEN", "cards": [cards[3], cards[5]]}]}))
     _write(os.path.join(data, "macros", "macro_assignments.json"), json.dumps({"macroAssignmentVals": [
-        {"macroId": "macros_preset_test", "slotId": "046d_4242_c82"}]}))
+        {"macroId": "macros_preset_test", "slotId": "046d_4242_c82"},
+        {"macroId": "macros_preset_ok", "slotId": "046d_4242_c83"},
+        {"macroId": "macros_preset_all_hidden", "slotId": "046d_4242_c86"}]}))
     _write(os.path.join(os.path.dirname(main), "system_actions", "card_play.png"), b"not-a-real-icon")
 
 

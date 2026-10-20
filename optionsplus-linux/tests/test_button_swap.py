@@ -1,8 +1,10 @@
-"""Swap left and right buttons (ticket #24): a device-level remap through 0x1b04 when the mouse
-allows it, xmodmap on X11 when it does not, an honest error on Wayland. The choice persists."""
+"""Swap left and right buttons (ticket #24): ONE method system-wide. A device-level remap through
+0x1b04 when every connected mouse allows it, per-device `xinput set-button-map` on X11 when
+one does not, an honest error on Wayland. The choice and the method persist."""
 
 import json
 import os
+import struct
 import time
 
 import pytest
@@ -65,10 +67,10 @@ def test_default_state_means_not_swapped(remappable, client):
     assert remappable.mouse.remap == {}
 
 
-def test_the_per_device_route_swaps_too(remappable, client):
-    swap(client, "RIGHT", "/mouse/dev00000000/swap")
-    assert remappable.mouse.remap == SWAPPED
-    assert state(client, "/mouse/dev00000000/swap") == "RIGHT"
+def test_there_is_no_per_device_swap_route(remappable, client):
+    assert swap(client, "RIGHT", "/mouse/dev00000000/swap")["result"]["code"] != "SUCCESS"
+    assert client.call("GET", "/mouse/dev00000000/swap")["result"]["code"] == "NO_SUCH_PATH"
+    assert remappable.mouse.remap == {}
 
 
 def test_nothing_is_swapped_at_first(remappable, client):
@@ -137,52 +139,139 @@ def test_an_unswapped_agent_clears_a_swap_the_mouse_still_holds(remappable, agen
 
 def test_swap_is_kept_in_a_file_in_the_state_directory(remappable, client, workdir):
     swap(client, "RIGHT")
-    assert json.load(open(os.path.join(workdir, "state", "button_swap.json"))) == {"state": "RIGHT"}
+    assert json.load(open(os.path.join(workdir, "state", "button_swap.json"))) == {"state": "RIGHT", "method": "device"}
+
+
+# ---- 0x1b04 semantics ---------------------------------------------------------------
+
+def test_a_divert_write_naming_no_target_keeps_the_mapping(bolt):
+    mouse = bolt.mouse
+    mouse.remappable_primary = True
+    idx = mouse.features.index(0x1B04)
+    mouse.handle(idx, 3, struct.pack(">HBH", LEFT, 0, RIGHT))
+    assert mouse.remap == {LEFT: RIGHT}
+    mouse.handle(idx, 3, struct.pack(">HBH", LEFT, 0x03, 0))          # divert on, remap 0
+    assert mouse.remap == {LEFT: RIGHT}
+    mouse.handle(idx, 3, struct.pack(">HBH", LEFT, 0, LEFT))          # naming itself undoes it
+    assert mouse.remap == {}
+
+
+def test_a_mouse_whose_group_mask_forbids_the_swap_uses_x11_not_a_failing_write(bolt, agent_factory, monkeypatch):
+    bolt.mouse.remappable_primary = True
+    bolt.mouse.primary_group_mask = 0
+    x11(monkeypatch)
+    runner = xinput_runner()
+    client = agent_factory(runner=runner).client()
+    assert swap(client, "RIGHT")["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.remap == {}
+    assert maps(runner) == [("11", "3 2 1"), ("14", "3 2 1")]
+    client.close()
+
+
+def test_a_rejected_device_write_falls_back_to_x11(remappable, agent_factory, monkeypatch):
+    remappable.mouse.fail_remap_write = True
+    x11(monkeypatch)
+    runner = xinput_runner()
+    client = agent_factory(runner=runner).client()
+    assert swap(client, "RIGHT")["result"]["code"] == "SUCCESS"
+    assert remappable.mouse.remap == {}
+    assert maps(runner) == [("11", "3 2 1"), ("14", "3 2 1")]
+    assert state(client) == "RIGHT"
+    client.close()
 
 
 # ---- X11 fallback ------------------------------------------------------------------
 
-def test_x11_fallback_runs_xmodmap_when_the_mouse_cannot_remap(agent_factory, monkeypatch):
+XINPUT_LIST = (
+    "\u23a1 Virtual core pointer                    \tid=2\t[master pointer  (3)]\n"
+    "\u239c   \u21b3 Virtual core XTEST pointer              \tid=4\t[slave  pointer  (2)]\n"
+    "\u239c   \u21b3 Test Mouse X1                           \tid=11\t[slave  pointer  (2)]\n"
+    "\u239c   \u21b3 SynPS/2 Synaptics TouchPad              \tid=12\t[slave  pointer  (2)]\n"
+    "\u239c   \u21b3 optionsplus-linux virtual input         \tid=13\t[slave  pointer  (2)]\n"
+    "\u239c   \u21b3 Logitech USB Receiver Mouse             \tid=14\t[slave  pointer  (2)]\n"
+    "\u239c   \u21b3 Logitech USB Receiver Consumer Control  \tid=15\t[slave  keyboard (3)]\n")
+
+
+def x11(monkeypatch):
     monkeypatch.setenv("DISPLAY", ":0")
-    runner = FakeRunner(installed={"xmodmap"})
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+
+
+def xinput_runner(**kw):
+    return FakeRunner(installed={"xinput"}, outputs={"xinput": XINPUT_LIST}, **kw)
+
+
+def maps(runner):
+    """(device id, map) of every `xinput set-button-map` the agent ran."""
+    return [(a[2], " ".join(a[3:])) for a in runner.executed if a[:2] == ["xinput", "set-button-map"]]
+
+
+def test_x11_fallback_sets_the_button_map_of_the_logitech_pointers_only(agent_factory, monkeypatch):
+    x11(monkeypatch)
+    runner = xinput_runner()
     client = agent_factory(runner=runner).client()
     assert swap(client, "RIGHT")["result"]["code"] == "SUCCESS"
-    assert runner.executed == [["xmodmap", "-e", "pointer = 3 2 1"]]
+    # the mouse by its HID++ name and the receiver pointer by "Logitech"; not the touchpad,
+    # not the virtual master pointers and not our own uinput device (whose clicks must stay as sent)
+    assert sorted(maps(runner)) == [("11", "3 2 1"), ("14", "3 2 1")]
     assert state(client) == "RIGHT"
     swap(client, "LEFT")
-    assert runner.executed[-1] == ["xmodmap", "-e", "pointer = default"]
+    assert maps(runner)[-2:] == [("11", "1 2 3"), ("14", "1 2 3")]
     assert state(client) == "LEFT"
     client.close()
 
 
 def test_x11_fallback_failure_is_an_error(agent_factory, monkeypatch):
-    monkeypatch.setenv("DISPLAY", ":0")
-    runner = FakeRunner(installed={"xmodmap"}, exit_codes={"xmodmap": 1})
+    x11(monkeypatch)
+    runner = xinput_runner(exit_codes={"xinput": 1})
     client = agent_factory(runner=runner).client()
     assert swap(client, "RIGHT")["result"]["code"] != "SUCCESS"
     assert state(client) == "LEFT"
     client.close()
 
 
-def test_x11_swap_is_reapplied_when_the_agent_starts(agent_factory, monkeypatch):
-    monkeypatch.setenv("DISPLAY", ":0")
-    a = agent_factory(runner=FakeRunner(installed={"xmodmap"}))
+def test_x11_swap_and_its_method_are_kept_and_reapplied_when_the_agent_starts(agent_factory, monkeypatch, workdir):
+    x11(monkeypatch)
+    a = agent_factory(runner=xinput_runner())
     c = a.client()
     swap(c, "RIGHT")
     c.close()
     a.stop()
-    second = FakeRunner(installed={"xmodmap"})
+    assert json.load(open(os.path.join(workdir, "state", "button_swap.json"))) == {"state": "RIGHT", "method": "x11"}
+    second = xinput_runner()
     agent_factory(runner=second)
-    assert wait_for(lambda: ["xmodmap", "-e", "pointer = 3 2 1"] in second.executed)
+    assert wait_for(lambda: ("11", "3 2 1") in maps(second))
 
 
 def test_device_remap_wins_over_x11_so_buttons_swap_once(remappable, agent_factory, monkeypatch):
-    monkeypatch.setenv("DISPLAY", ":0")
-    runner = FakeRunner(installed={"xmodmap"})
+    x11(monkeypatch)
+    runner = xinput_runner()
     client = agent_factory(runner=runner).client()
     swap(client, "RIGHT")
     assert remappable.mouse.remap == SWAPPED
-    assert runner.executed == []
+    assert maps(runner) == []
+    client.close()
+
+
+def test_switching_from_x11_to_the_device_method_resets_the_x11_map(remappable, agent_factory, monkeypatch, workdir):
+    """A swap saved by the X11 method, then every mouse can remap: not swapped twice."""
+    os.makedirs(os.path.join(workdir, "state"))
+    json.dump({"state": "RIGHT", "method": "x11"}, open(os.path.join(workdir, "state", "button_swap.json"), "w"))
+    x11(monkeypatch)
+    runner = xinput_runner()
+    agent_factory(runner=runner)
+    assert wait_for(lambda: remappable.mouse.remap == SWAPPED)
+    assert wait_for(lambda: ("11", "1 2 3") in maps(runner))
+    assert ("11", "3 2 1") not in maps(runner)
+
+
+def test_x11_needs_an_x11_session_not_just_a_display(agent_factory, monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")               # XWayland looks the same, but is not the pointer map
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    runner = xinput_runner()
+    client = agent_factory(runner=runner).client()
+    assert swap(client, "RIGHT")["result"]["code"] == "NOT_SUPPORTED"
+    assert maps(runner) == []
     client.close()
 
 
@@ -191,17 +280,28 @@ def test_device_remap_wins_over_x11_so_buttons_swap_once(remappable, agent_facto
 def test_wayland_without_device_support_is_reported_unsupported(agent_factory, monkeypatch):
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.setenv("DISPLAY", ":0")               # XWayland is not the desktop's pointer map
-    runner = FakeRunner(installed={"xmodmap"})
+    runner = xinput_runner()
     client = agent_factory(runner=runner).client()
     reply = swap(client, "RIGHT")
     assert reply["result"]["code"] == "NOT_SUPPORTED"
-    assert runner.executed == []
+    assert maps(runner) == []
     assert state(client) == "LEFT"
     client.close()
 
 
 def test_no_display_and_no_device_support_is_unsupported(client):
     assert swap(client, "RIGHT")["result"]["code"] == "NOT_SUPPORTED"
+
+
+def test_with_no_mouse_connected_the_choice_is_kept_for_when_one_connects(bolt, agent_factory, workdir):
+    bolt.unplug()
+    c = agent_factory().client()
+    assert swap(c, "RIGHT")["result"]["code"] == "SUCCESS"
+    assert state(c) == "RIGHT"
+    c.close()
+    bolt.mouse.remappable_primary = True
+    bolt.plug()
+    assert wait_for(lambda: bolt.mouse.remap == SWAPPED, timeout=10)
 
 
 def test_swapping_back_when_nothing_is_swapped_is_not_an_error(client):

@@ -259,3 +259,39 @@ def test_build_fails_when_payload_leaks_into_tree(tmp_path):
         leak.unlink()
     assert r.returncode != 0
     assert not list(tmp_path.glob("*.xbps"))
+
+
+# --- one staging script for both packages ---------------------------------
+
+STAGE = REPO / "tools" / "stage.sh"
+TEMPLATE = REPO / "srcpkgs" / "optionsplus-linux" / "template"
+
+
+def tree(root):
+    return sorted(str(p.relative_to(root)) for p in Path(root).rglob("*") if p.is_file())
+
+
+def test_stage_installs_everything_the_first_run_needs(tmp_path):
+    r = subprocess.run(["sh", str(STAGE), str(tmp_path)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    files = tree(tmp_path)
+    for need in ("usr/bin/optionsplus-fetch-payload",
+                 "usr/lib/optionsplus-linux/bootstrap/links.js",
+                 "usr/lib/optionsplus-linux/depots.json",       # where fetch.py looks for it
+                 "INSTALL", "REMOVE"):
+        assert need in files
+    assert check(tmp_path).returncode == 0
+
+
+def test_template_installs_the_same_files_as_stage_and_build_xbps(tmp_path):
+    staged, templated = tmp_path / "staged", tmp_path / "templated"
+    assert subprocess.run(["sh", str(STAGE), str(staged)]).returncode == 0
+    # run the template's do_install the way xbps-src does: DESTDIR set, cwd the source tree
+    script = 'wrksrc=%s; DESTDIR=%s; vlicense() { :; }; . %s; do_install' % (REPO, templated, TEMPLATE)
+    r = subprocess.run(["bash", "-eu", "-c", script], cwd=str(REPO), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert tree(templated) == tree(staged)
+    # neither the template nor the release build may keep a file list of its own
+    assert "stage.sh" in BUILD.read_text()
+    for text in (BUILD.read_text(), TEMPLATE.read_text()):
+        assert not re.search(r"^\s*(install|vbin|vinstall|vcopy)\b", text, re.M)

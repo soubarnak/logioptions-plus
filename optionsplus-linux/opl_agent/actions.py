@@ -57,7 +57,12 @@ HIDDEN_MOUSE_ACTIONS = frozenset({"OSX_GESTURE_BACK", "OSX_GESTURE_FORWARD"})
 
 # Windows-only features that arrive as plain keystroke or URI cards: matched on the card id.
 HIDDEN_ID_PARTS = ("cortana", "windows_ink", "ink_workspace", "task_view", "copilot", "onedrive",
-                   "xbox", "game_bar", "windows_search")
+                   "xbox", "game_bar", "windows_search", "action_center", "dictation", "win_settings",
+                   "this_pc", "presets_search")
+
+# Windows paths and shell names inside a card's macro: an .exe, a %windir%-style variable, a drive
+# letter, a shell:/CLSID location.
+_WINDOWS_ONLY = re.compile(r"\.exe(?=$|[\s\"']|\\)|%[a-z_]+%|^[a-z]:\\|shell:|::\{|^\{[0-9a-f-]{36}\}$", re.I)
 
 # Windows concepts with a Linux equivalent: system action -> label shown in the picker.
 RELABEL_SYSTEM_ACTION = {
@@ -72,12 +77,32 @@ def _macro(card):
     return card.get("macro") or {}
 
 
+def _names_windows_software(node, key=""):
+    """True when a macro field names a Windows program, path or Microsoft application."""
+    if isinstance(node, dict):
+        return any(_names_windows_software(v, k) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_names_windows_software(v, key) for v in node)
+    if isinstance(node, str):
+        if node.lower().startswith(("http://", "https://")):
+            return False
+        if key.lower() == "appname" and node.lower().startswith("microsoft"):
+            return True
+        return bool(_WINDOWS_ONLY.search(node))
+    return False
+
+
+def _hidden_id(cid):
+    return any(part in str(cid).lower() for part in HIDDEN_ID_PARTS)
+
+
 def is_linux_card(card):
     """True when the card may be offered on Linux (its own macro, not its nested cards)."""
-    cid = str(card.get("id", "")).lower()
-    if any(part in cid for part in HIDDEN_ID_PARTS):
+    if _hidden_id(card.get("id", "")):
         return False
     macro = _macro(card)
+    if _names_windows_software(macro):
+        return False
     mtype = macro.get("type")
     if not mtype:
         return True                     # settings, gesture and container cards carry no macro
@@ -180,9 +205,15 @@ def _with_icons(card):
 
 
 def _icon_dir(uri):
+    """file:// directory a pipeline:// icon location names, "" when it is not an installed
+    directory inside its depot (no ../ out of it)."""
     depot, _, rel = uri[len("pipeline://"):].partition("/")
-    root = resources.depot_root(depot)
-    path = os.path.join(root, rel) if rel else root
+    if depot in ("", ".", ".."):
+        return ""
+    root = os.path.abspath(resources.depot_root(depot))
+    path = os.path.normpath(os.path.join(root, rel)) if rel else root
+    if path != root and not path.startswith(root + os.sep):
+        return ""
     return "file://" + path.rstrip("/") + "/" if os.path.isdir(path) else ""
 
 
@@ -224,18 +255,27 @@ def default_assignments():
             "assignments": _items("defaults", "assignments")}
 
 
+def _fully_visible(card):
+    """True when neither the card nor any card nested inside it is hidden."""
+    return is_linux_card(card) and all(_fully_visible(c) for c in (card.get("nestedCards") or {}).values())
+
+
+def _served_macros():
+    """Predefined macros that can run here whole. A macro is a sequence: with one step hidden at
+    any depth the rest would do something other than what the macro is named for, so it goes."""
+    return [dict(info, cards=_serve(info.get("cards"))) for info in _items("macros", "macroInfos")
+            if not _hidden_id(info.get("id", "")) and all(_fully_visible(c) for c in info.get("cards") or [])]
+
+
 def predefined_macros():
-    infos = []
-    for info in _items("macros", "macroInfos"):
-        cards = _serve(info.get("cards"))
-        if cards or not info.get("cards"):
-            infos.append(dict(info, cards=cards))
-    return {"@type": TYPE + "logi.protocol.profiles_v2.MacroInfosCollection", "macroInfos": infos}
+    return {"@type": TYPE + "logi.protocol.profiles_v2.MacroInfosCollection", "macroInfos": _served_macros()}
 
 
 def macro_assignments():
+    served = {info.get("id") for info in _served_macros()}
     return {"@type": TYPE + "logi.protocol.profiles_v2.MacroAssignmentValCollection",
-            "macroAssignmentVals": _items("macros", "macroAssignmentVals")}
+            "macroAssignmentVals": [v for v in _items("macros", "macroAssignmentVals")
+                                    if not isinstance(v, dict) or v.get("macroId") in served]}
 
 
 ROUTES = {

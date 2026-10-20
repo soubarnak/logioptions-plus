@@ -14,6 +14,7 @@ Run:  python3 -m opl_agent.main   (or the installed ``optionsplus-agent`` script
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -54,7 +55,7 @@ def _receiver_info(receiver):
 async def _watch(server, reg, interval=RESCAN_SECONDS):
     """Rescan on hidraw node add/remove and every `interval` (a mouse switching
     on or off leaves the receiver's node alone); announce what changed."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     wait = getattr(reg.transport, "wait_change", None)
     while True:
         if wait is not None:
@@ -87,7 +88,7 @@ def _broadcast_battery(server, reg, dev_id):
 
 async def _poll(server, reg, interval=POLL_SECONDS):
     """Periodically re-read battery; broadcast changes to subscribers."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval)
         for dev_id in list(reg.devices):
@@ -101,21 +102,49 @@ async def _poll(server, reg, interval=POLL_SECONDS):
 
 
 RETRY_FIRST, RETRY_LAST = 1.0, 8.0     # seconds before a failed profile switch is tried again, doubling
+FOCUS_FAIL_LIMIT = 8            # failed polls in a row before the focus counts as unknown
+FOCUS_RETRY_MAX = 30.0          # longest wait between polls of a source that keeps failing
 
 
-async def _track_focus(router, source, interval=FOCUS_SECONDS, retry=(RETRY_FIRST, RETRY_LAST)):
+async def _track_focus(router, source, interval=FOCUS_SECONDS, retry=(RETRY_FIRST, RETRY_LAST),
+                       fail_limit=FOCUS_FAIL_LIMIT):
     """Poll the window source; hand each change of the focused window to the router. A switch
-    that failed is tried again for the same window, after a wait that doubles up to a limit."""
+    that failed is tried again for the same window, after a wait that doubles up to a limit.
+
+    The source is polled off the event loop, so connecting to a slow compositor never holds up
+    the agent. A source that fails is tried again with growing pauses and one warning in the log;
+    after `fail_limit` failures in a row the focus is reported as unknown (the default profile
+    takes over) until the source answers again. A source that cannot ever work (its error has
+    `permanent` set) is given up after saying so."""
     loop = asyncio.get_running_loop()
     last = object()
+    fails = 0
     wait, retry_at = retry[0], None     # retry_at: when to try the same window again, None: not needed
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(interval * min(2 ** max(0, fails - 3), FOCUS_RETRY_MAX / interval))
         try:
             window = await loop.run_in_executor(None, source.active)
         except Exception as exc:
-            log.debug("cannot tell the focused window: %s", exc)
+            fails += 1
+            if getattr(exc, "permanent", False):
+                log.info("no per-application profiles: %s; the default profile stays active", exc)
+                fails = fail_limit
+            elif fails == 1:
+                log.warning("cannot tell the focused window (trying again): %s", exc)
+            else:
+                log.debug("cannot tell the focused window: %s", exc)
+            if fails == fail_limit:
+                last = None
+                try:
+                    await loop.run_in_executor(None, router.on_focus, None)
+                except Exception:
+                    log.exception("switching profile failed")
+            if getattr(exc, "permanent", False):
+                return
             continue
+        if fails:
+            log.info("the focused window can be told again")
+            fails = 0
         if window == last and (retry_at is None or loop.time() < retry_at):
             continue
         last = window
@@ -145,7 +174,7 @@ class Agent:
                  rescan_seconds=RESCAN_SECONDS,
                  runner=None, app_dirs=None,
                  build_id=None, payload_path=None, os_release_path=None,
-                 release_base_url=None, clock=None, manifest_path=None,
+                 release_base_url=None, clock=None,
                  input_factory=None, window_source=None, focus_seconds=FOCUS_SECONDS,
                  focus_retry=(RETRY_FIRST, RETRY_LAST)):
         if depot_dir is not None or data_dir is not None:
@@ -153,8 +182,7 @@ class Agent:
         self.reg = Registry(transport)
         updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
                                   payload_path=payload_path, release_base_url=release_base_url,
-                                  clock=clock, state_dir=state_dir, runner=runner,
-                                  manifest_path=manifest_path)
+                                  clock=clock, state_dir=state_dir, runner=runner)
         self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
                              updater=updater, os_release_path=os_release_path,
                              input_factory=input_factory)
@@ -175,7 +203,7 @@ class Agent:
         self._updates = None
 
     async def start(self):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.reg.scan)
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._loop = loop
@@ -237,14 +265,28 @@ class Agent:
 
     async def serve_forever(self):
         """Serve until cancelled or until a restart is requested (the launcher then starts anew)."""
-        async with self._srv:
-            serving = asyncio.ensure_future(self._srv.serve_forever())
-            leaving = asyncio.ensure_future(self.restart_requested.wait())
-            try:
-                await asyncio.wait({serving, leaving}, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                serving.cancel()
-                leaving.cancel()
+        serving = asyncio.ensure_future(self._srv.serve_forever())
+        leaving = asyncio.ensure_future(self.restart_requested.wait())
+        try:
+            await asyncio.wait({serving, leaving}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            serving.cancel()
+            leaving.cancel()
+            await self._close_server()
+
+    async def _close_server(self):
+        """Stop listening and drop every client first: wait_closed() (Python 3.12+) waits
+        for connected clients, so the UI that asked for a restart would keep us alive."""
+        if self._srv is None:
+            return
+        self._srv.close()
+        for c in list(self.server.connections):
+            c.writer.close()
+        try:
+            await asyncio.wait_for(self._srv.wait_closed(), 5)
+        except asyncio.TimeoutError:
+            log.warning("clients did not disconnect in time")
+        self._srv = None
 
     async def stop(self):
         if self._poller:
@@ -255,21 +297,49 @@ class Agent:
             self._watcher.cancel()
         if self._tracker:
             self._tracker.cancel()
-        if self._srv:
-            self._srv.close()
-            await self._srv.wait_closed()
-        for c in list(self.server.connections):
-            c.writer.close()
+        close = getattr(self.window_source, "close", None)
+        if close is not None:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, close)
+            except Exception as exc:
+                log.debug("closing the window source failed: %s", exc)
+        await self._close_server()
         self.router.relay.close()           # hand the wheels back while the transport is still open
         self.reg.close()
         self.router.engine.close()
 
 
+LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+
+
+def log_file_path(environ=None):
+    env = os.environ if environ is None else environ
+    base = env.get("XDG_STATE_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"),
+                                                     ".local", "state")
+    return os.path.join(base, "optionsplus-linux", "agent.log")
+
+
+def setup_logging(environ=None):
+    """Log to stderr and to a rotating agent.log in the user's state directory (so an
+    autostarted agent, which no launcher redirects, still leaves a log). Returns the file
+    path, or None when it cannot be written; the agent runs either way."""
+    env = os.environ if environ is None else environ
+    logging.basicConfig(level=env.get("OPL_LOG_LEVEL", "INFO"), format=LOG_FORMAT)
+    path = log_file_path(env)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3,
+                                                       encoding="utf-8")
+    except OSError as exc:
+        log.warning("cannot write %s: %s", path, exc)
+        return None
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+    return path
+
+
 async def main():
-    logging.basicConfig(
-        level=os.environ.get("OPL_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    setup_logging()
     if socket_alive(socket_path()):
         log.info("agent already running on %s; exiting", socket_path())
         return

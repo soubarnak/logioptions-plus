@@ -19,7 +19,10 @@ import os
 import select
 import socket
 import struct
+import threading
 import time
+
+from .focus import Window
 
 log = logging.getLogger("opl.focus")
 
@@ -33,6 +36,11 @@ HANDSHAKE_SECONDS = 2.0
 
 class WaylandError(Exception):
     """The compositor cannot be used for focus tracking (no protocol, error, bad data)."""
+
+
+class WaylandUnsupported(WaylandError):
+    """This compositor will never offer what is needed (it lacks the protocol): not worth retrying."""
+    permanent = True
 
 
 # -- wire format -------------------------------------------------------------------------
@@ -132,24 +140,36 @@ class WaylandSource:
         self._connect = connect
         self._timeout = timeout
         self._conn = None
+        self._lock = threading.Lock()            # the poll thread and close() at stop
+        self._buf = b""
+        self._next_id = DISPLAY_ID
+        self._kinds = {}
+        self._globals = {}
+        self._done = set()
+        self._toplevels = {}
+        self._focused = None
+        self._manager = None
 
     # public
     def start(self):
-        if self._conn is None:
-            self._open()
+        with self._lock:
+            if self._conn is None:
+                self._open()
 
     def active(self):
-        if self._conn is None:
-            self._open()
-        try:
-            self._pump(0)
-        except (WaylandError, OSError):          # ConnectionError is an OSError
-            self._drop()
-            raise
-        return self._window()
+        with self._lock:
+            if self._conn is None:
+                self._open()
+            try:
+                self._pump(0)
+            except (WaylandError, OSError):      # ConnectionError is an OSError
+                self._drop()
+                raise
+            return self._window()
 
     def close(self):
-        self._drop()
+        with self._lock:
+            self._drop()
 
     # connection
     def _drop(self):
@@ -176,7 +196,7 @@ class WaylandSource:
             self._send(DISPLAY_ID, 1, struct.pack("=I", registry))     # get_registry
             self._roundtrip()
             if MANAGER not in self._globals:
-                raise WaylandError("this compositor does not offer the wlr-foreign-toplevel-management "
+                raise WaylandUnsupported("this compositor does not offer the wlr-foreign-toplevel-management "
                                    "protocol")
             name, version = self._globals[MANAGER]
             version = min(version, MANAGER_VERSION)
@@ -271,10 +291,7 @@ class WaylandSource:
             self._send(handle, 7)                                      # destroy
 
     def _window(self):
-        from .focus import Window                # focus imports this module lazily too
         tl = self._toplevels.get(self._focused)
         if tl is None or not tl["app_id"]:
             return None
-        app_id = tl["app_id"]
-        parts = (app_id, app_id.rpartition(".")[2])
-        return Window(tuple(dict.fromkeys(parts)))
+        return Window((tl["app_id"],))           # the full app_id: matching splits reverse-DNS ids on the profile side

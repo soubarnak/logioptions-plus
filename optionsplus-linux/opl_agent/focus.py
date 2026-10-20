@@ -11,12 +11,23 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 from collections import namedtuple
 
 log = logging.getLogger("opl.focus")
 
 Window = namedtuple("Window", "wm_class exe", defaults=("",))   # WM_CLASS parts, path of the program
+
+
+LAUNCHER = re.compile(r"^(flatpak|env|sh|bash|dash|zsh|fish|snap|electron\d*|java|node|nodejs|"
+                      r"(python|ruby|perl|php)[\d.]*|xdg-open|gtk-launch|gio|wine|wine64)$")
+
+
+def _is_launcher(path):
+    """True when `path` names a program that runs other programs, so it says nothing about
+    which application a window is."""
+    return bool(LAUNCHER.match(os.path.basename(path or "")))
 
 
 def _xprop(argv):
@@ -35,9 +46,10 @@ class X11Source:
     output of a command line and `exe_of(pid)` the program a process runs; both are
     injectable. Asks about a window's class and process only when the window changes."""
 
-    def __init__(self, run=None, exe_of=None):
+    def __init__(self, run=None, exe_of=None, hostname=None):
         self._run = run or _xprop
         self._exe_of = exe_of or _exe_of
+        self._hostname = hostname or socket.gethostname
         self._seen = (None, None)               # window id, its Window
 
     def active(self):
@@ -49,11 +61,13 @@ class X11Source:
         wid = m.group(1)
         if self._seen[0] == wid:
             return self._seen[1]
-        out = self._run(["xprop", "-id", wid, "WM_CLASS", "_NET_WM_PID"])
+        out = self._run(["xprop", "-id", wid, "WM_CLASS", "_NET_WM_PID", "WM_CLIENT_MACHINE"])
         cls = re.search(r"WM_CLASS\(\w+\) = (.*)", out)
         pid = re.search(r"_NET_WM_PID\(CARDINAL\) = (\d+)", out)
+        machine = re.search(r'WM_CLIENT_MACHINE\(\w+\) = "([^"]*)"', out)
+        remote = bool(machine) and machine.group(1).split(".")[0].lower() != self._hostname().split(".")[0].lower()
         window = Window(tuple(re.findall(r'"([^"]*)"', cls.group(1))) if cls else (),
-                        self._exe_of(int(pid.group(1))) if pid else "")
+                        self._exe_of(int(pid.group(1))) if pid and not remote else "")   # a remote pid is not ours
         self._seen = (wid, window)
         return window
 
@@ -61,23 +75,19 @@ class X11Source:
 def default_source(environ=None, which=None, wayland=None):
     """The source for this session, else None (the default profile then stays active).
 
-    A Wayland session (WAYLAND_DISPLAY) uses the wlroots foreign-toplevel source when the
-    compositor offers that protocol; GNOME (Mutter) and KWin without it get None, since X11
-    properties would only describe XWayland windows. `wayland(environ)` returns a transport
-    and is injectable. An X11 session uses xprop when there is a display and xprop."""
+    A Wayland session (WAYLAND_DISPLAY) uses the wlroots foreign-toplevel source. Nothing is
+    connected here: the source connects on its first poll (off the event loop) and again after
+    any failure, so an agent started before the compositor is up still follows the focus later.
+    GNOME (Mutter) and KWin, which lack the protocol, make it report that and the tracker stops,
+    since X11 properties would only describe XWayland windows (a session that says it is Wayland
+    gets None even when DISPLAY is set). `wayland(environ)` returns a transport and is
+    injectable. An X11 session uses xprop when there is a display and xprop."""
     env = os.environ if environ is None else environ
+    if not env.get("WAYLAND_DISPLAY") and env.get("XDG_SESSION_TYPE") == "wayland":
+        return None             # XWayland would only describe the X11 windows and stick on the last one
     if env.get("WAYLAND_DISPLAY"):
         from . import wayland_focus
-        src = wayland_focus.WaylandSource(lambda: (wayland or wayland_focus.connect_from_environment)(env))
-        try:
-            src.start()
-        except (wayland_focus.WaylandError, OSError) as exc:
-            log.info("no per-application profiles on this Wayland session (%s); "
-                     "the default profile stays active. wlroots compositors (sway, Hyprland, river) "
-                     "offer wlr-foreign-toplevel-management", exc)
-            return None
-        log.info("following the focused window through wlr-foreign-toplevel-management")
-        return src
+        return wayland_focus.WaylandSource(lambda: (wayland or wayland_focus.connect_from_environment)(env))
     if not env.get("DISPLAY") or not (which or shutil.which)("xprop"):
         return None
     return X11Source()
@@ -93,25 +103,39 @@ def _names(*values):
     return out
 
 
+def _snap_names(app):
+    """Both halves of a snap's desktop id (<snap>_<app>), else nothing."""
+    pid = app.get("applicationId") or ""
+    if "_" in pid and "/snap/" in (app.get("commandLine") or "") + (app.get("applicationPath") or ""):
+        return _names(*pid.split("_"))
+    return set()
+
+
 def match_profile(window, profile_ids, apps):
     """The first of `profile_ids` (application ids) that `window` belongs to, else None.
-    A window belongs to an application when its WM_CLASS or program equals the
-    application's id (or the last part of a reverse-DNS id), program or name. `apps` are
-    the scanned applications, which add their program and name as candidates."""
+    A window whose WM_CLASS is the application's StartupWMClass belongs to it before any other
+    reading; otherwise its WM_CLASS or program must equal the application's id (or the last part
+    of a reverse-DNS id, or either half of a snap id), program or name. Launcher programs
+    (flatpak, env, sh, python3, java ...) are never taken as an application's program.
+    `apps` are the scanned applications, which add their program and name as candidates."""
     if window is None:
         return None
-    have = _names(*window.wm_class, window.exe)
+    classes = {c.strip().lower() for c in window.wm_class if c and c.strip()}
+    have = _names(*window.wm_class, "" if _is_launcher(window.exe) else window.exe)
     if not have:
         return None
     by_id = {a.get("applicationId"): a for a in apps}
     for pid in profile_ids:
+        declared = ((by_id.get(pid) or {}).get("startupWMClass") or "").strip().lower()
+        if declared and declared in classes:
+            return pid
+    for pid in profile_ids:
         want = _names(pid, pid.rpartition(".")[2])
         app = by_id.get(pid)
         if app:
-            prog = os.path.basename(app.get("applicationPath") or "")
-            if prog != "flatpak":             # every Flatpak app launches through it
+            if not _is_launcher(app.get("applicationPath")):
                 want |= _names(app.get("applicationPath"))
-            want |= _names(app.get("name"))
+            want |= _names(app.get("name")) | _snap_names(app)
         if have & want:
             return pid
     return None

@@ -225,33 +225,75 @@ class ProfileStore:
         self.path = os.path.join(state_dir, "profiles.json")
         self.cards = {}
         self.apps = {}                  # application id -> {slot id: card}: that application's buttons
+        self.profile_ids = {}           # profile id the UI made up -> application id it is for
         try:
             with open(self.path) as fh:
                 data = json.load(fh)
             self.cards = dict(data.get("assignments") or {})
             self.apps = {a: dict(c) for a, c in (data.get("applications") or {}).items()}
+            self.profile_ids = dict(data.get("profileIds") or {})
         except FileNotFoundError:
             pass
         except Exception as exc:
             log.warning("ignoring unreadable %s: %s", self.path, exc)
 
     def _save(self):
+        """Write profiles.json; raises OSError (after putting the in-memory state back as the
+        caller found it) so a choice that could not be kept is never reported as stored."""
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w") as fh:
-                json.dump({"assignments": self.cards, "applications": self.apps}, fh, indent=1)
+                json.dump({"assignments": self.cards, "applications": self.apps, "profileIds": self.profile_ids},
+                          fh, indent=1)
             os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("cannot save profiles: %s", exc)
+            raise
+
+    def _change(self, mutate):
+        """Apply `mutate()` to the cards, save, and undo it when saving fails."""
+        before = self.snapshot()
+        mutate()
+        try:
+            self._save()
+        except OSError:
+            self.cards, self.apps, self.profile_ids = before
+            raise
+
+    def snapshot(self):
+        return copy.deepcopy((self.cards, self.apps, self.profile_ids))
+
+    def restore(self, snapshot):
+        """Put the state back as `snapshot` held it, and save that. Raises OSError when it cannot be saved."""
+        self.cards, self.apps, self.profile_ids = copy.deepcopy(snapshot)
+        self._save()
+
+    def app_of(self, profile_id):
+        """The application a profile id is for: the UI's own id maps to its application, any other id is one."""
+        return self.profile_ids.get(profile_id, profile_id)
+
+    def link(self, profile_id, app_id):
+        """Remember that the UI's profile `profile_id` is for application `app_id`."""
+        if profile_id and profile_id != app_id and self.profile_ids.get(profile_id) != app_id:
+            self._change(lambda: self.profile_ids.__setitem__(profile_id, app_id))
+
+    def unlink(self, profile_id):
+        """Drop the UI's profile id (the application's buttons are removed separately)."""
+        if profile_id in self.profile_ids:
+            self._change(lambda: self.profile_ids.pop(profile_id))
+
+    def has_profile(self, app_id):
+        return app_id in self.apps or app_id in self.profile_ids.values()
 
     def get(self, slot_id):
         return self.cards.get(slot_id)
 
     def set(self, slot_id, card, app_id=None):
         """Keep `card` for a slot, in the default profile or in application `app_id`'s."""
-        (self.apps.setdefault(app_id, {}) if app_id else self.cards)[slot_id] = copy.deepcopy(card)
-        self._save()
+        def put():
+            (self.apps.setdefault(app_id, {}) if app_id else self.cards)[slot_id] = copy.deepcopy(card)
+        self._change(put)
 
     def app_cards(self, app_id):
         return self.apps.get(app_id) or {}
@@ -264,14 +306,16 @@ class ProfileStore:
     def remove_app_buttons(self, app_id, predicate):
         """Forget the application's cards for the slots `predicate` accepts; an application
         left with none has no profile any more."""
-        cards = self.apps.get(app_id) or {}
-        gone = [s for s in cards if predicate(s)]
-        for s in gone:
-            del cards[s]
-        if not cards:
-            self.apps.pop(app_id, None)
+        gone = [s for s in self.apps.get(app_id) or {} if predicate(s)]
+
+        def drop():
+            cards = self.apps.get(app_id) or {}
+            for s in gone:
+                del cards[s]
+            if not cards:
+                self.apps.pop(app_id, None)
         if gone:
-            self._save()
+            self._change(drop)
 
     def discard(self, slot_id, app_id=None):
         """Forget one stored card: the application's when `app_id` is given, else the default profile's."""
@@ -281,19 +325,18 @@ class ProfileStore:
             self.remove(slot_id)
 
     def remove(self, slot_id):
-        if self.cards.pop(slot_id, None) is not None:
-            self._save()
+        if slot_id in self.cards:
+            self._change(lambda: self.cards.pop(slot_id))
 
     def remove_matching(self, predicate):
         gone = [s for s in self.cards if predicate(s)]
-        for s in gone:
-            del self.cards[s]
         if gone:
-            self._save()
+            self._change(lambda: [self.cards.pop(s) for s in gone])
 
 
-def profiles(devices, store=None, live=None, active_app=None):
-    """The default profile and one per application. `live` maps device id -> {"dpi", "range"} from the device."""
+def profiles(devices, store=None, live=None, active_app=None, apps=()):
+    """The default profile and one per application. `live` maps device id -> {"dpi", "range"} from the
+    device; `apps` are the scanned applications, which name the application profiles."""
     live = live or {}
     assignments = []
     for dev in devices:
@@ -322,11 +365,14 @@ def profiles(devices, store=None, live=None, active_app=None):
         "applicationId": DEFAULT_PROFILE_ID, "activeForApplication": active is None,
         "assignments": assignments, "baseProfileId": "",
     }]
-    for app_id in sorted(store.apps if store else ()):
+    names = {a.get("applicationId"): a.get("name") for a in apps}
+    ids = {app: pid for pid, app in (store.profile_ids if store else {}).items()}
+    for app_id in sorted(set(store.apps if store else ()) | set(ids)):
         out.append({
-            "id": app_id, "name": app_id, "applicationId": app_id,
+            "id": ids.get(app_id, app_id), "name": names.get(app_id) or app_id, "applicationId": app_id,
             "activeForApplication": app_id == active,
-            "assignments": _app_assignments(assignments, store.apps[app_id]), "baseProfileId": DEFAULT_PROFILE_ID,
+            "assignments": _app_assignments(assignments, store.apps.get(app_id) or {}),
+            "baseProfileId": DEFAULT_PROFILE_ID,
         })
     return {"@type": TYPE + "logi.protocol.profiles_v2.Profiles", "profiles": out}
 

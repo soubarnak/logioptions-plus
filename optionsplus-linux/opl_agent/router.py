@@ -147,6 +147,9 @@ class Router:
         if verb == "GET" and path == "/v2/profiles":
             return "SUCCESS", await self._profiles_payload(), ""
 
+        if verb == "SET" and path == "/v2/profiles":
+            return await self._profiles_update(payload or {})
+
         if verb == "SET" and path.startswith("/v2/profiles/"):
             r = await self._profiles_set(path, payload)
             if r is not None:
@@ -154,7 +157,7 @@ class Router:
 
         parts = path.strip("/").split("/")
         if verb in ("GET", "SET") and parts[0] == "mouse" and parts[-1] == "swap" \
-                and (len(parts) == 2 or len(parts) == 3 and (parts[1] == "global" or parts[1] in self.reg.devices)):
+                and (len(parts) == 2 or len(parts) == 3 and parts[1] == "global"):
             return await self._swap_route(verb, payload)
 
         if verb == "GET" and path == "/system/info":
@@ -172,22 +175,20 @@ class Router:
         if path == "/updates/channel" and verb in ("GET", "SET"):
             if verb == "SET":
                 code = self.updater.set_channel(payload)
+                if code == "NOT_SUPPORTED":
+                    return code, None, "only the stable channel exists; pre-releases are not offered"
                 if code != "SUCCESS":
-                    return code, None, "channel must be stable or testing"
+                    return code, None, "channel must be stable"
             return "SUCCESS", self.updater.channel(), ""
         if verb == "SET" and path == "/updates/check_now":
             self.updater.request_check()
             return "SUCCESS", payload, ""
-        if verb == "SET" and path in ("/updates/download", "/updates/install", "/updates/restart_now",
-                                      "/updates/payload/download"):
+        if verb == "SET" and path in ("/updates/download", "/updates/install", "/updates/restart_now"):
             action = {"/updates/download": self.updater.download,
                       "/updates/install": self.updater.install,
-                      "/updates/restart_now": self.updater.restart_now,
-                      "/updates/payload/download": self.updater.download_payload}[path]
+                      "/updates/restart_now": self.updater.restart_now}[path]
             code, what = action()
             return code, (payload if code == "SUCCESS" else None), what
-        if verb == "GET" and path == "/updates/payload":
-            return "SUCCESS", self.updater.payload_status(), ""
 
         # user configuration: persisted, and broadcast on change like the real agent
         if path == "/configuration":
@@ -198,7 +199,7 @@ class Router:
         # 2. static boot table
         if verb == "GET" and path in responses.BOOT:
             return "SUCCESS", responses.BOOT[path], ""
-        stub = stubs.lookup(verb, path)
+        stub = stubs.lookup(verb, path, payload)
         if stub is not None:
             return stub[0], stub[1], ""
         if verb == "SET" and path == "/system/open_settings":
@@ -206,8 +207,6 @@ class Router:
             return "SUCCESS", payload, ""
         if path in responses.ERRORS:
             return responses.ERRORS[path], None, ""
-        if verb == "SET" and path in responses.SET_ECHO:
-            return "SUCCESS", payload, ""
 
         # 2. device-scoped routes
         parts = path.strip("/").split("/")
@@ -236,11 +235,11 @@ class Router:
             log.warning("device route %s failed: %s", path, exc)
             return "FAULTED", None, str(exc)
 
-        # Several boot sagas issue a SET without catching a failure; one
-        # rejected SET cancels the whole saga tree. Accept unknown SETs.
+        # The SETs boot sagas send without catching a failure are in stubs.py; any other
+        # SET is a feature we do not have, and says so instead of pretending to succeed.
         if verb == "SET":
-            log.warning("unhandled SET %s accepted (feature not implemented)", path)
-            return "SUCCESS", payload, ""
+            log.warning("unhandled SET %s refused (feature not implemented)", path)
+            return "NOT_SUPPORTED", None, "not supported on Linux"
         return "NO_SUCH_PATH", None, ""
 
     # ---- receiver pairing -------------------------------------------------
@@ -248,7 +247,7 @@ class Router:
         """/devices/<receiver>/pair: SET opens (payload may carry deviceAddress and
         timeoutSeconds), GET reads, SET .../cancel cancels. A write the receiver rejects is
         FAULTED and leaves the pairing state as it was."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         payload = payload if isinstance(payload, dict) else {}
         if sub == "" and verb == "GET":
             return "SUCCESS", self.reg.receivers[rcv_id].pairing, ""
@@ -270,7 +269,7 @@ class Router:
     async def _discovery_route(self, verb, rcv_id, sub, payload):
         """/devices/<receiver>/discovery: SET starts looking for advertising Bolt devices
         (payload timeoutSeconds), GET .../status reads; SET .../cancel stops."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         r = self.reg.receivers[rcv_id]
         if (sub, verb) == ("status", "GET"):
             return "SUCCESS", self.reg.discovery_state(r), ""
@@ -310,8 +309,10 @@ class Router:
         return live
 
     async def _profiles_payload(self):
-        live = await asyncio.get_event_loop().run_in_executor(None, self._read_live)
-        return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app)
+        live = await asyncio.get_running_loop().run_in_executor(None, self._read_live)
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        return profiles.profiles(self.reg.devices.values(), self.store, live, self.engine.active_app, self.apps)
 
     async def _broadcast_profiles(self):
         if self.server is not None:
@@ -444,7 +445,7 @@ class Router:
         if verb == "SET":
             wanted = (payload or {}).get("state") == swap.STATE_RIGHT
             try:
-                await asyncio.get_event_loop().run_in_executor(None, self.button_swap.set, wanted)
+                await asyncio.get_running_loop().run_in_executor(None, self.button_swap.set, wanted)
             except swap.SwapUnsupported as exc:
                 return "NOT_SUPPORTED", None, str(exc)
             except Exception as exc:
@@ -453,8 +454,52 @@ class Router:
         return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
                            "state": self.button_swap.state}, ""
 
+    async def _app_for(self, profile_id):
+        """The installed application a non-default profile id is for, else "" (a stale or made-up id)."""
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        app = self.store.app_of(profile_id)
+        if self.store.has_profile(app) or any(a.get("applicationId") == app for a in self.apps):
+            return app
+        return ""
+
+    async def _profiles_update(self, update):
+        """SET /v2/profiles: the UI creates profiles (each for an application, under an id of its
+        own) and removes them."""
+        if self.apps is None:
+            await self._scan_applications(announce=False)
+        installed = {a.get("applicationId") for a in self.apps}
+        changed = False
+        for prof in update.get("updatedProfiles") or []:
+            pid = prof.get("id") or ""
+            app = prof.get("applicationId") or pid
+            if DEFAULT_PROFILE in (pid, app):
+                continue
+            if not pid or (app not in installed and not self.store.has_profile(app)):
+                return "INVALID_ARG", None, "no installed application %r" % app
+            try:
+                self.store.link(pid, app)
+            except OSError as exc:
+                return "FAULTED", None, "cannot save the profile: %s" % exc
+            changed = True
+        for pid in update.get("removedProfileIds") or []:
+            if pid == DEFAULT_PROFILE:
+                continue
+            app = self.store.app_of(pid)
+            if not self.store.has_profile(app):
+                continue
+            code, _, msg = await self._app_profile_reset(app, {}, unlink=pid, broadcast=False)
+            if code != "SUCCESS":
+                if changed:
+                    await self._broadcast_profiles()
+                return code, None, msg
+            changed = True
+        if changed:
+            await self._broadcast_profiles()
+        return "SUCCESS", update, ""
+
     async def _profiles_set(self, path, payload):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if path == "/v2/profiles/reset":
             return await self._profiles_reset(payload or {})
         payload = payload or {}
@@ -467,7 +512,12 @@ class Router:
             slot_id = asg.get("slotId", "")
             requested = asg.get("card") or entry.get("card") or {}
             app = entry.get("profileId") or DEFAULT_PROFILE
-            app = None if app == DEFAULT_PROFILE else app
+            if app == DEFAULT_PROFILE:
+                app = None
+            else:
+                app = await self._app_for(app)
+                if not app:
+                    return await self._profiles_failed(handled, "INVALID_ARG", "no such profile")
             dev = self._device_for_slot(slot_id)
             value = profiles.pointer_value(requested)
             if app is not None or dev is None or value is None:
@@ -488,12 +538,12 @@ class Router:
                     try:
                         await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
                     except input_engine.Unsupported as exc:
-                        return "NOT_SUPPORTED", None, str(exc)
+                        return await self._profiles_failed(handled, "NOT_SUPPORTED", str(exc))
                     except Exception as exc:
                         log.warning("button write failed: %s", exc)
-                        if isinstance(exc, input_engine.NoVirtualDevice):
-                            return "FAULTED", None, str(exc)
-                        return "FAULTED", None, "device write failed: %s" % exc
+                        what = str(exc) if isinstance(exc, input_engine.NoVirtualDevice) \
+                            else "device write failed: %s" % exc
+                        return await self._profiles_failed(handled, "FAULTED", what)
                     asg["card"], asg["cardId"] = requested, requested.get("id", asg.get("cardId", ""))
                     handled = payload
                     continue
@@ -502,16 +552,26 @@ class Router:
                 card = await loop.run_in_executor(None, apply_fn, dev, arg)
             except Exception as exc:
                 log.warning("%s write failed: %s", what, exc)
-                return "FAULTED", None, "device write failed: %s" % exc
+                return await self._profiles_failed(handled, "FAULTED", "device write failed: %s" % exc)
             if card is None:
                 continue
-            self.store.set(asg["slotId"], card)
+            try:
+                self.store.set(asg["slotId"], card)
+            except OSError as exc:
+                return await self._profiles_failed(handled, "FAULTED", "cannot save the setting: %s" % exc)
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
         if handled is None:
             return None
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
+
+    async def _profiles_failed(self, stored, code, what):
+        """Reply to a batch that stopped part way: what the earlier operations stored stays, so
+        the UI is told about it rather than left showing the old profiles."""
+        if stored is not None:
+            await self._broadcast_profiles()
+        return code, None, what
 
     def _button_target(self, slot_id):
         """(device, control key) for a button or thumb wheel action slot of a connected device, else None."""
@@ -541,9 +601,26 @@ class Router:
                 self.engine.assign(dev, cid, card)
             if cid == profiles.THUMB_KEY:
                 self._settle_thumb(dev)
+            before = self.store.snapshot()
             self.store.set(slot_id, card, app)
             if app is not None:
-                self._refocus()               # the focused window may belong to a profile just made
+                try:
+                    self._refocus()           # the focused window may belong to a profile just made
+                except Exception:
+                    self._undo(before)        # not stored: the reply is a failure
+                    raise
+
+    def _undo(self, snapshot):
+        """Blocking, under the switch lock: put the store back as `snapshot` held it and bring the
+        mouse in line with it again. Best effort: the failure that called for it is the one reported."""
+        try:
+            self.store.restore(snapshot)
+        except OSError as exc:
+            log.warning("could not put the saved profiles back: %s", exc)
+        try:
+            self._refocus()
+        except Exception as exc:
+            log.warning("could not put the profile back in force: %s", exc)
 
     def _settle_thumb(self, dev):
         """Blocking: the thumb wheel has one owner. A bound thumb action card gives it to the
@@ -574,10 +651,10 @@ class Router:
                 self.apply_stored(dev.id)
 
     async def _profiles_reset(self, info):
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         app = info.get("profileId")
         if app and app != DEFAULT_PROFILE:
-            return await self._app_profile_reset(app, info)
+            return await self._app_profile_reset(self.store.app_of(app), info)
         for dev in list(self.reg.devices.values()):
             if info.get("deviceId") and info["deviceId"] != dev.id:
                 continue
@@ -590,33 +667,51 @@ class Router:
         return "SUCCESS", info, ""
 
     def _reset_device(self, dev):
-        """Blocking: forget the default profile's choices for `dev` and put its defaults back."""
+        """Blocking: forget the default profile's choices for `dev` and put its defaults back.
+        Nothing stays forgotten when the mouse cannot be brought in line."""
         with self._switch_lock:
-            self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
-            self.store.remove(profiles.scroll_slot(dev.slot_prefix))
-            self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
-            self.store.remove_matching(lambda slot: profiles.is_button_slot(slot, dev.slot_prefix))
-            self._apply_defaults(dev)
+            before = self.store.snapshot()
+            try:
+                self.store.remove(profiles.mouse_settings_slot(dev.slot_prefix))
+                self.store.remove(profiles.scroll_slot(dev.slot_prefix))
+                self.store.remove(profiles.thumb_wheel_slot(dev.slot_prefix))
+                self.store.remove_matching(lambda slot: profiles.is_button_slot(slot, dev.slot_prefix))
+                self._apply_defaults(dev)
+            except Exception:
+                self._undo(before)
+                raise
 
-    async def _app_profile_reset(self, app, info):
-        """Reset an application's profile: it forgets its buttons and follows the default again."""
+    async def _app_profile_reset(self, app, info, unlink=None, broadcast=True):
+        """Reset an application's profile: it forgets its buttons and follows the default again.
+        Nothing is forgotten when the mouse cannot be brought in line."""
         devices = [d for d in self.reg.devices.values() if not info.get("deviceId") or info["deviceId"] == d.id]
         try:
-            await asyncio.get_running_loop().run_in_executor(None, self._reset_app, app, devices)
+            await asyncio.get_running_loop().run_in_executor(None, self._reset_app, app, devices, unlink)
+        except OSError as exc:
+            return "FAULTED", None, "cannot save the profile: %s" % exc
         except Exception as exc:
             return "FAULTED", None, "device write failed: %s" % exc
-        await self._broadcast_profiles()
+        if broadcast:
+            await self._broadcast_profiles()
         return "SUCCESS", info, ""
 
-    def _reset_app(self, app, devices):
-        """Blocking: forget application `app`'s buttons, and if it is in force hand them back."""
+    def _reset_app(self, app, devices, unlink):
+        """Blocking: forget the application's buttons for `devices` (and the UI's id `unlink`), and
+        change the mouse when that application's profile is in force."""
         with self._switch_lock:
-            self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
-                                                                  for d in devices))
-            if self.engine.active_app == app:
-                self.engine.activate(app, devices)
-                for dev in devices:
-                    self._settle_thumb(dev)
+            before = self.store.snapshot()
+            try:
+                self.store.remove_app_buttons(app, lambda slot: any(profiles.is_button_slot(slot, d.slot_prefix)
+                                                                      for d in devices))
+                if unlink:
+                    self.store.unlink(unlink)
+                if self.engine.active_app == app:
+                    self.engine.activate(app if self.store.apps.get(app) else None, devices)
+                    for dev in devices:
+                        self._settle_thumb(dev)
+            except Exception:
+                self._undo(before)
+                raise
 
     def on_focus(self, window):
         """Blocking: the focused window changed; put the profile of its application (else the
@@ -667,7 +762,7 @@ class Router:
             return ("NO_SUCH_PATH" if verb == "GET" else "INVALID_DEVICE"), None, ""
         if switch_only and (verb != "SET" or not isinstance(payload, dict) or "host" not in payload):
             return "NO_SUCH_PATH", None, ""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def read():
             return easy_switch.hosts_payload(dev, self.reg.read_hosts(dev_id))
@@ -717,13 +812,13 @@ class Router:
         UI's scanning spinner always stops."""
         dirs = self._app_dirs()
         try:
-            self.apps = await asyncio.get_event_loop().run_in_executor(None, applications.scan, dirs)
+            self.apps = await asyncio.get_running_loop().run_in_executor(None, applications.scan, dirs)
         except Exception as exc:
             log.warning("application scan failed: %s", exc)
             self.apps = []
         if announce and self.server is not None:
             # after the SET reply, which the caller is about to send
-            asyncio.get_event_loop().call_soon(self._announce_applications)
+            asyncio.get_running_loop().call_soon(self._announce_applications)
 
     def _announce_applications(self):
         for path in ("/applications/installed", "/applications"):
@@ -800,9 +895,5 @@ class Router:
                 return "NO_SUCH_PATH", None, ""
             pl, _ = reg.battery(dev_id)
             return "SUCCESS", pl, ""
-
-        # /mouse/<id>/swap  (per-device button swap mirrors the global default)
-        if parts[0] == "mouse" and len(parts) >= 3 and parts[1] in reg.devices:
-            return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap", "state": "LEFT"}, ""
 
         return None

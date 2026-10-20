@@ -1,7 +1,7 @@
 """Command runner port: launches desktop tools such as the settings app.
 
-Production wiring is ``SubprocessRunner``; tests pass a fake with the same three
-methods (``which``, ``run`` and ``run_wait``). ``run`` never waits for the program and
+Production wiring is ``SubprocessRunner``; tests pass a fake with the same four
+methods (``which``, ``run``, ``run_wait`` and ``run_output``). ``run`` never waits for the program and
 never raises: a missing or failing tool must not take the agent down. ``run_wait`` is for
 the privileged update steps (pkexec, the payload fetcher): it waits and returns the exit
 status, or -1 when the program cannot be started.
@@ -32,3 +32,13 @@ class SubprocessRunner:
         except OSError as exc:
             log.warning("cannot run %s: %s", argv[0], exc)
             return -1
+
+    def run_output(self, argv):
+        """Wait for a short query tool; returns (exit status, stdout), (-1, "") when it cannot run."""
+        try:
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, errors="replace", timeout=10)
+            return done.returncode, done.stdout
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("cannot run %s: %s", argv[0], exc)
+            return -1, ""
