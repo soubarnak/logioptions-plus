@@ -89,6 +89,9 @@ class Router:
                     info["batteryStatus"] = bs
                 info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
                 out.append(("/devices/state/changed", info))
+            for r in self.reg.receivers.values():
+                out.append(("/devices/state/changed",
+                            {**r.info(), "@type": TYPE + "logi.protocol.devices.Device.Info"}))
             return out
         if path == "/battery/state/changed":
             return [(path, self.reg.battery(i)[0]) for i in self.reg.devices
@@ -169,6 +172,8 @@ class Router:
 
         # 2. device-scoped routes
         parts = path.strip("/").split("/")
+        if parts[0] == "devices" and len(parts) >= 3 and parts[2] == "pair" and parts[1] in self.reg.receivers:
+            return await self._pair_route(verb, parts[1], "/".join(parts[3:]))
         try:
             r = self._device_route(verb, parts, path, payload)
             if r is not None:
@@ -185,6 +190,25 @@ class Router:
             log.warning("unhandled SET %s accepted (feature not implemented)", path)
             return "SUCCESS", payload, ""
         return "NO_SUCH_PATH", None, ""
+
+    # ---- receiver pairing -------------------------------------------------
+    async def _pair_route(self, verb, rcv_id, sub):
+        """/devices/<receiver>/pair: SET opens, GET reads, SET .../cancel cancels. A write
+        the receiver rejects is FAULTED and leaves the pairing state as it was."""
+        loop = asyncio.get_event_loop()
+        if sub == "" and verb == "GET":
+            return "SUCCESS", self.reg.receivers[rcv_id].pairing, ""
+        if (sub, verb) == ("", "SET"):
+            fn = self.reg.open_pairing
+        elif (sub, verb) == ("cancel", "SET"):
+            fn = self.reg.cancel_pairing
+        else:
+            return "NO_SUCH_PATH", None, ""
+        try:
+            return "SUCCESS", await loop.run_in_executor(None, fn, rcv_id), ""
+        except Exception as exc:
+            log.warning("pairing request on %s failed: %s", rcv_id, exc)
+            return "FAULTED", None, "pairing request failed: %s" % exc
 
     # ---- profiles / pointer speed ---------------------------------------
     def _read_live(self):
@@ -392,7 +416,7 @@ class Router:
     def _device_route(self, verb, parts, path, payload):
         reg = self.reg
         if parts[:2] == ["devices", "list"]:
-            infos = [d.info() for d in reg.devices.values()]
+            infos = [d.info() for d in reg.devices.values()] + [r.info() for r in reg.receivers.values()]
             return "SUCCESS", {"@type": TYPE + "logi.protocol.devices.Device.Info.List",
                                "deviceInfos": infos}, ""
         if parts[:3] == ["devices", "ever_connected", "list"]:
@@ -402,6 +426,8 @@ class Router:
         # GET /devices/resources {id, deviceModel}: images and metadata
         if parts == ["devices", "resources"]:
             dev = reg.devices.get((payload or {}).get("id", ""))
+            if dev is None and (payload or {}).get("id", "") in reg.receivers:
+                return "SUCCESS", {}, ""
             if dev is None:
                 return "INVALID_DEVICE", None, "unknown device id"
             return "SUCCESS", dev.resources(), ""
@@ -409,6 +435,8 @@ class Router:
         # /devices/<id>/<sub>
         if parts[0] == "devices" and len(parts) >= 3:
             dev_id, sub = parts[1], parts[2]
+            if dev_id in reg.receivers and sub == "info":
+                return "SUCCESS", reg.receivers[dev_id].info(), ""
             if dev_id not in reg.devices:
                 return "NO_SUCH_PATH", None, ""
             if sub == "info":

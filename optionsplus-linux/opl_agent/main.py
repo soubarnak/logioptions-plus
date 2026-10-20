@@ -44,6 +44,12 @@ def _device_info(reg, dev_id):
     return info
 
 
+def _receiver_info(receiver):
+    info = receiver.info()
+    info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+    return info
+
+
 async def _watch(server, reg, interval=RESCAN_SECONDS):
     """Rescan on hidraw node add/remove and every `interval` (a mouse switching
     on or off leaves the receiver's node alone); announce what changed."""
@@ -63,8 +69,12 @@ async def _watch(server, reg, interval=RESCAN_SECONDS):
             info = d.info()
             info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
             server.broadcast("/devices/state/deactivated", info)
+        for r in events["receiver_removed"]:
+            server.broadcast("/devices/state/deactivated", _receiver_info(r))
         for dev_id in events["added"] + events["returned"]:
             server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
+        for rid in events["receiver_added"]:
+            server.broadcast("/devices/state/changed", _receiver_info(reg.receivers[rid]))
 
 
 def _broadcast_battery(server, reg, dev_id):
@@ -128,6 +138,7 @@ class Agent:
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._loop = loop
         self.reg.on_resumed.append(self._battery_after_resume)
+        self.reg.on_pairing.append(self._announce_pairing)
         self._srv = await self.server.start()
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
         self._updates = asyncio.ensure_future(self.router.updater.run())
@@ -138,6 +149,20 @@ class Agent:
         def push():
             if dev_id in self.reg.devices:
                 _broadcast_battery(self.server, self.reg, dev_id)
+        self._loop.call_soon_threadsafe(push)
+
+    def _announce_pairing(self, rcv_id, state, passkey, events):
+        """Registry hook (any thread): broadcast pairing progress and any device it added."""
+        def push():
+            base = "/devices/%s/pair" % rcv_id
+            self.server.broadcast(base + "/changed", state)
+            if passkey is not None:
+                self.server.broadcast(base + "/passkey/displayed", {
+                    "@type": TYPE + "logi.protocol.devices.Receiver.PassKeyDisplay",
+                    "receiverId": rcv_id, "passkey": passkey})
+            for dev_id in (events or {}).get("added", []) + (events or {}).get("returned", []):
+                if dev_id in self.reg.devices:
+                    self.server.broadcast("/devices/state/changed", _device_info(self.reg, dev_id))
         self._loop.call_soon_threadsafe(push)
 
     async def serve_forever(self):

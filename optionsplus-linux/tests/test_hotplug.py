@@ -22,7 +22,8 @@ def live(bolt, agent_factory):
 
 
 def device_ids(client):
-    return [d["id"] for d in client.call("GET", "/devices/list")["payload"].get("deviceInfos", [])]
+    infos = client.call("GET", "/devices/list")["payload"].get("deviceInfos", [])
+    return [d["id"] for d in infos if d["deviceType"] != "RECEIVER"]     # the receiver is covered in test_pairing
 
 
 def wait_for(cond, timeout=3):

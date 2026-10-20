@@ -12,6 +12,7 @@ the UI loads the device images and metadata from that depot.
 """
 
 import logging
+import threading
 import time
 
 from . import hidpp, resources
@@ -166,6 +167,59 @@ class Device:
         }
 
 
+class Receiver:
+    """A Unifying/Bolt receiver, surfaced as a Device.Info of type RECEIVER."""
+
+    def __init__(self, rcv_id, node):
+        self.id = rcv_id
+        self.node = node
+        self.pid = node.pid
+        self.bolt = bool(getattr(node, "is_bolt", False))
+        self.connected = True
+        self.pairing_index = None    # feature index of the pairing feature, None when absent
+        self.pairing = pairing_state(rcv_id, "IDLE")
+
+    @property
+    def name(self):
+        return "Logi Bolt Receiver" if self.bolt else (self.node.name or "Logitech Receiver")
+
+    def info(self):
+        """logi.protocol.devices.Device.Info for the receiver."""
+        return {
+            "id": self.id,
+            "pid": self.pid,
+            "state": "ACTIVE" if self.connected else "ABSENT",
+            "connectionType": CONN_USB,
+            "hasWirelessInterface": True,
+            "deviceType": "RECEIVER",
+            "deviceModel": format(self.pid, "x"),
+            "displayName": self.name,
+            "extendedDisplayName": self.name,
+            "slotPrefix": "046d_" + format(self.pid, "x"),
+            "supported": True,
+            "optionsDevice": False,
+            "connected": self.connected,
+            "isOwned": True,
+            "modelId": format(self.pid, "x"),
+            "maxPairableDeviceCount": 6,
+            "pairingMethod": "BLE_PRO" if self.bolt else "UNIFYING",
+        }
+
+
+# Pairing state names. The UI enum values are not confirmed against a live agent log
+# (schema_defaults only names the UNKNOWN_* defaults): check them on hardware.
+PAIRING_STATES = ("IDLE", "STARTED", "PASSKEY_DISPLAYED", "PAIRED", "FAILED", "CANCELLED")
+
+
+def pairing_state(rcv_id, state, error="NO_PAIRING_ERROR", slot=0, device=None):
+    """logi.protocol.devices.Receiver.PairingState payload."""
+    out = {"@type": TYPE + "logi.protocol.devices.Receiver.PairingState",
+           "receiverId": rcv_id, "state": state, "error": error, "pairingSlot": slot}
+    if device is not None:
+        out["pairedDevice"] = device
+    return out
+
+
 class Registry:
     """Owns open HID++ transports and the set of live devices."""
 
@@ -177,13 +231,19 @@ class Registry:
         self._next_id = 0
         self.on_discovered = []    # callables(dev_id), run in scan() for each new device
         self.on_resumed = []       # callables(dev_id), after a wake or config-change event
+        self.receivers = {}        # id -> Receiver
+        self.absent_receivers = {}
+        self._next_receiver = 0
+        self._probed_receivers = []
+        self._scan_lock = threading.RLock()
+        self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change
 
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
             fd = hidpp.Reader(self.transport.open(node.path),
                               long_only=getattr(node, "long_only", False))
-            fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx))
+            fd.add_listener(lambda idx, fidx, fn, params, node=node: self._on_event(node, idx, fidx, fn, params))
             self._fds[node.path] = fd
         return fd
 
@@ -209,12 +269,15 @@ class Registry:
             except OSError:
                 pass
         out = []
+        receivers = []
         for node in nodes:
             try:
                 fd = self._fd(node)
             except OSError as exc:
                 log.warning("cannot open %s: %s", node.path, exc)
                 continue
+            if node.is_receiver:
+                receivers.append(node)
             bolt = getattr(node, "is_bolt", False)
             try:
                 if node.is_receiver:
@@ -228,7 +291,49 @@ class Registry:
             except hidpp.HidppError:
                 found = []
             out += [(node, info) for info in found]
+        self._probed_receivers = receivers
         return out
+
+    def _reconcile_receivers(self, force, events):
+        """Bring `receivers` in line with the receiver nodes the probe found."""
+        present = {n.pid: n for n in self._probed_receivers}
+        for rid, r in list(self.receivers.items()):
+            node = present.pop(r.pid, None)
+            if node is None:
+                r.connected = False
+                self.absent_receivers[rid] = r
+                del self.receivers[rid]
+                events["receiver_removed"].append(r)
+                continue
+            if force or node.path != r.node.path:
+                r.node = node
+                self._setup_receiver(r)
+                if not force:
+                    events["receiver_added"].append(rid)
+        for rid, r in list(self.absent_receivers.items()):
+            node = present.pop(r.pid, None)
+            if node is None:
+                continue
+            del self.absent_receivers[rid]
+            r.node, r.connected = node, True
+            self._setup_receiver(r)
+            self.receivers[rid] = r
+            events["receiver_added"].append(rid)
+        for node in present.values():
+            rid = "rcv%08d" % self._next_receiver
+            self._next_receiver += 1
+            r = Receiver(rid, node)
+            self._setup_receiver(r)
+            self.receivers[rid] = r
+            events["receiver_added"].append(rid)
+        self.receivers = dict(sorted(self.receivers.items()))
+
+    def _setup_receiver(self, r):
+        try:
+            r.pairing_index = hidpp.feature_index(self._fds[r.node.path], hidpp.DEV_RECEIVER,
+                                                  hidpp.F_RECEIVER_PAIRING)
+        except Exception:
+            r.pairing_index = None
 
     def _build(self, dev_id, node, info, previous=None):
         fd = self._fds[node.path]
@@ -279,11 +384,18 @@ class Registry:
         A device that returns keeps the id it had when its hardware identity
         matches. Hooks in `on_discovered` run for each new or returned device.
         Returns {"added": [...], "returned": [...], "removed": [...]} of device ids
-        (Device objects for removed ones, marked not connected)."""
+        (Device objects for removed ones, marked not connected). Receivers report as
+        "receiver_added" (ids, new or returned) and "receiver_removed" (Receiver objects)."""
+        with self._scan_lock:
+            return self._rescan(force)
+
+    def _rescan(self, force):
         probed = self._probe()
-        events = {"added": [], "returned": [], "removed": []}
+        events = {"added": [], "returned": [], "removed": [],
+                  "receiver_added": [], "receiver_removed": []}
         if probed is None:
             return events
+        self._reconcile_receivers(force, events)
         by_key = {}
         for node, info in probed:
             by_key.setdefault(self._identity(info, node), (node, info))
@@ -329,8 +441,12 @@ class Registry:
                     log.exception("discovery hook failed for %s", dev_id)
         return events
 
-    def _on_event(self, node, index, feature_index):
-        """Reader listener (own thread): the mouse woke or changed configuration."""
+    def _on_event(self, node, index, feature_index, function=0, params=b""):
+        """Reader listener (own thread): a receiver pairing event, or the mouse
+        woke or changed configuration."""
+        if index == hidpp.DEV_RECEIVER:
+            self._on_pairing_event(node, feature_index, function, params)
+            return
         for dev_id, d in list(self.devices.items()):
             if d.node.path != node.path or d.index != index:
                 continue
@@ -347,6 +463,62 @@ class Registry:
                     hook(dev_id)
                 except Exception:
                     log.exception("resume hook failed for %s", dev_id)
+
+    # ---- receiver pairing ---------------------------------------------------
+    def open_pairing(self, rcv_id, timeout=60):
+        """Blocking: open the receiver's pairing lock. Raises when the write fails (the
+        state then stays as it was). Returns the pairing state."""
+        r = self.receivers[rcv_id]
+        if r.pairing_index is None:
+            raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
+        hidpp.pairing_open(self._fds[r.node.path], r.pairing_index, timeout)
+        return self._set_pairing(r, pairing_state(r.id, "STARTED"))
+
+    def cancel_pairing(self, rcv_id):
+        """Blocking: close the pairing lock. Raises when the write fails."""
+        r = self.receivers[rcv_id]
+        if r.pairing_index is None:
+            raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
+        hidpp.pairing_cancel(self._fds[r.node.path], r.pairing_index)
+        return self._set_pairing(r, pairing_state(r.id, "CANCELLED"))
+
+    def _set_pairing(self, r, state, passkey=None, events=None):
+        r.pairing = state
+        for hook in list(self.on_pairing):
+            try:
+                hook(r.id, state, passkey, events)
+            except Exception:
+                log.exception("pairing hook failed for %s", r.id)
+        return state
+
+    def _on_pairing_event(self, node, feature_index, function, params):
+        """Reader thread: the receiver reported pairing progress."""
+        r = next((x for x in self.receivers.values()
+                  if x.node.path == node.path and x.pairing_index == feature_index), None)
+        if r is None:
+            return
+        if function == 1:                                  # passkey to show the user
+            digits = bytes(params).rstrip(b"\0").decode("ascii", "replace")
+            self._set_pairing(r, pairing_state(r.id, "PASSKEY_DISPLAYED"), passkey=digits)
+            return
+        if function != 0 or len(params) < 3:
+            return
+        status, error, slot = params[0], params[1], params[2]
+        if status == 1:
+            self._set_pairing(r, pairing_state(r.id, "STARTED"))
+        elif status == 0:
+            if r.pairing["state"] in ("STARTED", "PASSKEY_DISPLAYED"):
+                self._set_pairing(r, pairing_state(r.id, "CANCELLED"))
+        elif status == 2:
+            events = self.rescan()
+            dev = next((d for d in self.devices.values()
+                        if d.node.path == r.node.path and d.index == slot), None)
+            basic = None if dev is None else {"id": dev.id, "displayName": dev.name,
+                                              "deviceType": dev.dtype, "pid": dev.pid}
+            self._set_pairing(r, pairing_state(r.id, "PAIRED", slot=slot, device=basic), events=events)
+        elif status == 3:
+            log.warning("receiver %s: pairing failed, code %d", r.id, error)
+            self._set_pairing(r, pairing_state(r.id, "FAILED", error="UNKNOWN_PAIRING_ERROR"))
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):

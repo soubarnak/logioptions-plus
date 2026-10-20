@@ -20,11 +20,18 @@ MOUSE_INDEX = 1
 FEATURES = [0x0000, 0x0001, 0x0003, 0x0005, 0x1004, 0x2201, 0x2110, 0x1D4B, 0x0020, 0x2121, 0x2150]
 F_WAKE, F_CONFIG_CHANGE = 0x1D4B, 0x0020
 
+# the receiver's own feature table (device index 0xFF)
+RECEIVER_FEATURES = [0x0000, 0x1817]
+F_PAIRING = 0x1817
+# pairing event function 0 = status [status, error, slot]; function 1 = passkey digits
+PAIR_CLOSED, PAIR_OPEN, PAIR_DONE, PAIR_FAILED = 0, 1, 2, 3
+
 
 class SimulatedMouse:
     """Feature table and mutable state of one HID++ 2.0 mouse."""
 
-    def __init__(self):
+    def __init__(self, name=MOUSE_NAME, wpid=MOUSE_WPID):
+        self.name = name
         self.battery_percent = 73
         self.charging = False
         self.battery_caps = (0x0F, 0x03)           # levels crit/low/good/full; rechargeable + SoC
@@ -43,7 +50,7 @@ class SimulatedMouse:
         # 0x2150 thumb wheel: reporting mode 1 native / 2 diverted, direction inverted, smooth
         self.thumb = {"mode": 1, "invert": 0, "smooth": 0}
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
-        self.wpid = MOUSE_WPID                      # hardware identity behind the receiver
+        self.wpid = wpid                            # hardware identity behind the receiver
         self.powered = True
 
     def power(self, on):
@@ -78,9 +85,9 @@ class SimulatedMouse:
                 return bytes([0]) + b"RBM" + bytes([major, minor]) + struct.pack(">H", build)
         elif fid == 0x0005:
             if fn == 0:
-                return bytes([len(MOUSE_NAME)])
+                return bytes([len(self.name)])
             if fn == 1:
-                return MOUSE_NAME.encode()[params[0]:params[0] + 16]
+                return self.name.encode()[params[0]:params[0] + 16]
             if fn == 2:
                 return bytes([3])                     # mouse
         elif fid == 0x1004:
@@ -162,13 +169,21 @@ class SimulatedBolt:
     PATH = "/dev/hidraw-sim0"
 
     def __init__(self):
-        self.mouse = SimulatedMouse()
+        self.mice = {MOUSE_INDEX: SimulatedMouse()}   # paired devices by index
         self.path = self.PATH
         self.present = True               # is the receiver's hidraw node there
         self._changed = threading.Event()
+        self.receiver_features = list(RECEIVER_FEATURES)   # a test may drop the pairing feature
+        self.pairing_open = False         # is the receiver's pairing lock open
+        self.fail_pairing_open = False    # answer the open-lock request with an error
+        self.fail_pairing_cancel = False
         self.writes = []                  # every raw report the agent wrote
         self._out = queue.Queue()
         self._lock = threading.Lock()
+
+    @property
+    def mouse(self):
+        return self.mice[MOUSE_INDEX]
 
     # -- transport surface ------------------------------------------------
     def list_nodes(self):
@@ -209,6 +224,46 @@ class SimulatedBolt:
         head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
         self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
 
+    def emit_pairing_status(self, status, error=0, slot=0):
+        """Queue a pairing status event from the receiver."""
+        self._emit_receiver_event(0, bytes([status, error, slot]))
+
+    def emit_passkey(self, digits):
+        """Queue a passkey event: the digits the user must type on the device."""
+        self._emit_receiver_event(1, digits.encode())
+
+    def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
+        """A device pairs in the open lock: it appears at the next free index."""
+        index = max(self.mice) + 1
+        self.mice[index] = SimulatedMouse(name, wpid)
+        self.pairing_open = False
+        self.emit_pairing_status(PAIR_DONE, 0, index)
+        return index
+
+    def _emit_receiver_event(self, function, params):
+        head = bytes([hidpp.LONG, 0xFF, self.receiver_features.index(F_PAIRING), function << 4])
+        self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def _receiver_handle(self, data):
+        fidx, fn, params = data[2], data[3] >> 4, data[4:]
+        if fidx == 0 and fn == 0:
+            want = struct.unpack(">H", params[:2])[0]
+            if want in self.receiver_features:
+                return bytes([self.receiver_features.index(want), 0, 1])
+            return bytes([0, 0, 0])
+        if fidx < len(self.receiver_features) and self.receiver_features[fidx] == F_PAIRING:
+            if fn == 0:                                # open the lock; params[0] = timeout seconds
+                if self.fail_pairing_open:
+                    return 8                           # BUSY
+                self.pairing_open = True
+                return bytes([params[0]])
+            if fn == 1:                                # close the lock (cancel)
+                if self.fail_pairing_cancel:
+                    return 8
+                self.pairing_open = False
+                return b""
+        return 7
+
     # -- device side ------------------------------------------------------
     def _reply(self, request, params):
         short = request[0] == hidpp.SHORT and len(params) <= 3
@@ -226,18 +281,27 @@ class SimulatedBolt:
             idx, b2, b3, params = data[1], data[2], data[3], data[4:]
             if idx == 0xFF and b2 == 0x83 and b3 == 0xB5:
                 # pairing info for slot params[0] - 0x50: wpid little endian at [2:4]
-                if params[0] - 0x50 == MOUSE_INDEX:
-                    self._reply(data, bytes([params[0], 0x10]) + struct.pack("<H", self.mouse.wpid) + b"\x01\x02\x03\x04")
+                if params[0] - 0x50 in self.mice:
+                    mouse = self.mice[params[0] - 0x50]
+                    self._reply(data, bytes([params[0], 0x10]) + struct.pack("<H", mouse.wpid) + b"\x01\x02\x03\x04")
                 else:
                     self._error(data, False, 2)
                 return
-            if idx != MOUSE_INDEX:
+            if idx == 0xFF:
+                result = self._receiver_handle(data)
+                if isinstance(result, int):
+                    self._error(data, True, result)
+                else:
+                    self._reply(data, result)
+                return
+            mouse = self.mice.get(idx)
+            if mouse is None:
                 self._error(data, False, 8)           # UNKNOWN_DEVICE
                 return
-            if not self.mouse.powered:
+            if not mouse.powered:
                 self._error(data, False, 8)           # nothing answers for a mouse that is off
                 return
-            result = self.mouse.handle(b2, b3 >> 4, params)
+            result = mouse.handle(b2, b3 >> 4, params)
             if isinstance(result, int):
                 self._error(data, True, result)
             else:

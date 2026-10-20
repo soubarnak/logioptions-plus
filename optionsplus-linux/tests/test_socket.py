@@ -59,6 +59,7 @@ def test_subscribe_boot_paths_push_the_state_the_ui_waits_on(client):
 
 def test_subscribe_devices_pushes_each_device_with_battery(client):
     _, pushes = client.subscribe("/devices/state/changed")
+    pushes = [p for p in pushes if p["payload"]["deviceType"] != "RECEIVER"]     # see test_pairing
     assert len(pushes) == 1
     info = pushes[0]["payload"]
     assert pushes[0]["path"] == "/devices/state/changed"
@@ -77,7 +78,7 @@ def test_subscribe_to_unknown_path_succeeds_without_pushes(client):
 
 def test_device_list_comes_from_the_simulated_mouse(client):
     reply = client.call("GET", "/devices/list")
-    infos = reply["payload"]["deviceInfos"]
+    infos = [i for i in reply["payload"]["deviceInfos"] if i["deviceType"] != "RECEIVER"]
     assert len(infos) == 1
     info = infos[0]
     assert info["id"] == "dev00000000"
