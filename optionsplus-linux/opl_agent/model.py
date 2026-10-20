@@ -180,7 +180,8 @@ class Receiver:
         self.bolt = bool(getattr(node, "is_bolt", False))
         self.connected = True
         self.pairing_index = None    # feature index of the pairing feature, None when absent
-        self.pairing = pairing_state(rcv_id, "IDLE")
+        self.pairing = pairing_state(rcv_id, "IDLE" if self.bolt else "UNKNOWN_PAIRING_STATE")
+        self.pairing_lock = threading.Lock()   # guards `pairing` transitions (Unifying path)
 
     @property
     def name(self):
@@ -452,6 +453,9 @@ class Registry:
     def _on_event(self, node, index, feature_index, function=0, params=b""):
         """Reader listener (own thread): a receiver pairing event, or the mouse
         woke or changed configuration."""
+        if index == hidpp.DEV_RECEIVER and feature_index == hidpp.N_PAIRING_LOCK:
+            self._on_unifying_lock(node, function, params)
+            return
         if index == hidpp.DEV_RECEIVER:
             self._on_pairing_event(node, feature_index, function, params)
             return
@@ -477,6 +481,8 @@ class Registry:
         """Blocking: open the receiver's pairing lock. Raises when the write fails (the
         state then stays as it was). Returns the pairing state."""
         r = self.receivers[rcv_id]
+        if not r.bolt:
+            return self._unifying_open(r, timeout)
         if r.pairing_index is None:
             raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
         hidpp.pairing_open(self._fds[r.node.path], r.pairing_index, timeout)
@@ -485,10 +491,84 @@ class Registry:
     def cancel_pairing(self, rcv_id):
         """Blocking: close the pairing lock. Raises when the write fails."""
         r = self.receivers[rcv_id]
+        if not r.bolt:
+            return self._unifying_cancel(r)
         if r.pairing_index is None:
             raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
         hidpp.pairing_cancel(self._fds[r.node.path], r.pairing_index)
         return self._set_pairing(r, pairing_state(r.id, "CANCELLED"))
+
+    # ---- Unifying pairing (register 0xB2, PairingState START/CANCEL/STOP) -----
+    def _unifying_open(self, r, timeout):
+        """Blocking: open the Unifying lock. A write the receiver rejects raises and the
+        state stays as it was."""
+        hidpp.unifying_lock(self._fds[r.node.path], True, timeout)
+        return self._unifying_move(r, {None, "UNKNOWN_PAIRING_STATE", "IDLE", "STOP", "CANCEL"},
+                                   "START", wanted=True)
+
+    def _unifying_cancel(self, r):
+        """Blocking: close the Unifying lock. Raises when the write fails."""
+        hidpp.unifying_lock(self._fds[r.node.path], False)
+        return self._unifying_move(r, {"START"}, "CANCEL")
+
+    def _unifying_move(self, r, from_states, state, error="NO_PAIRING_ERROR", slot=0,
+                       device=None, events=None, wanted=False):
+        """Move the pairing state if it is in `from_states` (else keep it, no broadcast);
+        returns the state now held. `wanted` also accepts a START the receiver's own
+        notification already announced."""
+        with r.pairing_lock:
+            current = r.pairing["state"]
+            if current not in from_states and not (wanted and current == state):
+                return r.pairing
+            if current == state:
+                return r.pairing
+            new = pairing_state(r.id, state, error=error, slot=slot, device=device)
+            r.pairing = new
+        self._announce_pairing(r, new, events)
+        return new
+
+    def _announce_pairing(self, r, state, events=None):
+        for hook in list(self.on_pairing):
+            try:
+                hook(r.id, state, None, events)
+            except Exception:
+                log.exception("pairing hook failed for %s", r.id)
+
+    def _on_unifying_lock(self, node, address, params):
+        """Dispatch thread: 0x4A lock status (address bit0 = lock open, params[0] = error)."""
+        r = next((x for x in self.receivers.values() if x.node.path == node.path and not x.bolt), None)
+        if r is None:
+            return
+        if address & 0x01:
+            self._unifying_move(r, {None, "UNKNOWN_PAIRING_STATE", "IDLE", "STOP", "CANCEL"}, "START")
+            return
+        if r.pairing["state"] != "START":
+            return                                            # we closed it, or nobody opened it
+        error = params[0] if params else 0
+        # finish off the dispatch thread: it needs a rescan, which talks to the receiver
+        threading.Thread(target=self._unifying_finish, args=(r, error), daemon=True,
+                         name="unifying-pairing").start()
+
+    def _unifying_finish(self, r, error):
+        """The lock closed while pairing was open: a new device means success."""
+        try:
+            events = self.rescan()
+        except Exception:
+            log.exception("rescan after pairing on %s failed", r.id)
+            events = {"added": [], "returned": []}
+        new = [self.devices[i] for i in events.get("added", []) + events.get("returned", [])
+               if i in self.devices and self.devices[i].node.path == r.node.path]
+        if error:
+            log.warning("receiver %s: pairing error code %d", r.id, error)
+        if new and not error:
+            d = new[0]
+            basic = {"id": d.id, "deviceType": d.dtype, "deviceModel": d.model_id,
+                     "slotPrefix": d.slot_prefix, "pid": d.pid}
+            self._unifying_move(r, {"START"}, "STOP", slot=d.index, device=basic, events=events)
+            return
+        # PairingError: 1 device timeout, 2 too many devices, 3 sequence timeout
+        err = "TIMEOUT" if error in (0, 1, 3) else "FAILED"
+        self._unifying_move(r, {"START"}, "STOP", error=err, events=events)
 
     def _set_pairing(self, r, state, passkey=None, events=None):
         r.pairing = state
