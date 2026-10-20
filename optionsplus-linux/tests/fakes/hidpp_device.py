@@ -36,11 +36,12 @@ DIVERT = 0x01                                   # setCidReporting flags: divert;
 PERSISTENT = 0x04                               # same byte: divert kept across power cycles; change bit 0x08
 RAW_XY = 0x10                                   # same byte: divert raw XY; the change bit is RAW_XY << 1
 
-# the receiver's own feature table (device index 0xFF)
-RECEIVER_FEATURES = [0x0000, 0x1817]
-F_PAIRING = 0x1817
-# pairing event function 0 = status [status, error, slot]; function 1 = passkey digits
-PAIR_CLOSED, PAIR_OPEN, PAIR_DONE, PAIR_FAILED = 0, 1, 2, 3
+# Bolt pairing runs on HID++ 1.0 registers and notifications (layouts after Solaar):
+# register 0xC0 discovery [timeout, 1 start | 2 cancel]; register 0x2C1 (sub id 0x82, address 0xC1)
+# pairing [1 pair | 2 cancel, slot, address(6), authentication, entropy]; notifications 0x53 discovery
+# status, 0x4F advertised device, 0x54 pairing status, 0x4D passkey to enter on the device.
+N_DISCOVERY_STATUS, N_DEVICE_DISCOVERY, N_PAIRING_STATUS, N_PASSKEY = 0x53, 0x4F, 0x54, 0x4D
+BOLT_ERR_TIMEOUT, BOLT_ERR_FAILED = 1, 2
 
 
 class SimulatedMouse:
@@ -76,6 +77,8 @@ class SimulatedMouse:
         self.max_host_name = 32
         self.fail_host_switch = False               # answer setCurrentHost with an error
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
+        self.host_caps = 0x03                       # 0x1815 capability flags: bit0 read names, bit1 write names
+        self.name_reads, self.name_writes = [], []  # (host, offset) / (host, offset, name bytes) requests seen
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
         self.diverted = set()
         self.persistent = set()                     # cids diverted persistently (flag 0x04), also reported to software
@@ -231,34 +234,41 @@ class SimulatedMouse:
         elif fid == 0x1814:
             if fn == 0:                               # getHostInfo: host count, current host
                 return bytes([len(self.hosts), self.current_host])
-            if fn == 1:                               # setCurrentHost
+            if fn == 1:                               # setCurrentHost: a real mouse leaves, so no reply
                 if self.fail_host_switch:
                     return 5
                 if params[0] >= len(self.hosts):
                     return 2                          # INVALID_ARGUMENT
                 self.current_host = params[0]
-                return b""
+                return None
         elif fid == 0x1815:
-            if fn == 0:                               # capabilities: bit0 get name, bit1 set name
-                return bytes([0x03])
+            # Layout after Solaar's HostsInfo: fn0 [capability flags, 0, host count, current host],
+            # fn1 getHostInfo(host) [host, status, bus, pages, name length, max name length],
+            # fn2 getHostDescriptor, fn3 getHostFriendlyName(host, offset) [host, offset, 14 name bytes],
+            # fn4 setHostFriendlyName(host, offset, 14 name bytes).
+            if fn == 0:
+                return bytes([self.host_caps, 0, len(self.hosts), self.current_host])
+            if fn in (1, 2, 3, 4) and params[0] >= len(self.hosts):
+                return 2
             if fn == 1:
-                return bytes([len(self.hosts), self.current_host])
-            if fn == 2 and params[0] < len(self.hosts):          # getHostDescriptor
                 h = self.hosts[params[0]]
-                return bytes([params[0], 1 if h["paired"] else 0, h["bus"], h["os"]])
-            if fn == 3 and params[0] < len(self.hosts):          # getHostFriendlyName chunk
-                chunk = self.hosts[params[0]]["name"][params[1]:params[1] + 13]
-                return bytes([params[0], params[1], self.max_host_name]) + chunk
-            if fn == 4 and params[0] < len(self.hosts):          # setHostFriendlyName chunk
+                return bytes([params[0], 1 if h["paired"] else 0, h["bus"], 1, len(h["name"]),
+                              h.get("max_name", self.max_host_name)])
+            if fn == 2:
+                return bytes([params[0], 0])
+            if fn == 3:
+                self.name_reads.append((params[0], params[1]))
+                return bytes([params[0], params[1]]) + self.hosts[params[0]]["name"][params[1]:params[1] + 14]
+            if fn == 4:
                 if self.fail_host_name_write:
                     return 5
                 h = self.hosts[params[0]]
-                chunk = bytes(params[2:16]).split(b"\0")[0]
-                h["name"] = (h["name"][:params[1]] + chunk)[:self.max_host_name]
+                chunk = bytes(params[2:16])
+                self.name_writes.append((params[0], params[1], len(chunk.rstrip(b"\0"))))
+                # the device takes the name as ending where the last write ends
+                h["name"] = (h["name"][:params[1]] + chunk.rstrip(b"\0"))[:h.get("max_name", self.max_host_name)]
                 h["paired"] = True
                 return bytes([params[0], params[1]])
-            if fn in (2, 3, 4):
-                return 2
         return 7                                      # INVALID_FUNCTION_ID
 
 
@@ -286,16 +296,22 @@ class SimulatedBolt:
 
     PATH = "/dev/hidraw-sim0"
 
-    def __init__(self):
-        self.mice = {MOUSE_INDEX: SimulatedMouse()}   # paired devices by index
-        self.path = self.PATH
+    def __init__(self, path=None, unique_id=b"\x0b\x01\x0b\x01", mouse=None):
+        self.mice = {MOUSE_INDEX: mouse or SimulatedMouse()}   # paired devices by index
+        self.path = path or self.PATH
+        self.unique_id = unique_id        # register 0x2FB
         self.present = True               # is the receiver's hidraw node there
         self._changed = threading.Event()
-        self.receiver_features = list(RECEIVER_FEATURES)   # a test may drop the pairing feature
         self.pairing_open = False         # is the receiver's pairing lock open
-        self.fail_pairing_open = False    # answer the open-lock request with an error
+        self.discovering = False          # is device discovery running
+        self.paired_address = None        # the address the agent asked to pair
+        self.passkey = None               # digits to announce when a pairing opens (a device that needs one)
+        self.fail_discovery = False       # answer the start-discovery write with an error
+        self.fail_pairing_open = False    # answer the pair request with an error
         self.fail_pairing_cancel = False
+        self._counter = 0
         self.writes = []                  # every raw report the agent wrote
+        self.drop_name_reads = 0          # leave this many device-name requests unanswered
         self._out = queue.Queue()
         self._lock = threading.Lock()
 
@@ -341,6 +357,12 @@ class SimulatedBolt:
         """Queue an unsolicited feature event (software id 0) from the mouse."""
         head = bytes([hidpp.LONG, index, FEATURES.index(feature_id), function << 4])
         self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def emit_connection(self, link=True, index=MOUSE_INDEX, kind=0x02):
+        """Queue a HID++ 1.0 device-connection notification (sub id 0x41): a mouse that
+        woke or switched on reports its link as established; flags bit 0x40 set means lost."""
+        flags = 0x00 if link else 0x40
+        self.emit(bytes([hidpp.SHORT, index, 0x41, kind, flags | 0x04, 0x42, 0x42]))
 
     def turn_wheel(self, delta, hires=True, index=MOUSE_INDEX):
         """The scroll wheel turns by `delta` (signed; 1/multiplier notches when hi-res, else
@@ -389,48 +411,88 @@ class SimulatedBolt:
             held = [c for c in mouse.held if c in reported]
             self.emit_event(F_REPROG, 0, b"".join(struct.pack(">H", c) for c in held), index=index)
 
-    def emit_pairing_status(self, status, error=0, slot=0):
-        """Queue a pairing status event from the receiver."""
-        self._emit_receiver_event(0, bytes([status, error, slot]))
+    def emit_notification(self, sub_id, address=0, data=b""):
+        """Queue a HID++ 1.0 notification from the receiver."""
+        self.emit(bytes([hidpp.LONG, 0xFF, sub_id, address]) + bytes(data).ljust(hidpp.LONG_LEN - 4, b"\0"))
+
+    def emit_discovery_status(self, open_, error=0):
+        """0x53: address 0 = discovery running, else closed; data[0] = error."""
+        self.emit_notification(N_DISCOVERY_STATUS, 0 if open_ else 1, bytes([error]))
+
+    def advertise(self, name="New Mouse", address=b"\xaa\xbb\xcc\xdd\xee\x01", kind=2, authentication=0):
+        """0x4F twice (part 0: kind, address, authentication; part 1: name): a device in pairing
+        mode advertises itself to the receiver."""
+        self._counter += 1
+        lo, hi = self._counter & 0xFF, self._counter >> 8
+        first = bytearray(16)
+        first[0], first[1], first[3] = hi, 0, kind
+        first[6:12], first[14] = address, authentication
+        self.emit_notification(N_DEVICE_DISCOVERY, lo, bytes(first))
+        second = bytearray(16)
+        second[0], second[1], second[2] = hi, 1, len(name)
+        second[3:3 + len(name)] = name.encode()
+        self.emit_notification(N_DEVICE_DISCOVERY, lo, bytes(second))
+
+    def emit_pairing_status(self, address=0, error=0, slot=0):
+        """0x54: address 0 = pairing open, 1 = closed, 2 = paired in `slot`; data[0] = error."""
+        data = bytearray(16)
+        data[0], data[7] = error, slot
+        self.emit_notification(N_PAIRING_STATUS, address, bytes(data))
 
     def emit_passkey(self, digits):
-        """Queue a passkey event: the digits the user must type on the device."""
-        self._emit_receiver_event(1, digits.encode())
+        """0x4D: the digits the user must enter on the device."""
+        self.emit_notification(N_PASSKEY, 0, digits.encode())
 
-    def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
-        """A device pairs in the open lock: it appears at the next free index."""
+    def add_device(self, name="Second Mouse Z2", wpid=0x4343):
+        """A device joins the receiver at the next free index, without any notification."""
         index = max(self.mice) + 1
         self.mice[index] = SimulatedMouse(name, wpid)
-        self.pairing_open = False
-        self.emit_pairing_status(PAIR_DONE, 0, index)
         return index
 
-    def _emit_receiver_event(self, function, params):
-        head = bytes([hidpp.LONG, 0xFF, self.receiver_features.index(F_PAIRING), function << 4])
-        self.emit((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+    def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
+        """The device in the open lock pairs: it takes the next index and the receiver says so."""
+        index = self.add_device(name, wpid)
+        self.pairing_open = False
+        self.emit_pairing_status(2, 0, index)
+        return index
 
     def _receiver_handle(self, data):
-        fidx, fn, params = data[2], data[3] >> 4, data[4:]
-        if fidx == 0 and fn == 0:
-            want = struct.unpack(">H", params[:2])[0]
-            if want in self.receiver_features:
-                return bytes([self.receiver_features.index(want), 0, 1])
-            return bytes([0, 0, 0])
-        if fidx < len(self.receiver_features) and self.receiver_features[fidx] == F_PAIRING:
-            if fn == 0:                                # open the lock; params[0] = timeout seconds
-                if self.fail_pairing_open:
-                    return 8                           # BUSY
-                self.pairing_open = True
-                return bytes([params[0]])
-            if fn == 1:                                # close the lock (cancel)
-                if self.fail_pairing_cancel:
-                    return 8
-                self.pairing_open = False
-                return b""
-        return 7
+        return 1                                       # INVALID_SUBID: no HID++ 2.0 root on the receiver
 
     def _receiver_register(self, data):
         """HID++ 1.0 register access to the receiver; True when handled (lock held)."""
+        sub, address, params = data[2], data[3], data[4:]
+        if sub == 0x83 and address == 0xFB:             # register 0x2FB: unique id
+            self._reply(data, self.unique_id)
+            return True
+        if sub == 0x80 and address == 0xC0:             # discovery: [timeout, action]
+            if self.fail_discovery:
+                self._error(data, False, 7)
+                return True
+            self.discovering = params[1] == 1
+            self._reply(data, bytes(params[:3]))
+            self.emit_discovery_status(self.discovering)
+            return True
+        if sub == 0x82 and address == 0xC1:             # pairing: [action, slot, address(6), auth, entropy]
+            if params[0] == 1:
+                if self.fail_pairing_open:
+                    self._error(data, False, 7)
+                    return True
+                self.discovering = False
+                self.pairing_open = True
+                self.paired_address = bytes(params[2:8])
+                self._reply(data, bytes(params[:3]))
+                self.emit_pairing_status(0)
+                if self.passkey:
+                    self.emit_passkey(self.passkey)
+            else:
+                if self.fail_pairing_cancel:
+                    self._error(data, False, 7)
+                    return True
+                self.pairing_open = False
+                self._reply(data, bytes(params[:3]))
+                self.emit_pairing_status(1)
+            return True
         if data[2] == 0x83 and data[3] == 0xB5:
             params = data[4:]
             # pairing info for slot params[0] - 0x50: wpid little endian at [2:4]
@@ -473,7 +535,12 @@ class SimulatedBolt:
             if not mouse.powered:
                 self._error(data, False, 8)           # nothing answers for a mouse that is off
                 return
+            if self.drop_name_reads and b2 < len(mouse.features) and mouse.features[b2] == 0x0005:
+                self.drop_name_reads -= 1
+                return                                # a busy reader: this request goes unanswered
             result = mouse.handle(b2, b3 >> 4, params)
+            if result is None:
+                return                                # a request this device never answers
             if isinstance(result, int):
                 self._error(data, True, result)
             else:
@@ -516,6 +583,8 @@ class SimulatedBluetoothMouse(SimulatedBolt):
                 self._error(data, False, 8)           # UNKNOWN_DEVICE
                 return
             result = self.mouse.handle(b2, b3 >> 4, params)
+            if result is None:
+                return
             if isinstance(result, int):
                 self._error(data, True, result)
             else:
@@ -525,6 +594,8 @@ class SimulatedBluetoothMouse(SimulatedBolt):
 UNIFYING_RECEIVER_PID = 0xC52B
 # HID++ 1.0 error codes
 ERR_INVALID_SUBID, ERR_INVALID_ADDRESS, ERR_BUSY = 1, 2, 7
+# Unifying lock errors in the 0x4A notification (Solaar's PairingError)
+LOCK_DEVICE_TIMEOUT, LOCK_NOT_SUPPORTED, LOCK_TOO_MANY_DEVICES, LOCK_SEQUENCE_TIMEOUT = 1, 2, 3, 6
 
 
 class SimulatedUnifying(SimulatedBolt):
@@ -538,6 +609,7 @@ class SimulatedUnifying(SimulatedBolt):
         super().__init__()
         self.path = self.PATH
         self.ignore_pairing_writes = False        # never answer a write to 0xB2 (receiver hung)
+        self.notify_before_reply = False          # close notification goes out before the reply to the close
 
     def list_nodes(self):
         if not self.present:
@@ -551,9 +623,9 @@ class SimulatedUnifying(SimulatedBolt):
 
     def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
         """A device pairs in the open lock: it takes the next index and the lock closes."""
-        index = max(self.mice) + 1
-        self.mice[index] = SimulatedMouse(name, wpid)
+        index = self.add_device(name, wpid)
         self.pairing_open = False
+        self.emit_connection(True, index=index)       # the new device announces itself, then the lock closes
         self.emit_lock_status(open_=False)
         return index
 
@@ -583,12 +655,13 @@ class SimulatedUnifying(SimulatedBolt):
                     self._error(data, False, ERR_BUSY)
                     return True
                 self.pairing_open = False
+                if self.notify_before_reply:
+                    self.emit_lock_status(open_=False)
+                    self._reply(data, bytes(params[:3]))
+                    return True
                 self._reply(data, bytes(params[:3]))
                 self.emit_lock_status(open_=False)
             else:
                 self._error(data, False, ERR_INVALID_ADDRESS)
             return True
         return False
-
-    def _receiver_handle(self, data):
-        return ERR_INVALID_SUBID                  # no HID++ 2.0 root on the receiver

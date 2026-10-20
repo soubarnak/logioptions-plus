@@ -58,10 +58,18 @@ F_SMART_SHIFT_ENH = 0x2111
 F_HIRES_WHEEL = 0x2121
 F_THUMB_WHEEL = 0x2150
 REG_RECEIVER_PAIRING = 0xB2     # Unifying receiver pairing lock (HID++ 1.0 register)
-N_PAIRING_LOCK = 0x4A           # HID++ 1.0 notification: lock status (address bit0 open, data[0] error)
-RECEIVER_NOTIFICATIONS = {N_PAIRING_LOCK}
+REG_BOLT_DISCOVERY = 0xC0       # Bolt device discovery (HID++ 1.0 register, short)
+REG_BOLT_PAIRING = 0x2C1        # Bolt pairing (HID++ 1.0 register 0x2xx: sub id 0x82/0x83, address 0xC1)
+REG_BOLT_UNIQUE_ID = 0x2FB      # Bolt receiver unique id (read)
+# HID++ 1.0 notifications: sub id 0x40..0x7F in the feature slot of a report.
+N_DEVICE_DISCONNECT, N_DEVICE_CONNECT = 0x40, 0x41
+N_PAIRING_LOCK = 0x4A           # Unifying lock status (address bit0 open, data[0] error)
+N_PASSKEY_REQUEST = 0x4D        # Bolt: data[0:6] the digits to enter on the device
+N_PASSKEY_PRESSED = 0x4E        # Bolt: a key was pressed on the device
+N_DEVICE_DISCOVERY = 0x4F       # Bolt: a device advertises itself
+N_DISCOVERY_STATUS = 0x53       # Bolt: address 0 discovery running, else closed; data[0] error
+N_PAIRING_STATUS = 0x54         # Bolt: address 0 lock open, 2 paired (data[7] slot); data[0] error
 F_REPROG_CONTROLS = 0x1B04     # reprogrammable controls v4: divert buttons to software
-F_RECEIVER_PAIRING = 0x1817     # Bolt receiver pairing (open lock, passkey, status events)
 F_CHANGE_HOST = 0x1814
 F_HOSTS_INFO = 0x1815
 
@@ -83,6 +91,11 @@ ERR_HIDPP1 = {
     7: "BUSY", 8: "UNKNOWN_DEVICE", 9: "RESOURCE_ERROR",
     10: "REQUEST_UNAVAILABLE", 11: "INVALID_PARAM_VALUE", 12: "WRONG_PIN_CODE",
 }
+
+
+def is_hidpp10_notification(sub_id):
+    """A report whose feature slot holds a HID++ 1.0 notification sub id (0x40..0x7F)."""
+    return 0x40 <= sub_id < 0x80
 
 
 class HidppError(Exception):
@@ -324,6 +337,8 @@ class Reader:
     def __init__(self, handle, long_only=False):
         self.handle = handle
         self.long_only = long_only      # transport has no short-report collection
+        self.dead = None                # the OSError that stopped the read loop, once it did
+        self._swid = 0
         self._lock = threading.Lock()
         self._waiting = []              # [(key, slot)] in request order
         self._listeners = []
@@ -334,9 +349,18 @@ class Reader:
         for t in self._threads:
             t.start()
 
+    def next_swid(self):
+        """The software id for the next HID++ 2.0 request: 1..15 in turn, so two requests
+        for the same feature and function never share a reply key for long, and a reply
+        that arrives after its request timed out does not answer a later one."""
+        with self._lock:
+            self._swid = self._swid % 15 + 1
+            return self._swid
+
     # ---- events ----------------------------------------------------------
     def add_listener(self, fn):
-        """fn(device_index, feature_index, function, params) for each event."""
+        """fn(device_index, feature_index, function, params) for each event. A HID++ 1.0
+        notification (see is_hidpp10_notification) arrives as (index, sub id, address, data)."""
         self._listeners.append(fn)
 
     def _dispatch_loop(self):
@@ -358,6 +382,7 @@ class Reader:
             except OSError as exc:
                 if not self._stop.is_set():
                     log.warning("HID++ read failed, reader stopped: %s", exc)
+                    self.dead = exc
                     self._fail_all(exc)
                 return
             if r:
@@ -393,12 +418,12 @@ class Reader:
         if slot is not None:
             slot["reply"], slot["version"] = r, version
             slot["done"].set()
-        elif version is None and r[3] & 0x0F == 0:
-            self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
-        elif version is None and idx == DEV_RECEIVER and r[2] in RECEIVER_NOTIFICATIONS:
-            # HID++ 1.0 receiver notification: sub id in the feature slot, address byte
+        elif version is None and is_hidpp10_notification(r[2]):
+            # HID++ 1.0 notification: sub id in the feature slot, the whole address byte
             # (not a function nibble) in the function slot
             self._events.put((idx, r[2], r[3], bytes(r[4:])))
+        elif version is None and r[3] & 0x0F == 0:
+            self._events.put((idx, r[2], r[3] >> 4, bytes(r[4:])))
 
     # ---- requests --------------------------------------------------------
     def request(self, msg, timeout):
@@ -408,6 +433,8 @@ class Reader:
         key = (idx, b2, b3)
         slot = {"done": threading.Event()}
         with self._lock:
+            if self.dead is not None:
+                raise self.dead
             self._waiting.append((key, slot))
         try:
             log.debug("tx %s", msg.hex())
@@ -432,6 +459,9 @@ class Reader:
     def close(self):
         self._stop.set()
         self._events.put(None)
+        if self.dead is None:
+            self.dead = OSError(errno.EBADF, "HID++ reader closed")
+        self._fail_all(self.dead)
         for t in self._threads:
             if t is not threading.current_thread():
                 t.join(2)
@@ -460,8 +490,8 @@ class HidrawTransport:
 HIDRAW = HidrawTransport()
 
 
-def open_node(path):
-    return Reader(HIDRAW.open(path))
+def open_node(path, long_only=False):
+    return Reader(HIDRAW.open(path), long_only=long_only)
 
 
 def close_node(fd):
@@ -495,7 +525,8 @@ def _transact(fd, idx, b2, b3, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
 
 def call(fd, dev_index, feature_index, funcid, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
     """HID++ 2.0 request. Returns reply params (bytes after the 4-byte header)."""
-    r = _transact(fd, dev_index, feature_index, ((funcid & 0xF) << 4) | SW_ID,
+    swid = fd.next_swid() if hasattr(fd, "next_swid") else SW_ID
+    r = _transact(fd, dev_index, feature_index, ((funcid & 0xF) << 4) | swid,
                   params, long, timeout)
     return bytes(r[4:])
 
@@ -902,8 +933,9 @@ def parse_diverted_buttons(params):
 # Easy-Switch: ChangeHost (0x1814) and HostsInfo (0x1815)
 # --------------------------------------------------------------------------
 
-NAME_READ_CHUNK = 13        # name bytes in one getHostFriendlyName reply
-NAME_WRITE_CHUNK = 14       # name bytes in one setHostFriendlyName request
+NAME_CHUNK = 14             # name bytes in one getHostFriendlyName reply / setHostFriendlyName request
+HOST_NAME_CAN_GET, HOST_NAME_CAN_SET = 0x01, 0x02      # 0x1815 fn0 capability flags
+HOST_SWITCH_TIMEOUT = 0.5   # a mouse that switches away does not answer; wait this long for an error
 
 
 def get_current_host(fd, idx):
@@ -913,47 +945,56 @@ def get_current_host(fd, idx):
 
 
 def set_current_host(fd, idx, host):
-    """0x1814 fn1 setCurrentHost. The mouse moves to the other computer, so
-    nothing is read back afterwards; a device error raises."""
-    _fcall(fd, idx, F_CHANGE_HOST, 1, bytes([host]))
+    """0x1814 fn1 setCurrentHost. The mouse moves to the other computer and usually sends no
+    reply, so a timeout is the normal outcome; only a HID++ error reply raises."""
+    try:
+        _fcall(fd, idx, F_CHANGE_HOST, 1, bytes([host]), timeout=HOST_SWITCH_TIMEOUT)
+    except HidppTimeout:
+        pass
 
 
-def get_host_name(fd, idx, host):
-    """0x1815 fn3 getHostFriendlyName, read in chunks -> (name, max length)."""
-    raw, pos, limit = b"", 0, 0
-    while True:
-        p = _fcall(fd, idx, F_HOSTS_INFO, 3, bytes([host, pos]))
-        limit = p[2] or 32
-        chunk = bytes(p[3:3 + NAME_READ_CHUNK])
+def get_host_name(fd, idx, host, length):
+    """0x1815 fn3 getHostFriendlyName(host, offset) -> reply [host, offset, 14 name bytes];
+    reads `length` bytes (the name length fn1 reports) in chunks. -> name."""
+    raw = b""
+    while len(raw) < length:
+        p = _fcall(fd, idx, F_HOSTS_INFO, 3, bytes([host, len(raw)]))
+        chunk = bytes(p[2:2 + NAME_CHUNK])[:length - len(raw)]
         end = chunk.find(b"\0")
         raw += chunk if end < 0 else chunk[:end]
-        pos += NAME_READ_CHUNK
-        if end >= 0 or pos >= limit:
+        if end >= 0 or not chunk:
             break
-    return raw[:limit].decode("utf-8", "replace"), limit
+    return raw.decode("utf-8", "replace")
 
 
 def get_hosts(fd, idx):
-    """0x1814 + 0x1815 -> {"current", "max_name", "hosts": [{index, paired, bus, os, name}]}."""
+    """0x1814 + 0x1815 -> {"current", "max_name", "can_get_name", "can_set_name",
+    "hosts": [{index, paired, bus, os, name, max_name}]}.
+
+    0x1815 fn0 [flags, _, host count, current host], fn1 getHostInfo(host)
+    [host, status, bus type, pages, name length, max name length]. The OS type comes from
+    getHostOsVersion, a function this client does not call yet (its number is unconfirmed, and
+    a wrong one would move or delete a host), so the OS type is always unknown (0)."""
     count, current = get_current_host(fd, idx)
-    hosts, max_name = [], 0
+    flags = _fcall(fd, idx, F_HOSTS_INFO, 0)[0]
+    can_get, can_set = bool(flags & HOST_NAME_CAN_GET), bool(flags & HOST_NAME_CAN_SET)
+    hosts = []
     for i in range(count):
-        d = _fcall(fd, idx, F_HOSTS_INFO, 2, bytes([i]))
+        d = _fcall(fd, idx, F_HOSTS_INFO, 1, bytes([i]))
         paired = bool(d[1])
-        name = ""
-        if paired:
-            name, max_name = get_host_name(fd, idx, i)
-        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": d[3], "name": name})
-    if not max_name:
-        max_name = 32
-    return {"current": current, "max_name": max_name, "hosts": hosts}
+        name = get_host_name(fd, idx, i, d[4]) if paired and can_get and d[4] else ""
+        hosts.append({"index": i, "paired": paired, "bus": d[2], "os": 0, "name": name,
+                      "max_name": d[5] or 32})
+    return {"current": current, "max_name": max((h["max_name"] for h in hosts), default=32),
+            "can_get_name": can_get, "can_set_name": can_set, "hosts": hosts}
 
 
 def set_host_name(fd, idx, host, name):
-    """0x1815 fn4 setHostFriendlyName, in chunks; the last chunk carries a NUL."""
-    raw = name.encode("utf-8") + b"\0"
-    for pos in range(0, len(raw), NAME_WRITE_CHUNK):
-        _fcall(fd, idx, F_HOSTS_INFO, 4, bytes([host, pos]) + raw[pos:pos + NAME_WRITE_CHUNK], long=True)
+    """0x1815 fn4 setHostFriendlyName(host, offset, up to 14 name bytes), in chunks. No
+    terminator is written; the caller keeps the name within the slot's maximum length."""
+    raw = name.encode("utf-8")
+    for pos in range(0, len(raw), NAME_CHUNK):
+        _fcall(fd, idx, F_HOSTS_INFO, 4, bytes([host, pos]) + raw[pos:pos + NAME_CHUNK], long=True)
 
 
 # --------------------------------------------------------------------------
@@ -987,27 +1028,81 @@ def write_register(fd, idx, address, params=b"", timeout=DEFAULT_TIMEOUT):
 def unifying_lock(fd, open_, timeout=60):
     """Unifying receiver register 0xB2: [1 open | 2 close, device (0 = any), timeout seconds].
     Raises HidppError/HidppTimeout when the receiver does not accept the write."""
-    if not 0 < timeout <= 255:
+    if open_ and not 0 < timeout <= 255:
         raise ValueError("pairing timeout must be 1..255 seconds")
-    write_register(fd, DEV_RECEIVER, REG_RECEIVER_PAIRING, bytes([1 if open_ else 2, 0, timeout]))
+    write_register(fd, DEV_RECEIVER, REG_RECEIVER_PAIRING,
+                   bytes([1, 0, timeout]) if open_ else bytes([2, 0, 0]))
 
 
-def pairing_open(fd, feature_index, timeout=60):
-    """Receiver pairing feature (0x1817) fn0: open the pairing lock for `timeout` seconds.
-
-    Layout assumed from the ticket (open lock, status/passkey events); not yet
-    verified on hardware."""
-    call(fd, DEV_RECEIVER, feature_index, 0, bytes([timeout]))
+def write_long_register(fd, idx, address, params=b"", timeout=DEFAULT_TIMEOUT):
+    """HID++ 1.0 SET_LONG_REGISTER (sub id 0x82), sent as a long report. Registers
+    0x2xx (Solaar's numbering) have sub id 0x82/0x83 and the low byte as the address."""
+    return bytes(_transact(fd, idx, 0x82, address, params, True, timeout)[4:])
 
 
-def pairing_cancel(fd, feature_index):
-    """Receiver pairing feature (0x1817) fn1: close the pairing lock."""
-    call(fd, DEV_RECEIVER, feature_index, 1)
+BOLT_DISCOVER_START, BOLT_DISCOVER_CANCEL = 1, 2
+BOLT_PAIR, BOLT_PAIR_CANCEL, BOLT_UNPAIR = 1, 2, 3
+
+
+def bolt_discover(fd, timeout=30, cancel=False):
+    """Bolt register 0xC0 (short): [timeout seconds, 1 start | 2 cancel] device discovery.
+    Layout from Solaar's BoltReceiver.discover; the receiver then sends 0x53 and 0x4F."""
+    if not 0 < timeout <= 255:
+        raise ValueError("discovery timeout must be 1..255 seconds")
+    write_register(fd, DEV_RECEIVER, REG_BOLT_DISCOVERY & 0xFF,
+                   bytes([timeout, BOLT_DISCOVER_CANCEL if cancel else BOLT_DISCOVER_START]))
+
+
+def bolt_pair(fd, address, authentication=0, entropy=20, slot=0):
+    """Bolt register 0x2C1 (long): [1 pair, slot, device address (6), authentication,
+    entropy]. Layout from Solaar's BoltReceiver.pair_device; progress arrives as 0x54/0x4D."""
+    address = bytes(address)
+    if len(address) != 6:
+        raise ValueError("a Bolt device address has 6 bytes")
+    write_long_register(fd, DEV_RECEIVER, REG_BOLT_PAIRING & 0xFF,
+                        bytes([BOLT_PAIR, slot]) + address + bytes([authentication, entropy]))
+
+
+def bolt_pair_cancel(fd):
+    """Bolt register 0x2C1: action 2 stops a pairing in progress (Solaar's pair=None)."""
+    write_long_register(fd, DEV_RECEIVER, REG_BOLT_PAIRING & 0xFF, bytes([BOLT_PAIR_CANCEL]))
+
+
+def bolt_unique_id(fd):
+    """Bolt register 0x2FB (read, long): the receiver's unique id, or b"" when it has none."""
+    try:
+        return read_register(fd, DEV_RECEIVER, REG_BOLT_UNIQUE_ID & 0xFF)[:4]
+    except HidppError:
+        return b""
+
+
+BOLT_ERROR_TIMEOUT, BOLT_ERROR_FAILED = 1, 2
+
+
+def parse_device_discovery(address, data):
+    """0x4F notification -> (counter, part, fields): part 0 {kind, address, authentication},
+    part 1 {name}; None when the report is too short. Layout from Solaar."""
+    data = bytes(data).ljust(16, b"\0")
+    counter, part = address + data[0] * 256, data[1]
+    if part == 0:
+        return counter, 0, {"kind": data[3], "address": data[6:12], "authentication": data[14]}
+    if part == 1:
+        return counter, 1, {"name": data[3:3 + min(data[2], 13)].decode("utf-8", "replace")}
+    return None
 
 
 def _device_gone(err):
     """True when `err` says nothing answers at the device index any more."""
     return isinstance(err, HidppTimeout) or (err.version == 1 and err.name == "UNKNOWN_DEVICE")
+
+
+def _once_more_on_timeout(fn, *args):
+    """fn(*args); one HidppTimeout is retried once, since a busy reader makes a live device
+    miss a single answer."""
+    try:
+        return fn(*args)
+    except HidppTimeout:
+        return fn(*args)
 
 
 def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
@@ -1028,7 +1123,7 @@ def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
         if proto[0] >= 2:
             for key, fn in (("name", get_device_name), ("type", get_device_type)):
                 try:
-                    d[key] = fn(fd, i)
+                    d[key] = _once_more_on_timeout(fn, fd, i)
                 except HidppError as e:
                     log.debug("%s idx %d: %s", key, i, e)
                     if _device_gone(e):
@@ -1063,7 +1158,7 @@ def _main():
     for node in nodes:
         print("%s  %04x:%04x  %s  receiver=%s" % (node.path, node.vid, node.pid, node.name, node.is_receiver))
         try:
-            fd = open_node(node.path)
+            fd = open_node(node.path, long_only=node.long_only)
         except OSError as e:
             print("  cannot open: %s" % e)
             continue

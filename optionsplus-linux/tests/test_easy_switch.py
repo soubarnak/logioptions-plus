@@ -29,7 +29,7 @@ def test_lists_the_host_slots_with_names_and_the_current_host(client):
     assert [h["name"] for h in p["hosts"]] == ["Desk PC", "Laptop", ""]
     assert [h["paired"] for h in p["hosts"]] == [True, True, False]
     assert [h["connected"] for h in p["hosts"]] == [True, False, False]
-    assert p["hosts"][0]["os"]["type"] == "WINDOWS" and p["hosts"][1]["os"]["type"] == "MACOS"
+    assert [h["os"]["type"] for h in p["hosts"]] == ["UNKNOWN"] * 3     # the OS is not read from the mouse
     assert p["maxNameLength"] == 32
     assert p["capabilities"]["canGetName"] is True and p["capabilities"]["canSetName"] is True
     assert not p["capabilities"].get("canDelete")
@@ -142,3 +142,101 @@ def test_easy_switch_image_is_served_so_the_tab_renders(client):
     assert res["device_easyswitch_image"]["url"].startswith("file://")
     assert res["device_easyswitch_image"]["url"].endswith("easyswitch.png")
     assert res["device_easyswitch_image"]["contentType"] == "image/png"
+
+
+# ---- layout and behaviour on a real mouse (review of ticket #16) ---------------
+
+def test_the_whole_name_is_read_with_its_first_character(client, bolt):
+    bolt.mouse.hosts[0]["name"] = b"Living room media centre"
+    assert hosts(client)["hosts"][0]["name"] == "Living room media centre"
+    assert (0, 0) in bolt.mouse.name_reads and (0, 14) in bolt.mouse.name_reads
+
+
+def test_names_of_a_whole_number_of_chunks_are_written_without_an_extra_chunk(client, bolt):
+    for name in ("a" * 14, "b" * 28):
+        bolt.mouse.name_writes.clear()
+        assert rename(client, 0, name)["result"]["code"] == "SUCCESS"
+        assert sum(n for _h, _o, n in bolt.mouse.name_writes) == len(name)
+        assert all(n > 0 for _h, _o, n in bolt.mouse.name_writes)
+        assert hosts(client)["hosts"][0]["name"] == name
+
+
+def test_a_switch_the_mouse_never_answers_is_still_a_success(client, bolt):
+    reply = change(client, host=1)       # the fake leaves the way a real mouse does: no reply
+    assert reply["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.current_host == 1
+
+
+def test_the_name_limit_is_the_one_of_the_host_slot(client, bolt):
+    bolt.mouse.hosts[1]["max_name"] = 8
+    assert hosts(client)["hosts"][1]["name"] == "Laptop"
+    assert rename(client, 1, "Much too long")["result"]["code"] != "SUCCESS"
+    assert rename(client, 0, "Much too long")["result"]["code"] == "SUCCESS"
+
+
+def test_capabilities_come_from_the_mouse(agent_factory, bolt):
+    bolt.mouse.host_caps = 0x01          # may read names, may not write them
+    c = agent_factory().client()
+    try:
+        caps = hosts(c)["capabilities"]
+        assert caps["canGetName"] is True and not caps.get("canSetName")
+        assert rename(c, 0, "Other")["result"]["code"] != "SUCCESS"
+        assert bolt.mouse.name_writes == []
+    finally:
+        c.close()
+
+
+def test_a_mouse_that_cannot_give_names_is_not_asked_for_them(agent_factory, bolt):
+    bolt.mouse.host_caps = 0x00
+    c = agent_factory().client()
+    try:
+        p = hosts(c)
+        assert not p["capabilities"].get("canGetName") and [h["name"] for h in p["hosts"]] == ["", "", ""]
+        assert bolt.mouse.name_reads == []
+    finally:
+        c.close()
+
+
+def test_the_change_host_route_switches_too(client, bolt):
+    reply = client.call("SET", "/change_host/%s/host" % device_id(client), {"host": 1})
+    assert reply["result"]["code"] == "SUCCESS" and bolt.mouse.current_host == 1
+    refused = client.call("SET", "/change_host/%s/host" % device_id(client), {"host": 2})
+    assert refused["result"]["code"] != "SUCCESS" and bolt.mouse.current_host == 1
+
+
+def test_a_change_is_announced(agent_factory, bolt):
+    c = agent_factory().client()
+    paths = ("/devices/easy_switch", "/devices/host_changed", "/devices/state/easy_switch_cache_updated")
+    try:
+        for path in paths:
+            c.subscribe(path)
+        dev = "/devices/%s/easy_switch/change" % device_id(c)
+        mid = c.send("SET", dev, {"rename": {"index": 1, "name": "Work laptop"}})
+        pushes = _until_reply(c, mid)
+        by_path = {p["path"]: p["payload"] for p in pushes}
+        assert by_path["/devices/easy_switch"]["hosts"][1]["name"] == "Work laptop"
+        entry = by_path["/devices/state/easy_switch_cache_updated"]["devices"][0]
+        assert entry["device"]["deviceId"] == device_id(c)
+        assert "/devices/host_changed" not in by_path
+        mid = c.send("SET", dev, {"host": 1})
+        by_path = {p["path"]: p["payload"] for p in _until_reply(c, mid)}
+        assert by_path["/devices/host_changed"]["host"] == 1
+        assert by_path["/devices/easy_switch"]["hosts"][1]["connected"] is True
+    finally:
+        c.close()
+
+
+def _until_reply(client, mid):
+    pushes = []
+    while True:
+        m = client.recv()
+        if m.get("msgId") == mid and "result" in m:
+            return [p for p in pushes if p.get("verb") == "BROADCAST"]
+        pushes.append(m)
+
+
+def test_reading_the_hosts_only_uses_known_0x1815_functions(client, bolt):
+    hosts(client)
+    index = bolt.mouse.features.index(0x1815)
+    used = {w[3] >> 4 for w in bolt.writes if w[2] == index}
+    assert used <= {0, 1, 3}        # an unconfirmed function number could move or delete a host
