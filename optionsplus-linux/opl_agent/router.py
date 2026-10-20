@@ -136,6 +136,9 @@ class Router:
             return "SUCCESS", reply, ""
 
         # action picker catalogue, from the fetched depot through the Linux filter
+        if verb == "GET" and path == "/rac":
+            dev = self.reg.devices.get((payload or {}).get("deviceId")) if isinstance(payload, dict) else None
+            return "SUCCESS", actions.rac({"slotPrefix": dev.slot_prefix} if dev else None), ""
         if verb == "GET" and path in actions.ROUTES:
             return "SUCCESS", actions.ROUTES[path](), ""
 

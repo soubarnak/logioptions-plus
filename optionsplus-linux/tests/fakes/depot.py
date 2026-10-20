@@ -46,7 +46,7 @@ def catalogue_cards():
     ]
 
 
-ENCRYPTED_WRAPPER = b"\x21\x05\x21\x20\x82\x00\x00\x00" + bytes(range(200, 256))
+ENCRYPTED_WRAPPER = b"\x9e\x01invented-wrapper\x00" + bytes(range(200, 256))
 DEFAULT_APP = "420fd454-0c36-499d-bde4-146823b16147"
 OTHER_APP = "app_test"
 KEY = "PRESET_TAG_KEY_OR_BUTTON"
@@ -137,3 +137,23 @@ def build_depot(root):
                      "mouseThumbWheelAction": {"id": "card-wheel"},
                      "mouseSettings": {"pointerSpeed": {"active": {"value": 0.5}}}}}]}))
     return root
+
+
+CONTROL_ONLY_PREFIX = "046d_4343"
+CONTROL_ONLY_DEPOT = "test_mouse_c1"
+
+
+def add_control_only_device(root):
+    """A second installed device with no slot rows in any table: its slots come from the depot
+    defaults and its cards from the control tables."""
+    path = os.path.join(root, "logioptionsplus", "data", "devices", "devices_initial.json")
+    with open(path) as fh:
+        doc = json.load(fh)
+    doc["devices"].append({
+        "modelId": "2test-c1", "depot": CONTROL_ONLY_DEPOT, "type": "MOUSE", "displayName": "Test Mouse C1",
+        "slotPrefix": CONTROL_ONLY_PREFIX, "modes": [{"interfaces": [{"id": CONTROL_ONLY_PREFIX}]}]})
+    _write(path, json.dumps(doc))
+    dev = os.path.join(root, CONTROL_ONLY_DEPOT)
+    _write(os.path.join(dev, "manifest.json"), json.dumps({"devices": []}))
+    _write(os.path.join(dev, "default_configurations.json"), json.dumps({"defaultConfigurations": [{
+        "settings": {"control_id_mappings": {"83": {"id": "card-back"}, "195": {"id": "card-gesture"}}}}]}))

@@ -112,6 +112,101 @@ def test_a_device_without_rows_gets_no_slots_not_an_error(client):
     assert actions.rac({"slotPrefix": "nothing-0000"})["availableCards"] == {"racList": []}
 
 
+CONTROL_ONLY = fx.CONTROL_ONLY_PREFIX
+
+
+def prefixes_in(container):
+    return {s["slotId"].rsplit("_", 1)[0] for key in ("availableCards", "recommendedCards")
+            for r in container[key]["racList"] for s in r["slotCardList"]}
+
+
+def test_a_device_with_no_slot_rows_gets_its_default_controls_and_the_control_tables(agent_factory, workdir):
+    fx.add_control_only_device(os.path.join(workdir, "depots"))
+    c = agent_factory().client()
+    try:
+        from opl_agent import actions
+        box = actions.rac({"slotPrefix": CONTROL_ONLY})
+        assert slots(box, "availableCards") == {
+            CONTROL_ONLY + "_c83": ["card_play", "card_next_desktop", "card_snip"],
+            CONTROL_ONLY + "_c195": ["card_next_desktop"]}
+        assert slots(box, "recommendedCards") == {CONTROL_ONLY + "_c195": ["card_next_desktop"]}
+        # another app has no control rows of its own: it must not repeat the default app's lists
+        assert slots(box, "availableCards", fx.OTHER_APP) is None
+    finally:
+        c.close()
+
+
+def test_rac_serves_the_asked_device_only_and_every_installed_one_when_it_is_unknown(agent_factory, workdir):
+    fx.add_control_only_device(os.path.join(workdir, "depots"))
+    c = agent_factory().client()
+    try:
+        asked = c.call("GET", "/rac", {"deviceId": "dev00000000"})["payload"]
+        assert prefixes_in(asked) == {fx.SLOT_PREFIX}
+        unknown = c.call("GET", "/rac", {"deviceId": "dev99999999"})["payload"]
+        assert prefixes_in(unknown) == {fx.SLOT_PREFIX, CONTROL_ONLY}
+        assert prefixes_in(c.call("GET", "/rac")["payload"]) == {fx.SLOT_PREFIX, CONTROL_ONLY}
+    finally:
+        c.close()
+
+
+def rewrite(path, text):
+    with open(path, "w") as fh:
+        fh.write(text)
+    stamp = os.stat(path).st_mtime + 5
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_changed_table_is_picked_up_without_a_restart(client):
+    from opl_agent import actions, resources
+    first = slots(actions.rac({"slotPrefix": fx.SLOT_PREFIX}), "recommendedCards")
+    assert first["046d_4242_c83"] == ["card_play"]
+    rewrite(os.path.join(resources.DATA_DIR, "rap", "recommendations_slot_win.json"),
+            fx.info_table({fx.DEFAULT_APP: [("046d_4242_c83", ["card_snip"])]}))
+    assert slots(actions.rac({"slotPrefix": fx.SLOT_PREFIX}), "recommendedCards")["046d_4242_c83"] == ["card_snip"]
+
+
+def test_one_cache_entry_is_kept_per_device_set(client):
+    from opl_agent import actions
+    actions._rac_cache.clear()
+    actions.rac({"slotPrefix": fx.SLOT_PREFIX})
+    actions.rac({"slotPrefix": CONTROL_ONLY})
+    assert len(actions._rac_cache) == 2
+    actions.rac({"slotPrefix": fx.SLOT_PREFIX})
+    assert len(actions._rac_cache) == 2
+
+
+def test_malformed_tables_and_presets_are_ignored_not_fatal(client):
+    from opl_agent import actions, resources
+    rap = os.path.join(resources.DATA_DIR, "rap")
+    rewrite(os.path.join(rap, "available_card_tags_slot.json"), json.dumps({"data": "nope"}))
+    rewrite(os.path.join(rap, "available_card_tags_control.json"), json.dumps({"data": {fx.DEFAULT_APP: {
+        "infoList": [{"infos": [fx.KEY]}, {"id": "83", "infos": "PRESET_TAG_KEY_OR_BUTTON"}, "junk",
+                     {"id": "86", "infos": [fx.DESKTOP]}]}}}))
+    rewrite(os.path.join(resources.DATA_DIR, "card_presets", "card_presets_win.json"),
+            json.dumps({"cards": [{"name": "no id", "tags": [fx.DESKTOP]}, fx.keystroke_card("card_ok", "N", tags=[fx.DESKTOP])]}))
+    box = actions.rac({"slotPrefix": fx.SLOT_PREFIX})
+    assert box["availableCards"] == {"racList": []}      # no usable tag row is left
+    assert "no id" not in json.dumps(box)
+
+
+def test_a_non_json_file_is_remembered_so_it_is_not_reopened(client):
+    from opl_agent import actions, resources
+    path = os.path.join(resources.DATA_DIR, "card_presets", "card_presets_001.json")
+    actions._read(path)
+    assert actions._files[path][1] is None
+
+
+def test_a_preset_file_with_a_byte_order_mark_is_read(agent_factory, workdir):
+    path = os.path.join(workdir, "depots", "logioptionsplus", "data", "card_presets", "card_presets_bom_win.json")
+    with open(path, "wb") as fh:
+        fh.write(b"\xef\xbb\xbf" + json.dumps({"cards": [fx.keystroke_card("card_bom", "N")]}).encode())
+    c = agent_factory().client()
+    try:
+        assert "card_bom" in ids(presets(c))
+    finally:
+        c.close()
+
+
 def test_the_encrypted_preset_file_is_skipped_without_a_warning(client, caplog):
     from opl_agent import actions, resources
     path = os.path.join(resources.DATA_DIR, "card_presets", "card_presets_001.json")

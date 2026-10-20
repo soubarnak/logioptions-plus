@@ -158,9 +158,10 @@ def _read(path):
         log.warning("cannot read %s: %s", path, exc)
         return None
     if raw.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] not in (b"{", b"["):
+        _files[path] = (stamp, None)
         return None                     # Logitech's encrypted wrappers (card_presets_001.json): not data for us
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8-sig"))
     except ValueError as exc:
         log.warning("cannot read %s: %s", path, exc)
         return None
@@ -255,15 +256,19 @@ _rac_cache = {}
 
 
 def _table(name):
-    """{app id: {row id: [infos]}} of one rap table, {} when absent or malformed."""
+    """{app id: {row id: [infos]}} of one rap table; malformed parts are left out."""
     doc = _read(os.path.join(resources.DATA_DIR, "rap", _TABLES[name]))
     data = doc.get("data") if isinstance(doc, dict) else None
     out = {}
     for app, body in (data.items() if isinstance(data, dict) else ()):
         rows = body.get("infoList") if isinstance(body, dict) else None
-        out[app] = {r["id"]: r.get("infos") or [] for r in rows or []
-                    if isinstance(r, dict) and "id" in r}
+        out[app] = {r["id"]: r["infos"] for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)
+                    and isinstance(r.get("infos"), list)} if isinstance(rows, list) else {}
     return out
+
+
+def _catalogue_entry(prefix):
+    return next((e for e in resources._load_catalogue().values() if e.get("slotPrefix") == prefix), {})
 
 
 def _installed_prefixes():
@@ -276,36 +281,35 @@ def _installed_prefixes():
     return out
 
 
-def _slot_rows(prefix, tables, app):
-    """[(slot id, control id or None)] of one app for one device: the slots of its tag and
-    recommendation rows, in table order."""
-    seen = []
-    for name in ("tags_slot", "rec_slot"):
-        for sid in tables[name].get(app, {}):
-            if sid.startswith(prefix + "_") and sid not in seen:
-                seen.append(sid)
-    return [(sid, (_CONTROL_SLOT.search(sid) or [None, None])[1]) for sid in seen]
+def _slot_ids(prefix, tables, app):
+    """Slots of one app for one device. A device that has slot rows in any table is listed by
+    those rows (this app's own, in table order); one that has none is listed by the controls of
+    its depot defaults, whose cards then come from the control tables."""
+    own = [sid for name in ("tags_slot", "rec_slot") for app_id in tables[name]
+           for sid in tables[name][app_id] if sid.startswith(prefix + "_")]
+    if own:
+        seen = []
+        for name in ("tags_slot", "rec_slot"):
+            for sid in tables[name].get(app, {}):
+                if sid.startswith(prefix + "_") and sid not in seen:
+                    seen.append(sid)
+        return seen
+    from .profiles import default_assignments
+    entry = _catalogue_entry(prefix)
+    return [a["slotId"] for a in default_assignments(prefix, entry.get("depot", ""))]
 
 
 def _compose(prefixes):
     from .profiles import DEFAULT_PROFILE_ID
     tables = {name: _table(name) for name in _TABLES}
-    presets_by_id = {c.get("id"): c for c in _dedupe(_items("card_presets", "cards"))}
+    presets_by_id = {c["id"]: c for c in _dedupe(_items("card_presets", "cards"))
+                     if isinstance(c, dict) and c.get("id")}
     served = {}
 
     def serve(card):
         if card["id"] not in served:
             served[card["id"]] = _serve([card])
         return served[card["id"]]
-
-    def row(name_slot, name_control, sid, cid, app):
-        if sid in tables[name_slot].get(app, {}):
-            return tables[name_slot][app][sid]
-        if cid is not None:
-            for a in (app, DEFAULT_PROFILE_ID):
-                if cid in tables[name_control].get(a, {}):
-                    return tables[name_control][a][cid]
-        return None
 
     apps = []
     for name in _TABLES:
@@ -314,17 +318,29 @@ def _compose(prefixes):
                 apps.append(app)
     apps.sort(key=lambda a: a != DEFAULT_PROFILE_ID)        # default first, rest in table order
 
+    def row(kind, sid, app):
+        """The app's own slot row, else its own control row; the default app's rows stand in
+        only for an app that has no rows in any table."""
+        cid = (_CONTROL_SLOT.search(sid) or [None, None])[1]
+        owners = [app] if any(tables[n].get(app) for n in _TABLES) else [app, DEFAULT_PROFILE_ID]
+        for owner in dict.fromkeys(owners):
+            if sid in tables[kind + "_slot"].get(owner, {}):
+                return tables[kind + "_slot"][owner][sid]
+            if cid is not None and cid in tables[kind + "_control"].get(owner, {}):
+                return tables[kind + "_control"][owner][cid]
+        return None
+
     available, recommended = [], []
     for app in apps:
         slots_a, slots_r = [], []
         for prefix in prefixes:
-            for sid, cid in _slot_rows(prefix, tables, app):
-                tags = row("tags_slot", "tags_control", sid, cid, app)
+            for sid in _slot_ids(prefix, tables, app):
+                tags = row("tags", sid, app)
                 if tags is not None:
-                    want = set(tags)
-                    cards = [c for k, c in presets_by_id.items() if want.intersection(c.get("tags") or ())]
+                    want = set(t for t in tags if isinstance(t, str))
+                    cards = [c for c in presets_by_id.values() if want.intersection(c.get("tags") or ())]
                     slots_a.append({"slotId": sid, "cards": [x for c in cards for x in serve(c)]})
-                rec = row("rec_slot", "rec_control", sid, cid, app)
+                rec = row("rec", sid, app)
                 if rec is not None:
                     cards = [presets_by_id[i] for i in rec if i in presets_by_id]
                     slots_r.append({"slotId": sid, "cards": [x for c in cards for x in serve(c)]})
@@ -336,9 +352,11 @@ def _compose(prefixes):
             "availableCards": {"racList": available}, "recommendedCards": {"racList": recommended}}
 
 
-def _rac_stamp():
+def _rac_stamp(prefixes):
     files = [os.path.join(resources.DATA_DIR, "rap", n) for n in _TABLES.values()]
     files += sorted(glob.glob(os.path.join(resources.DATA_DIR, "card_presets", "*.json")))
+    files += [os.path.join(resources.depot_root(_catalogue_entry(p).get("depot", "")), "default_configurations.json")
+              for p in prefixes if _catalogue_entry(p).get("depot")]
     stamps = []
     for f in files:
         try:
@@ -350,15 +368,15 @@ def _rac_stamp():
 
 def rac(payload=None):
     """The action picker container for one device ({"slotPrefix"}), or, without one, for every
-    catalogued device whose depot is installed. Cached until the depot files change."""
+    catalogued device whose depot is installed. One cache entry per device set, dropped when
+    a depot file it was built from changes."""
     prefix = payload.get("slotPrefix") if isinstance(payload, dict) else None
     prefixes = (prefix,) if isinstance(prefix, str) and prefix else tuple(_installed_prefixes())
-    key = (prefixes, _rac_stamp())
-    hit = _rac_cache.get(key)
-    if hit is None:
-        _rac_cache.clear()
-        hit = _rac_cache[key] = _compose(prefixes)
-    return copy.deepcopy(hit)
+    stamp = _rac_stamp(prefixes)
+    hit = _rac_cache.get(prefixes)
+    if hit is None or hit[0] != stamp:
+        hit = _rac_cache[prefixes] = (stamp, _compose(prefixes))
+    return copy.deepcopy(hit[1])
 
 
 def default_assignments():
