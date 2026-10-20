@@ -306,3 +306,45 @@ class SimulatedBolt:
                 self._error(data, True, result)
             else:
                 self._reply(data, result)
+
+
+class SimulatedBluetoothMouse(SimulatedBolt):
+    """A mouse paired directly over Bluetooth: no receiver, one node at the fixed
+    device index 0xFF, and a transport that carries long reports only. A short
+    request is never answered; every reply (errors too) is a long report."""
+
+    PATH = "/dev/hidraw-sim-ble0"
+    BLE_PID = MOUSE_WPID              # the catalogue knows the mouse by this PID
+
+    def __init__(self):
+        super().__init__()
+        self.path = self.PATH
+
+    def list_nodes(self):
+        if not self.present:
+            return []
+        return [hidpp.HidppNode(path=self.path, vid=hidpp.LOGITECH_VID, pid=self.BLE_PID,
+                                name=MOUSE_NAME, is_receiver=False, long_only=True)]
+
+    def _error(self, request, version2, code):
+        marker = 0xFF if version2 else 0x8F
+        self._out.put(bytes([hidpp.LONG, request[1], marker, request[2], request[3], code]).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def _reply(self, request, params):
+        head = bytes([hidpp.LONG, request[1], request[2], request[3]])
+        self._out.put((head + params).ljust(hidpp.LONG_LEN, b"\0"))
+
+    def _on_write(self, data):
+        with self._lock:
+            self.writes.append(data)
+            if data[0] != hidpp.LONG:
+                return                                # no short-report collection: dropped
+            idx, b2, b3, params = data[1], data[2], data[3], data[4:]
+            if idx != hidpp.DEV_RECEIVER or not self.mouse.powered:
+                self._error(data, False, 8)           # UNKNOWN_DEVICE
+                return
+            result = self.mouse.handle(b2, b3 >> 4, params)
+            if isinstance(result, int):
+                self._error(data, True, result)
+            else:
+                self._reply(data, result)

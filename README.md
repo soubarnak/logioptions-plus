@@ -66,7 +66,28 @@ answering (a stale socket is replaced), and runs the UI with the Chromium sandbo
 Void's Electron cannot sandbox, set `OPL_NO_SANDBOX=1` to add `--no-sandbox`. Removing the package
 removes the rule, autostart and menu entries; settings and downloaded data in your home stay.
 
-Tests: `python3 -m pytest optionsplus-linux/tests`.
+### First launch: Logitech's data
+
+The first launch finds no Options+ data and runs `optionsplus-fetch-payload`. It says that
+the data (about 550 MB) comes from Logitech's servers, shows the size and the link to
+Logitech's EULA, and waits for you to confirm (a zenity or kdialog box when a display and
+the tool exist, otherwise the terminal). Declining exits without downloading or writing
+anything. After a confirmed download the SHA-256 is checked against the value pinned in
+`depots.json` before anything is unpacked; on a mismatch nothing is installed.
+
+- Data lives in `~/.local/share/optionsplus-linux/payload/` (`app.asar`, `depots/`,
+  `payload.json` with the installed data version). Delete that directory to reset it.
+  The launcher and the agent use it without any `OPL_*` variable; a system-wide copy in
+  `/usr/lib/optionsplus-linux/logitech/` is the fallback.
+- Behind a proxy or with a dead URL: `optionsplus-fetch-payload --from-installer
+  ~/Downloads/logioptionsplus_installer_offline.exe` takes the depots from Logitech's offline
+  installer instead. Standard `https_proxy` variables are honoured for downloads.
+- For every user on the machine: `optionsplus-fetch-payload --system` (uses `pkexec`, else `sudo`).
+- `--accept-eula` skips the question for scripted installs; use it only after reading the EULA.
+
+Tests: `python3 -m pytest optionsplus-linux/tests`. Before a release that changes
+`optionsplus-linux/data/depots.json`, run `tools/verify-depot-urls.py` (needs the network): every
+pinned URL must answer unauthenticated with the pinned size.
 
 ## Packaging and updates
 

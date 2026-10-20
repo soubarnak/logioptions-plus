@@ -1,0 +1,7 @@
+#!/bin/sh
+# Download Logitech's Options+ payload (after EULA confirmation) into the user's data directory.
+# See `optionsplus-fetch-payload --help`.
+LIB=${OPL_LIB_DIR:-/usr/lib/optionsplus-linux}
+PYTHONPATH=$LIB${PYTHONPATH:+:$PYTHONPATH}
+export PYTHONPATH
+exec python3 -m opl_agent.fetch "$@"

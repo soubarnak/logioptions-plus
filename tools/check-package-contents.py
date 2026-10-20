@@ -9,9 +9,11 @@ import tempfile
 
 LIB = r"usr/lib/optionsplus-linux"
 ALLOW = [re.compile(p + "$") for p in (
-    r"usr/bin/optionsplus-(linux|agent)",
+    r"usr/bin/optionsplus-(linux|agent|fetch-payload)",
     LIB + r"/opl_agent/[A-Za-z0-9_]+\.py",
-    LIB + r"/bootstrap/(main\.js|package\.json)",
+    LIB + r"/bootstrap/(main|links)\.js",
+    LIB + r"/bootstrap/package\.json",
+    LIB + r"/depots\.json",
     r"usr/lib/udev/rules\.d/70-optionsplus-linux\.rules",
     r"etc/xdg/autostart/optionsplus-linux-agent\.desktop",
     r"usr/share/applications/optionsplus-linux\.desktop",
