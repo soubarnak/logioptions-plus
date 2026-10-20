@@ -28,7 +28,7 @@ def pointer_value(assignment):
 
 
 def slider(client, value):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE,
         "assignment": {"slotId": SLOT, "card": {
@@ -114,3 +114,44 @@ def test_settings_are_reapplied_when_a_device_is_discovered(agent, client, bolt)
     bolt.mouse.dpi = 1000                      # receiver replug: mouse back at its own value
     agent.agent.reg.scan()
     assert bolt.mouse.dpi == 4100
+
+
+def test_the_ui_route_set_v2_assignment_writes_the_dpi(client, bolt):
+    reply = client.call("SET", "/v2/assignment", {
+        "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
+        "profileId": DEFAULT_PROFILE,
+        "assignment": {"slotId": SLOT, "cardId": "x", "card": {
+            "attribute": "MOUSE_SETTINGS",
+            "mouseSettings": {"pointerSpeed": {"active": {"value": 1.0}}}}}})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.dpi == MAX_DPI
+
+
+def test_the_old_profiles_assignment_alias_still_works(client, bolt):
+    reply = client.call("SET", "/v2/profiles/assignment", {
+        "profileId": DEFAULT_PROFILE,
+        "assignment": {"slotId": SLOT, "card": {
+            "attribute": "MOUSE_SETTINGS",
+            "mouseSettings": {"pointerSpeed": {"active": {"value": 1.0}}}}}})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.dpi == MAX_DPI
+
+
+def test_an_assignment_for_an_unknown_slot_is_an_invalid_argument(client):
+    reply = client.call("SET", "/v2/assignment", {
+        "profileId": DEFAULT_PROFILE,
+        "assignment": {"slotId": "no-such-device_c999", "card": {"attribute": "KEYSTROKE"}}})
+    assert reply["result"]["code"] == "INVALID_ARG"
+    assert "no-such-device_c999" in reply["result"]["what"]
+
+
+def test_device_restore_resets_the_device_named_by_the_payload(client, bolt):
+    slider(client, 0.9)
+    assert bolt.mouse.dpi != 4100
+    reply = client.call("SET", "/device/restore", {
+        "@type": TYPE + "logi.protocol.device.DeviceInfo", "id": "dev00000000",
+        "deviceModel": fx.MODEL_ID, "slotPrefix": fx.SLOT_PREFIX})
+    assert reply["result"]["code"] == "SUCCESS"
+    assert reply["payload"]["id"] == "dev00000000"
+    assert bolt.mouse.dpi == 4100
+    assert pointer_value(_assignment(get_profile(client))) == pytest.approx(0.5, abs=0.01)

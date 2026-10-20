@@ -29,7 +29,7 @@ PASTE = keystroke(25, 224, cid="card_paste")
 
 
 def assign(client, cid, card):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE, "assignment": {"slotId": slot(cid), "card": card}})
 

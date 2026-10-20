@@ -34,7 +34,7 @@ def current(client):
 
 def change(client, **fields):
     """Set the wheel settings the way the panel does: a partial ScrollWheelSettings."""
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE,
         "assignment": {"slotId": SLOT, "card": {

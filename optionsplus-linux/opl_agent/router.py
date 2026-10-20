@@ -4,7 +4,7 @@ Resolution order for a GET/SET:
   1. exact static boot route (responses.BOOT / responses.ERRORS / SET echo)
   2. device-scoped route (/devices, /battery, ...) resolved against the live
      Registry
-  3. unknown SET: SUCCESS (UI sagas do not catch SET failures)
+  3. unknown SET: NOT_SUPPORTED (SETs the boot sagas send without catching are in stubs.py)
   4. otherwise NO_SUCH_PATH, which the UI treats as "feature absent" and skips.
 
 SUBSCRIBE/UNSUBSCRIBE are handled by the IPC Server itself; this router only
@@ -153,10 +153,13 @@ class Router:
         if verb == "SET" and path == "/v2/profiles":
             return await self._profiles_update(payload or {})
 
-        if verb == "SET" and path.startswith("/v2/profiles/"):
+        if verb == "SET" and (path == "/v2/assignment" or path.startswith("/v2/profiles/")):
             r = await self._profiles_set(path, payload)
             if r is not None:
                 return r
+
+        if verb == "SET" and path == "/device/restore":
+            return await self._device_restore(payload)
 
         parts = path.strip("/").split("/")
         if verb in ("GET", "SET") and parts[0] == "mouse" and parts[-1] == "swap" \
@@ -547,7 +550,7 @@ class Router:
                     if target is None and app is not None and requested:
                         return "NOT_SUPPORTED", None, "only button assignments can differ per application"
                     if target is None:
-                        continue
+                        return await self._profiles_failed(handled, "INVALID_ARG", "no such slot %s" % slot_id)
                     try:
                         await loop.run_in_executor(None, self._assign_button, *target, slot_id, requested, app)
                     except input_engine.Unsupported as exc:
@@ -575,7 +578,7 @@ class Router:
             asg["card"], asg["cardId"] = card, card["id"]
             handled = payload
         if handled is None:
-            return None
+            return "INVALID_ARG", None, "nothing to apply" if entries else None
         await self._broadcast_profiles()
         return "SUCCESS", handled, ""
 
@@ -662,6 +665,21 @@ class Router:
                 self.relay.probe(dev)
             else:
                 self.apply_stored(dev.id)
+
+    async def _device_restore(self, info):
+        """SET /device/restore (RESET TO DEFAULT SETTINGS): the payload is the device info object."""
+        info = info if isinstance(info, dict) else {}
+        dev_id = info.get("id") or info.get("deviceId")
+        if dev_id not in self.reg.devices:
+            return "INVALID_DEVICE", None, "unknown device id"
+        code, _, what = await self._profiles_reset({"deviceId": dev_id})
+        if code != "SUCCESS":
+            return code, None, what
+        if self.server is not None:
+            for path, state in self.initial_state("/devices/state/changed"):
+                if state.get("id") == dev_id:
+                    self.server.broadcast(path, state)
+        return "SUCCESS", info, ""
 
     async def _profiles_reset(self, info):
         loop = asyncio.get_running_loop()

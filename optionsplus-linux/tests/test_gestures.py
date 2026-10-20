@@ -44,7 +44,7 @@ def thumb_card(left=7, right=8, cid="card_thumb_custom"):
 
 
 def assign_slot(client, slot_id, card):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": DEFAULT_PROFILE, "assignment": {"slotId": slot_id, "card": card}})
 

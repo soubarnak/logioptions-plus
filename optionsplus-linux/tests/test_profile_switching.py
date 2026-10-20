@@ -196,7 +196,7 @@ def test_a_thumb_card_of_the_focused_app_and_the_speed_relay_take_turns(client, 
     from tests.test_wheel_relay import FAST, REL_HWHEEL_HI_RES, thumb
     thumb(client, speed=FAST)
     assert bolt.mouse.thumb["mode"] == 1                         # relayed, scaled
-    reply = client.call("SET", "/v2/profiles/assignment", {
+    reply = client.call("SET", "/v2/assignment", {
         "profileId": FIREFOX, "assignment": {"slotId": THUMB_SLOT, "card": thumb_card()}})
     assert reply["result"]["code"] == "SUCCESS"
     windows.focus(("Navigator", "firefox"))

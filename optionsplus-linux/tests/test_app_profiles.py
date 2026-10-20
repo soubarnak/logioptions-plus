@@ -27,7 +27,7 @@ RELOAD_KEYS = [(KEY_F5, 1), (KEY_F5, 0)]
 
 
 def assign_to(client, profile_id, cid, card):
-    return client.call("SET", "/v2/profiles/assignment", {
+    return client.call("SET", "/v2/assignment", {
         "@type": TYPE + "logi.protocol.profiles_v2.ProfileAssignment",
         "profileId": profile_id, "assignment": {"slotId": slot(cid), "card": card}})
 
@@ -114,7 +114,7 @@ def test_an_unsupported_card_for_an_application_is_refused_and_not_stored(client
 def test_only_buttons_can_differ_per_application(client):
     settings = {"id": "MOUSE_SETTINGS", "attribute": "MOUSE_SETTINGS",
                 "mouseSettings": {"pointerSpeed": {"active": {"value": 0.9, "dpiLevel": 6000}}}}
-    reply = client.call("SET", "/v2/profiles/assignment", {
+    reply = client.call("SET", "/v2/assignment", {
         "profileId": FIREFOX, "assignment": {"slotId": "046d_4242_mouse_settings", "card": settings}})
     assert reply["result"]["code"] == "NOT_SUPPORTED"
     assert profile(client, FIREFOX) is None
