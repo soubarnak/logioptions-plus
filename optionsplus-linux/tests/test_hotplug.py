@@ -109,6 +109,27 @@ def test_switching_the_mouse_on_restores_it_with_settings_and_battery(bolt, live
     assert wait_for(lambda: bolt.mouse.dpi == 6450)
 
 
+def test_a_mouse_switched_off_mid_probe_is_removed_not_re_announced_as_a_new_device(bolt, monkeypatch):
+    from opl_agent import hidpp
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    real_name = hidpp.get_device_name
+
+    def name_after_switch_off(fd, idx):
+        bolt.mouse.power(False)                # it answered the ping, then went off
+        return real_name(fd, idx)
+
+    monkeypatch.setattr(hidpp, "get_device_name", name_after_switch_off)
+    events = reg.rescan()
+    assert events["added"] == []               # no ghost with a nameless identity
+    assert [d.id for d in events["removed"]] == [DEV]
+    monkeypatch.undo()
+    bolt.mouse.power(True)
+    events = reg.rescan()
+    assert events["added"] == [] and events["returned"] == [DEV]
+
+
 def test_a_steady_device_is_not_re_announced(bolt, live):
     live.sock.settimeout(0.6)
     with pytest.raises((TimeoutError, OSError)):

@@ -818,17 +818,38 @@ def get_controls(fd, idx):
     return out
 
 
+def get_cid_reporting(fd, idx, cid):
+    """fn2 getCidReporting(cid) -> (diverted to software, the control id it acts as)."""
+    p = _fcall(fd, idx, F_REPROG_CONTROLS, 2, struct.pack(">H", cid))
+    return bool(p[2] & REPORT_DIVERT), (struct.unpack(">H", p[3:5])[0] or cid)
+
+
 def get_cid_diverted(fd, idx, cid):
     """fn2 getCidReporting(cid) -> True while the control is diverted to software."""
-    p = _fcall(fd, idx, F_REPROG_CONTROLS, 2, struct.pack(">H", cid))
-    return bool(p[2] & REPORT_DIVERT)
+    return get_cid_reporting(fd, idx, cid)[0]
+
+
+def get_cid_remap(fd, idx, cid):
+    """The control id `cid` acts as: itself unless remapped."""
+    return get_cid_reporting(fd, idx, cid)[1]
+
+
+def set_cid_remap(fd, idx, cid, target):
+    """fn3 setCidReporting(cid, 0, target): make `cid` act as `target` (itself undoes it). The
+    divert flags carry no change bits, so the diversion is left alone. The device is read
+    back; raises HidppError when it did not take."""
+    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, 0, target))
+    if get_cid_remap(fd, idx, cid) != target:
+        raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request
 
 
 def set_cid_diverted(fd, idx, cid, divert):
     """fn3 setCidReporting(cid, flags, remap): divert the control or hand it back. The device
     state is read back; raises HidppError when it did not take."""
     flags = (REPORT_DIVERT << 1) | (REPORT_DIVERT if divert else 0)
-    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, 0))
+    # a request that names no target resets the remap, so say the one the control has now
+    remap = get_cid_remap(fd, idx, cid)
+    _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, remap))
     if get_cid_diverted(fd, idx, cid) != bool(divert):
         raise HidppError(F_REPROG_CONTROLS, 3, 4)       # HW_ERROR: the device ignored the request
 
@@ -951,6 +972,11 @@ def pairing_cancel(fd, feature_index):
     call(fd, DEV_RECEIVER, feature_index, 1)
 
 
+def _device_gone(err):
+    """True when `err` says nothing answers at the device index any more."""
+    return isinstance(err, HidppTimeout) or (err.version == 1 and err.name == "UNKNOWN_DEVICE")
+
+
 def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
     """Ping device indices 1..max_devices; return those that answer.
 
@@ -965,12 +991,18 @@ def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
         d = {"index": i, "protocol": proto, "wpid": None, "name": None, "type": None}
         if bolt is not None:
             d["wpid"] = _pairing_wpid(fd, i, bolt)
+        gone = False
         if proto[0] >= 2:
             for key, fn in (("name", get_device_name), ("type", get_device_type)):
                 try:
                     d[key] = fn(fd, i)
                 except HidppError as e:
                     log.debug("%s idx %d: %s", key, i, e)
+                    if _device_gone(e):
+                        gone = True
+                        break
+        if gone:
+            continue        # it answered the ping, then switched off: not a device with a blank name
         out.append(d)
     return out
 

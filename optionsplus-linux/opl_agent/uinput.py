@@ -52,7 +52,9 @@ class OsBackend:
 
 def _keys():
     from . import keymap
-    return sorted({keymap.linux_key(u) for u in range(256)} - {None}) + list(_BUTTONS)
+    from . import sysactions
+    codes = {keymap.linux_key(u) for u in range(256)} - {None}
+    return sorted(codes | sysactions.all_codes()) + list(_BUTTONS)
 
 
 class UinputDevice:

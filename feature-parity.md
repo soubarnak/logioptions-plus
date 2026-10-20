@@ -325,6 +325,13 @@ a remap do something.
   (`remap` CID `0x50` ↔ `0x51`) when the device reports `remap` capability; otherwise fall
   back to `xinput set-button-map` on X11 and document the Wayland limitation. Persist in
   `configuration.json`, reapply on connect.
+  **Implemented (#24, `opl_agent/swap.py`):** the choice is kept in `button_swap.json` in the
+  state directory and reapplied on every connect (the device remap does not survive a power
+  cycle). Order: device remap (when controls 0x50 and 0x51 are reprogrammable) > X11
+  `xmodmap -e "pointer = 3 2 1"` (needs `DISPLAY`, no Wayland session, `xmodmap` installed) >
+  `NOT_SUPPORTED` with a message pointing at the desktop's mouse settings. **Wayland without
+  device support cannot swap from an app; use the desktop's own setting.** The X11 swap is
+  reapplied only when a mouse connects, not at login without one.
 
 ### 5.3 Acceptance
 

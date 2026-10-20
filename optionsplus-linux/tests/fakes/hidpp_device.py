@@ -78,6 +78,12 @@ class SimulatedMouse:
         self.held = []
         self.fail_divert_write = False              # answer setCidReporting with an error
         self.ignore_divert = False                  # accept setCidReporting but change nothing
+        # 0x1b04 remap: cid -> cid it acts as. Left and right (80, 81) are remappable only when
+        # this is set; a setCidReporting that names no target (0) resets that control's remap.
+        self.remappable_primary = False
+        self.remap = {}
+        self.fail_remap_write = False               # answer a remapping setCidReporting with an error
+        self.fail_remap_write_after = None          # ... but only after this many accepted remaps
         self.wpid = wpid                            # hardware identity behind the receiver
         self.powered = True
 
@@ -173,15 +179,34 @@ class SimulatedMouse:
             if fn == 0:
                 return bytes([len(CONTROLS)])
             if fn == 1:
-                return struct.pack(">HHBBBBB", *CONTROLS[params[0]]) if params[0] < len(CONTROLS) else 2
+                if params[0] >= len(CONTROLS):
+                    return 2
+                cid, task, flags1, *rest = CONTROLS[params[0]]
+                if self.remappable_primary and cid in (80, 81):
+                    flags1 |= 0x10
+                return struct.pack(">HHBBBBB", cid, task, flags1, *rest)
             cid = struct.unpack(">H", params[:2])[0]
             if cid not in [c[0] for c in CONTROLS]:
                 return 2
             if fn == 2:                               # getCidReporting: cid, flags, remapped cid, flags2
-                return struct.pack(">HBHB", cid, DIVERT if cid in self.diverted else 0, cid, 0)
+                return struct.pack(">HBHB", cid, DIVERT if cid in self.diverted else 0,
+                                   self.remap.get(cid, cid), 0)
             if fn == 3:                               # setCidReporting: cid, flags, remap cid
                 if self.fail_divert_write:
                     return 5
+                target = struct.unpack(">H", params[3:5])[0]
+                remapping = target not in (0, cid)
+                if remapping and (self.fail_remap_write or (
+                        self.fail_remap_write_after is not None
+                        and len(self.remap) >= self.fail_remap_write_after)):
+                    return 5
+                if remapping:
+                    if not (self.remappable_primary and cid in (80, 81)
+                            or next(c for c in CONTROLS if c[0] == cid)[2] & 0x10):
+                        return 2                      # not remappable
+                    self.remap[cid] = target
+                else:
+                    self.remap.pop(cid, None)
                 if params[2] & (DIVERT << 1):
                     if not next(c for c in CONTROLS if c[0] == cid)[2] & 0x20:
                         return 2                      # not divertable

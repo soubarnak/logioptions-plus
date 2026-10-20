@@ -137,7 +137,7 @@ def test_a_diversion_left_by_a_crashed_agent_is_cleared_at_start(agent_factory, 
 
 def test_unsupported_card_type_is_an_error_and_changes_nothing(client, bolt):
     card = {"id": "card_vol", "attribute": "MACRO_PLAYBACK",
-            "macro": {"type": "MEDIA", "media": {"action": "VOLUME_UP"}}}
+            "macro": {"type": "APP_WINDOWS_MANAGEMENT", "appWindowsManagement": {"action": "BRING_TO_FOREGROUND"}}}
     reply = assign(client, BACK, card)
     assert reply["result"]["code"] == "NOT_SUPPORTED"
     assert bolt.mouse.diverted == set()

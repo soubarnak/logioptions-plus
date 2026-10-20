@@ -114,6 +114,28 @@ secret). Afterwards it commits the new version and checksum to `srcpkgs/optionsp
 and the package name above to main. The workflow never contacts Logitech. The in-app "Check for
 update" is wired to the same releases; see feature-parity.md §3 and §8 for the design.
 
+## Button actions
+
+A button assigned a keystroke, mouse-button, system, media or macro card is diverted to the
+agent, which replays the card through a virtual input device (`/dev/uinput`, so it works on X11
+and Wayland). System actions send a default keystroke that suits GNOME; other compositors bind
+their own keys, so any action can be changed in `~/.config/optionsplus-linux/actions.toml`
+(`$XDG_CONFIG_HOME` is honoured). The file is read again whenever it changes, no restart needed:
+
+    [system]
+    SWITCH_BETWEEN_DESKTOPS_RIGHT = "super+page_down"
+    LOCK = "XF86ScreenSaver"
+
+A value is one chord, keys joined by `+` (`ctrl`, `shift`, `alt`, `super`, letters, digits,
+`f1`..`f24`, `page_up`, `left`, ..., or an `XF86...` media key). An entry that does not parse is
+ignored and the default stays. Defaults: switch apps Alt+Tab, show desktop Super+D, next/previous
+desktop Ctrl+Alt+Right/Left, lock Super+L, screenshot Print; brightness and media actions send the
+XF86 keys. Holding a button does not auto-repeat (a volume hold fires once).
+
+Manual check (GNOME, hardware needed): assign "Next track" and the "next virtual desktop" system
+action to two buttons, press them, and confirm the player skips and the workspace changes. Then put
+your compositor's own binding in `actions.toml` and press again.
+
 ## Support
 
 Links in the Options+ UI (support, device support, release notes, feedback) open this

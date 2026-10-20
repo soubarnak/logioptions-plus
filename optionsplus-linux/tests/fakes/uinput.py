@@ -14,6 +14,7 @@ class FakeInput:
         self.events = []              # every (ev_type, code, value) emitted, in order
         self.fail_create = False      # /dev/uinput cannot be opened
         self.fail_emit = False        # writing an event fails
+        self.fail_emit_on = None      # fail only the n-th emit from now (1-based), once
 
     def factory(self):
         if self.fail_create:
@@ -24,6 +25,11 @@ class FakeInput:
     def emit(self, events):
         if self.fail_emit:
             raise OSError("write failed")
+        if self.fail_emit_on is not None:
+            self.fail_emit_on -= 1
+            if self.fail_emit_on == 0:
+                self.fail_emit_on = None
+                raise OSError("write failed")
         self.events += list(events)
 
     def keys(self):
