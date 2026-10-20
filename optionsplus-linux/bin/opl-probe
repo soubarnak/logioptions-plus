@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Logging stub agent: answers every request with a configurable default and logs traffic.
+
+Used to observe which routes the Options+ frontend calls.
+"""
+import asyncio
+import logging
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from opl_agent.ipc import Server  # noqa: E402
+
+
+class LogRouter:
+    def __init__(self):
+        self.seen = {}
+
+    async def handle(self, verb, path, payload):
+        key = f"{verb} {path}"
+        self.seen[key] = self.seen.get(key, 0) + 1
+        return os.environ.get("OPL_DEFAULT", "NOT_IMPLEMENTED"), None, ""
+
+
+async def main():
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s",
+                        filename=os.environ.get("OPL_LOG"), filemode="w")
+    srv = Server(LogRouter())
+    s = await srv.start()
+    async with s:
+        await s.serve_forever()
+
+
+asyncio.run(main())

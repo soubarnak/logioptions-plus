@@ -1,0 +1,12 @@
+# Give the logged-in user (and the input group) access to Logitech HID devices,
+# so the Options+ agent can speak HID++ over /dev/hidraw* and /dev/uinput.
+ACTION!="add|change", GOTO="optionsplus_end"
+
+# USB receivers (Unifying, Bolt, Lightspeed) and wired devices
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", MODE="0660", GROUP="input", TAG+="uaccess"
+# Bluetooth / BLE HID devices (vendor shows up in the HID id)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", MODE="0660", GROUP="input", TAG+="uaccess"
+# uinput for remapped buttons and gestures
+KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+LABEL="optionsplus_end"

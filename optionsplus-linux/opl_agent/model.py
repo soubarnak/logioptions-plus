@@ -1,0 +1,254 @@
+"""Device registry: turn live HID++ discovery into protocol payloads.
+
+Each physical HID++ endpoint (a device index behind a receiver, or a corded
+device) becomes one Device with an assigned id ``dev%08d``. The registry builds
+the proto-JSON the frontend expects for ``/devices/list``,
+``/devices/ever_connected/list``, ``/devices/<id>/info``, ``/battery/<id>/state``
+and the mouse DPI routes, straight from HID++ feature reads -- no vendor depot,
+string package or thumbnail is required for the device to appear and be
+configurable. When the Logitech catalogue and the device's depot are
+installed (see resources.py), Device.Info carries the catalogue identity and
+the UI loads the device images and metadata from that depot.
+"""
+
+import logging
+import time
+
+from . import hidpp, resources
+
+log = logging.getLogger("opl.model")
+
+TYPE = "type.googleapis.com/"
+
+# hidpp.get_device_type() string -> logi.protocol.devices.Device.Type name.
+HIDPP_TYPE = {
+    "keyboard": "KEYBOARD", "remote control": "REMOTE", "numpad": "NUMPAD",
+    "mouse": "MOUSE", "trackpad": "TOUCHPAD", "trackball": "TRACKBALL",
+    "presenter": "PRESENTER", "receiver": "RECEIVER", "headset": "HEADSET",
+    "webcam": "CAMERA", "steering wheel": "STEERING_WHEEL",
+}
+
+
+def _dtype(raw):
+    if isinstance(raw, str):
+        return HIDPP_TYPE.get(raw.lower(), "MOUSE")
+    return "MOUSE"
+
+# Connection enum names (logi.protocol.devices.Device.Interface.Connection).
+CONN_BOLT = "BLE_PRO"
+CONN_USB = "USB"
+
+
+class Device:
+    def __init__(self, dev_id, node, index, name, dtype, pid):
+        self.id = dev_id
+        self.node = node            # hidpp.HidppNode of the transport (receiver)
+        self.index = index          # HID++ device index (1..6, 0xFF corded)
+        self.name = name
+        self.dtype = dtype          # Device.Type enum name
+        self.pid = pid              # wireless PID (int) or node PID
+        self.connected = True
+        self.first_connected = int(time.time())
+        self.serial = ""
+        self.fw = ""
+        self.battery_cache = None    # last {percent, charging, status} from HID++
+        self.catalogue = resources.catalogue_entry(pid) or {}
+
+    @property
+    def model_hex(self):
+        return format(self.pid, "x") if self.pid else ""
+
+    @property
+    def model_id(self):
+        """Catalogue model id (e.g. "2b034"), else the bare PID hex."""
+        return self.catalogue.get("modelId") or self.model_hex
+
+    @property
+    def depot(self):
+        return self.catalogue.get("depot", "")
+
+    @property
+    def slot_prefix(self):
+        if self.catalogue.get("slotPrefix"):
+            return self.catalogue["slotPrefix"]
+        return "046d_" + self.model_hex if self.model_hex else self.id
+
+    def resources(self):
+        return resources.device_resources(self.depot, self.model_id)
+
+    # ---- payload builders -------------------------------------------------
+    def info(self):
+        """logi.protocol.devices.Device.Info for /devices/list and /devices/<id>/info."""
+        return {
+            "id": self.id,
+            "pid": self.pid,
+            "state": "ACTIVE" if self.connected else "ABSENT",
+            "connectionType": CONN_BOLT,
+            "hasWirelessInterface": True,
+            "deviceType": self.catalogue.get("type") or self.dtype,
+            "deviceModel": self.model_id,
+            "displayName": self.catalogue.get("displayName") or self.name,
+            "extendedDisplayName": self.catalogue.get("extendedDisplayName") or self.name,
+            "slotPrefix": self.slot_prefix,
+            "depot": self.depot,
+            "thumbnail": resources.resolve(self.catalogue.get("thumbnail", "")),
+            "supported": True,
+            "optionsDevice": False,      # True marks a legacy Logi Options device: UI shows NOT SUPPORTED
+            "connected": self.connected,
+            "isOwned": True,
+            "modelId": self.model_id,
+            "udid": self.serial,
+            "deviceSerialNumber": self.serial,
+            "firmwareVersion": self.fw,
+            "resourcesAvailable": resources.depot_installed(self.depot),
+            "fetchResource": False,
+            "firstConnectedTimestamp": str(self.first_connected),
+        }
+
+    def permanent(self):
+        """logi.protocol.devices.DevicePermanentData for /devices/ever_connected/list."""
+        return {
+            "deviceType": self.dtype,
+            "deviceModel": self.model_id,
+            "extendedModelId": 0,
+            "udid": self.serial or self.id,
+            "connectionType": CONN_BOLT,
+            # the real agent keeps the interface-id form here
+            "slotPrefix": "046d_" + self.model_hex if self.model_hex else self.id,
+            "firstConnectedTimestamp": str(self.first_connected),
+            "serialNumber": self.serial,
+        }
+
+
+class Registry:
+    """Owns open HID++ transports and the set of live devices."""
+
+    def __init__(self):
+        self.devices = {}          # id -> Device
+        self._fds = {}             # node.path -> fd
+        self._receivers = []
+
+    def _fd(self, node):
+        fd = self._fds.get(node.path)
+        if fd is None:
+            fd = hidpp.open_node(node.path)
+            self._fds[node.path] = fd
+        return fd
+
+    def scan(self):
+        """Discover receivers/devices and (re)build the device table."""
+        self.devices.clear()
+        n = 0
+        try:
+            nodes = hidpp.list_receivers_and_devices()
+        except Exception:
+            log.exception("HID++ discovery failed")
+            return
+        for node in nodes:
+            try:
+                fd = self._fd(node)
+            except OSError as exc:
+                log.warning("cannot open %s: %s", node.path, exc)
+                continue
+            bolt = getattr(node, "is_bolt", False)
+            if node.is_receiver:
+                found = hidpp.get_paired_devices(fd, bolt=bolt)
+            else:
+                # corded / directly-attached device at the fixed index 0xFF
+                try:
+                    proto = hidpp.root_ping(fd, 0xFF)
+                    found = [{"index": 0xFF, "protocol": proto, "wpid": None,
+                              "name": hidpp.get_device_name(fd, 0xFF),
+                              "type": hidpp.get_device_type(fd, 0xFF)}]
+                except hidpp.HidppError:
+                    found = []
+            for info in found:
+                idx = info["index"]
+                name = info.get("name") or "Logitech Device"
+                dtype = _dtype(info.get("type"))
+                wpid = info.get("wpid")
+                pid = int(wpid, 16) if isinstance(wpid, str) else (wpid or getattr(node, "pid", 0))
+                dev_id = "dev%08d" % n
+                n += 1
+                d = Device(dev_id, node, idx, name, dtype, pid)
+                try:
+                    d.fw = hidpp.get_fw_info(fd, idx) or ""
+                except Exception:
+                    pass
+                self.devices[dev_id] = d
+                try:
+                    self.refresh_battery(dev_id)
+                except Exception:
+                    pass
+                log.info("device %s: %s (%s) index=%d on %s", dev_id, name, dtype, idx, node.path)
+
+    # ---- per-device feature reads ----------------------------------------
+    def refresh_battery(self, dev_id):
+        """Blocking HID++ battery read; caches the result. Returns the cache dict."""
+        d = self.devices.get(dev_id)
+        if not d:
+            return None
+        fd = self._fds.get(d.node.path)
+        d.battery_cache = hidpp.get_battery(fd, d.index)
+        return d.battery_cache
+
+    def battery(self, dev_id):
+        """Payload for /battery/<id>/state, from cache (request path stays non-blocking)."""
+        d = self.devices.get(dev_id)
+        if not d:
+            return None, None
+        b = d.battery_cache or {}
+        pct = float(b.get("percent") or 0)
+        return {
+            "@type": TYPE + "logi.protocol.wireless.Battery",
+            "deviceId": dev_id,
+            "percentage": pct,
+            "charging": bool(b.get("charging")),
+            "criticalLevel": pct <= 15,
+            "level": _warn_level(pct),
+            "simpleBattery": b.get("percent") is None,
+        }, b
+
+    def battery_status_for_info(self, dev_id):
+        d = self.devices.get(dev_id)
+        if not d or not d.battery_cache:
+            return None
+        b = d.battery_cache
+        return {"stateOfCharge": int(b.get("percent") or 0),
+                "chargingStatus": "CHARGING" if b.get("charging") else "DISCHARGING"}
+
+    def dpi_state(self, dev_id):
+        d = self.devices.get(dev_id)
+        fd = self._fds.get(d.node.path)
+        dpi = hidpp.get_dpi(fd, d.index)
+        return {"@type": TYPE + "logi.protocol.mouse.Dpi.State", "deviceId": dev_id, "dpi": int(dpi)}
+
+    def dpi_table(self, dev_id):
+        d = self.devices.get(dev_id)
+        fd = self._fds.get(d.node.path)
+        info = hidpp.get_dpi_list(fd, d.index)   # expect {levels, default, current}
+        levels = info.get("levels") if isinstance(info, dict) else list(info or [])
+        return {"@type": TYPE + "logi.protocol.mouse.Dpi.Table",
+                "levels": [int(x) for x in levels],
+                "defaultDpi": int(info.get("default", 0)) if isinstance(info, dict) else 0,
+                "activeDpi": int(info.get("current", 0)) if isinstance(info, dict) else 0}
+
+    def set_dpi(self, dev_id, dpi):
+        d = self.devices.get(dev_id)
+        fd = self._fds.get(d.node.path)
+        hidpp.set_dpi(fd, d.index, int(dpi))
+
+    def close(self):
+        for fd in self._fds.values():
+            try:
+                hidpp.close_node(fd)
+            except OSError:
+                pass
+        self._fds.clear()
+
+
+def _warn_level(pct):
+    for name, thr in (("FULL", 100), ("GREAT", 90), ("GOOD", 50), ("LOW", 30), ("CRITICAL", 15)):
+        if pct >= thr:
+            return name
+    return "DEAD"

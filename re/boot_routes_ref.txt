@@ -1,0 +1,146 @@
+# verb path -> code  @type  (distilled from boot capture; reference only)
+GET  /permissions                                            SUCCESS        type.googleapis.com/logi.protocol.app_permissions.Permissions
+GET  /macros/device/predefined_ids                           SUCCESS        type.googleapis.com/logi.protocol.rap.Data
+GET  /macros/custom_categories/storage                       SUCCESS        type.googleapis.com/logi.protocol.macros_categories.CustomCategories
+GET  /macro_assignments/all                                  SUCCESS        type.googleapis.com/logi.protocol.profiles_v2.MacroAssignmentValCollection
+GET  /macros/presets                                         SUCCESS        type.googleapis.com/logi.protocol.rap.CardList
+GET  /webcams/in_configuration_devices                       SUCCESS        type.googleapis.com/logi.protocol.devices.InConfigurationDevices
+GET  /rightsight/status                                      SUCCESS        type.googleapis.com/logi.protocol.right_sight.Status
+GET  /device_recommendation_enabled                          SUCCESS        type.googleapis.com/logi.protocol.util.BoolValue
+GET  /beta_testing/features                                  NO_SUCH_PATH   
+GET  /configuration                                          SUCCESS        type.googleapis.com/logi.protocol.application.Configuration
+GET  /macros/predefined                                      SUCCESS        type.googleapis.com/logi.protocol.profiles_v2.MacroInfosCollection
+GET  /devices/list                                           SUCCESS        type.googleapis.com/logi.protocol.devices.Device.Info.List
+GET  /system/info                                            SUCCESS        type.googleapis.com/logi.protocol.api.system_info
+GET  /crash_reporting/status                                 SUCCESS        type.googleapis.com/logi.protocol.crash_reporting.Status
+GET  /integration/plugin/photoshop/uxp_plugin_exists         SUCCESS        type.googleapis.com/google.protobuf.BoolValue
+GET  /accounts/cn_idaas_status                               SUCCESS        type.googleapis.com/logi.protocol.accounts.CnIdaasStatus
+GET  /accounts/user_info                                     NOT_READY      
+GET  /accounts/email_subscription                            NOT_READY      
+GET  /accounts/email_subscription/is_opted_in                SUCCESS        type.googleapis.com/google.protobuf.BoolValue
+GET  /get_secure_input_app_name                              NO_SUCH_PATH   
+GET  /pipl/status                                            SUCCESS        type.googleapis.com/logi.protocol.pipl.ConsentStatus
+GET  /unified_profiles/activities                            INVALID_ARG    
+GET  /devices/ever_connected/list                            SUCCESS        type.googleapis.com/logi.protocol.devices.DevicePermanentDatas
+GET  /devices/support/info                                   SUCCESS        type.googleapis.com/logi.protocol.devices_support.Device.Support
+GET  /devices/10000000/easy_switch                           NO_SUCH_PATH   
+GET  /devices/10000001/easy_switch                           NO_SUCH_PATH   
+GET  /devices/dev00000000/easy_switch                        NO_SUCH_PATH   
+GET  /devices/dev00000001/easy_switch                        NO_SUCH_PATH   
+GET  /mouse/global/swap                                      SUCCESS        type.googleapis.com/logi.protocol.mouse.MouseButtonSwap
+GET  /v2/profiles                                            SUCCESS        type.googleapis.com/logi.protocol.profiles_v2.Profiles
+GET  /migration/reports                                      NOT_READY      type.googleapis.com/logi.protocol.migration.Report
+GET  /rac                                                    SUCCESS        type.googleapis.com/logi.protocol.rap.RACContainer
+SET  /configuration                                          SUCCESS        type.googleapis.com/logi.protocol.application.Configuration
+GET  /dfu/config/update                                      SUCCESS        type.googleapis.com/logi.protocol.dfu.UpdateCheckConfig
+GET  /api/v1/integrations                                    SUCCESS        type.googleapis.com/logi.protocol.integrations.Integrations
+GET  /options/devices/list                                   SUCCESS        type.googleapis.com/logi.protocol.devices_support.OptionsDevices
+GET  /logioptions/info                                       SUCCESS        type.googleapis.com/logi.protocol.logioptions.LogiOptionsInfo
+GET  /system/settings                                        SUCCESS        type.googleapis.com/logi.protocol.system_settings.SystemSettings
+GET  /backups/device/list                                    SUCCESS        type.googleapis.com/logi.protocol.settings_backup.BackupListResult
+GET  /star_rating/notification_pending                       SUCCESS        type.googleapis.com/google.protobuf.BoolValue
+GET  /lps/endpoint/info                                      SUCCESS        type.googleapis.com/logi.protocol.lps.Endpoint.Information
+GET  /lps/enable_notification                                SUCCESS        type.googleapis.com/google.protobuf.BoolValue
+SET  /scarif/event                                           SUCCESS        type.googleapis.com/logi.protocol.scarif.Event
+GET  /logging/optionsplus_backend/status                     SUCCESS        type.googleapis.com/logi.protocol.logging.Status
+GET  /scarif/status                                          SUCCESS        type.googleapis.com/logi.protocol.scarif.Status
+GET  /scarif/info                                            SUCCESS        type.googleapis.com/logi.protocol.scarif.Info
+GET  /battery/dev00000001/state                              NO_SUCH_PATH   
+
+# SUBSCRIBE paths:
+  /accounts/register_email_status
+  /accounts/user_info_refreshed
+  /api/v1/integration/plugin/installer/status
+  /api/v1/integrations
+  /applications
+  /applications/installed
+  /backups/device/status_backup
+  /backups/device/status_restore
+  /backups/macros/status_restore
+  /battery/state/changed
+  /configuration
+  /devices/devio/device_removal
+  /devices/easy_switch
+  /devices/fn_inversion/notify
+  /devices/options/device_arrival
+  /devices/options/device_removal
+  /devices/state/changed
+  /devices/state/easy_switch_cache_updated
+  /dfu/dev00000000/all_events
+  /dfu/dev00000000/info
+  /dfu/dev00000000/reboot_device
+  /dfu/dev00000000/update_progress
+  /dfu/dev00000000/update_result
+  /dfu/dev00000001/all_events
+  /dfu/dev00000001/info
+  /dfu/dev00000001/reboot_device
+  /dfu/dev00000001/update_progress
+  /dfu/dev00000001/update_result
+  /dfu/update/available
+  /flow/10000000/config_changed
+  /flow/10000000/device_location_changed
+  /flow/10000000/device_peer_status_changed
+  /flow/10000001/config_changed
+  /flow/10000001/device_location_changed
+  /flow/10000001/device_peer_status_changed
+  /flow/dev00000000/config_changed
+  /flow/dev00000000/device_location_changed
+  /flow/dev00000000/device_peer_status_changed
+  /flow/dev00000001/config_changed
+  /flow/dev00000001/device_location_changed
+  /flow/dev00000001/device_peer_status_changed
+  /haptics/undefined/status_changed
+  /illumination_light/10000000/color_range_changed
+  /illumination_light/10000001/color_range_changed
+  /illumination_light/dev00000000/color_range_changed
+  /illumination_light/dev00000001/color_range_changed
+  /lps/close_plugin_applications
+  /lps/endpoint/info_changed
+  /lps/install_plugin_from_marketplace
+  /lps/library_package_update_available
+  /lps/overlay_settings_changed
+  /lps/plugin_installation_finished
+  /lps/plugin_loaded
+  /lps/plugin_preference_changed
+  /lps/plugin_status_changed
+  /lps/plugin_unloaded
+  /lps/url_processing_finished
+  /lux_report/10000000/light_measurement/changed
+  /lux_report/10000001/light_measurement/changed
+  /lux_report/dev00000000/light_measurement/changed
+  /lux_report/dev00000001/light_measurement/changed
+  /macro_assignment/create
+  /macro_assignment/remove
+  /macro_assignment/update
+  /macro_assignments/create
+  /macro_assignments/update
+  /macro_infos/update
+  /macros/custom_categories/storage/update
+  /macros/device/predefined_ids
+  /macros/onboarding/ready
+  /macros/sequence/status
+  /migration/report_status
+  /mouse/global/swap
+  /offer/retrieve
+  /offer/revoke_all
+  /permissions
+  /radial_menu/overlay_scale_changed
+  /rap_v2/rac_arrived
+  /rightsight/status
+  /secure_input_enabled
+  /software_events/shortcut/register/allowed/status
+  /star_rating/trigger
+  /trigger_event
+  /unified_profiles/activities
+  /unified_profiles/activity/added
+  /unified_profiles/activity/removed
+  /unified_profiles/activity/updated
+  /unified_profiles/assignments
+  /updates/channel
+  /updates/periodic_check
+  /updates/status
+  /uvc/showmode/notification
+  /v2/profiles/device/assignment_sync_complete
+  /v2/profiles/integrations_restored
+  /v2/profiles/update
+  /webcams/in_configuration_devices_changed

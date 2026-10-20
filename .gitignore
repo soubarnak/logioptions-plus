@@ -1,0 +1,26 @@
+# Logitech payload: never committed, never redistributed.
+# Fetched on the user's machine from Logitech's URLs (see feature-parity.md §3.3).
+/logioptionsplus_installer*.exe
+*.exe
+*.dll
+*.depot
+*.asar
+offline.json
+re/captures/
+# Protobuf schema recovered from Logitech's agent binary; regenerate locally with
+# tools/protodump.py (opl_agent/schema_defaults.py holds only the field-name table).
+re/proto/
+re/protos/
+# Unpacked payload or scratch trees, if anyone drops them in the checkout
+/payload/
+/logitech/
+/depots/
+/app/
+
+__pycache__/
+*.pyc
+build/
+*.xbps
+*.sig2
+*-repodata
+.claude/settings.local.json
