@@ -168,6 +168,8 @@ class Agent:
         self._loop = loop
         self.reg.on_resumed.append(self._battery_after_resume)
         self.reg.on_pairing.append(self._announce_pairing)
+        self.reg.on_discovery.append(self._announce_discovery)
+        self.reg.on_locking.append(self._announce_locking)
         self._srv = await self.server.start()
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
         self._updates = asyncio.ensure_future(self.router.updater.run())
@@ -183,18 +185,36 @@ class Agent:
         self._loop.call_soon_threadsafe(push)
 
     def _announce_pairing(self, rcv_id, state, passkey, events):
-        """Registry hook (any thread): broadcast pairing progress and any device it added."""
+        """Registry hook (any thread): broadcast pairing progress, a passkey to show, and any
+        device the pairing added. `state` is None when only a passkey is shown."""
         def push():
             base = "/devices/%s/pair" % rcv_id
-            self.server.broadcast(base + "/changed", state)
+            if state is not None:
+                self.server.broadcast(base + "/changed", state)
             if passkey is not None:
+                receiver = self.reg.receivers.get(rcv_id)
                 self.server.broadcast(base + "/passkey/displayed", {
                     "@type": TYPE + "logi.protocol.devices.Receiver.PassKeyDisplay",
-                    "receiverId": rcv_id, "passkey": passkey})
+                    "receiverId": rcv_id, "passkey": passkey,
+                    "deviceAddress": receiver.address if receiver else ""})
             for dev_id in (events or {}).get("added", []) + (events or {}).get("returned", []):
                 if dev_id in self.reg.devices:
                     self.server.broadcast("/devices/state/changed", _device_info(self.reg, dev_id))
         self._loop.call_soon_threadsafe(push)
+
+    def _announce_discovery(self, rcv_id, status, advertise):
+        """Registry hook (any thread): discovery progress, and each advertising device."""
+        def push():
+            base = "/devices/%s/discovery" % rcv_id
+            self.server.broadcast(base + "/changed", status)
+            if advertise is not None:
+                self.server.broadcast(base + "/advertised", advertise)
+        self._loop.call_soon_threadsafe(push)
+
+    def _announce_locking(self, rcv_id, locking):
+        """Registry hook (any thread): the Unifying lock opened or closed."""
+        self._loop.call_soon_threadsafe(
+            lambda: self.server.broadcast("/devices/%s/locking/changed" % rcv_id, locking))
 
     def _request_restart(self):
         """Updater hook (event loop): let the launcher's waiting restart take over."""

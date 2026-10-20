@@ -12,6 +12,7 @@ sees GET/SET/REMOVE/OPTIONS.
 """
 
 import asyncio
+import functools
 import copy
 import json
 import logging
@@ -207,7 +208,15 @@ class Router:
         # 2. device-scoped routes
         parts = path.strip("/").split("/")
         if parts[0] == "devices" and len(parts) >= 3 and parts[2] == "pair" and parts[1] in self.reg.receivers:
-            return await self._pair_route(verb, parts[1], "/".join(parts[3:]))
+            return await self._pair_route(verb, parts[1], "/".join(parts[3:]), payload)
+        if parts[0] == "devices" and len(parts) >= 3 and parts[2] == "discovery" and parts[1] in self.reg.receivers:
+            return await self._discovery_route(verb, parts[1], "/".join(parts[3:]), payload)
+        if parts[0] == "devices" and len(parts) >= 3 and parts[2] == "locking" and parts[1] in self.reg.receivers \
+                and verb == "GET":
+            return "SUCCESS", self.reg.locking_state(self.reg.receivers[parts[1]]), ""
+        if parts[0] == "devices" and len(parts) >= 3 and parts[2] in ("pair", "discovery", "locking") \
+                and parts[1] not in self.reg.receivers:
+            return "NO_SUCH_PATH", None, ""
         if parts[:1] == ["devices"] and len(parts) in (3, 4) and parts[2] == "easy_switch" \
                 and parts[3:] in ([], ["change"]):
             return await self._easy_switch(verb, parts[1], payload)
@@ -231,23 +240,49 @@ class Router:
         return "NO_SUCH_PATH", None, ""
 
     # ---- receiver pairing -------------------------------------------------
-    async def _pair_route(self, verb, rcv_id, sub):
-        """/devices/<receiver>/pair: SET opens, GET reads, SET .../cancel cancels. A write
-        the receiver rejects is FAULTED and leaves the pairing state as it was."""
+    async def _pair_route(self, verb, rcv_id, sub, payload=None):
+        """/devices/<receiver>/pair: SET opens (payload may carry deviceAddress and
+        timeoutSeconds), GET reads, SET .../cancel cancels. A write the receiver rejects is
+        FAULTED and leaves the pairing state as it was."""
         loop = asyncio.get_event_loop()
+        payload = payload if isinstance(payload, dict) else {}
         if sub == "" and verb == "GET":
             return "SUCCESS", self.reg.receivers[rcv_id].pairing, ""
         if (sub, verb) == ("", "SET"):
-            fn = self.reg.open_pairing
+            kwargs = {"address": payload.get("deviceAddress") or None}
+            if payload.get("timeoutSeconds"):
+                kwargs["timeout"] = int(payload["timeoutSeconds"])
+            fn = functools.partial(self.reg.open_pairing, rcv_id, **kwargs)
         elif (sub, verb) == ("cancel", "SET"):
-            fn = self.reg.cancel_pairing
+            fn = functools.partial(self.reg.cancel_pairing, rcv_id)
         else:
             return "NO_SUCH_PATH", None, ""
         try:
-            return "SUCCESS", await loop.run_in_executor(None, fn, rcv_id), ""
+            return "SUCCESS", await loop.run_in_executor(None, fn), ""
         except Exception as exc:
             log.warning("pairing request on %s failed: %s", rcv_id, exc)
             return "FAULTED", None, "pairing request failed: %s" % exc
+
+    async def _discovery_route(self, verb, rcv_id, sub, payload):
+        """/devices/<receiver>/discovery: SET starts looking for advertising Bolt devices
+        (payload timeoutSeconds), GET .../status reads; SET .../cancel stops."""
+        loop = asyncio.get_event_loop()
+        r = self.reg.receivers[rcv_id]
+        if (sub, verb) == ("status", "GET"):
+            return "SUCCESS", self.reg.discovery_state(r), ""
+        if (sub, verb) == ("", "SET"):
+            timeout = int((payload or {}).get("timeoutSeconds") or 30)
+            fn = functools.partial(self.reg.open_discovery, rcv_id, timeout)
+        elif (sub, verb) == ("cancel", "SET"):
+            fn = functools.partial(self.reg.cancel_pairing, rcv_id)
+        else:
+            return "NO_SUCH_PATH", None, ""
+        try:
+            await loop.run_in_executor(None, fn)
+            return "SUCCESS", self.reg.discovery_state(r), ""
+        except Exception as exc:
+            log.warning("discovery request on %s failed: %s", rcv_id, exc)
+            return "FAULTED", None, "discovery request failed: %s" % exc
 
     # ---- profiles / pointer speed ---------------------------------------
     def _read_live(self):

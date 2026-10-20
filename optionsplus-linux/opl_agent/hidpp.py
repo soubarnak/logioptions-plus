@@ -70,7 +70,6 @@ N_DEVICE_DISCOVERY = 0x4F       # Bolt: a device advertises itself
 N_DISCOVERY_STATUS = 0x53       # Bolt: address 0 discovery running, else closed; data[0] error
 N_PAIRING_STATUS = 0x54         # Bolt: address 0 lock open, 2 paired (data[7] slot); data[0] error
 F_REPROG_CONTROLS = 0x1B04     # reprogrammable controls v4: divert buttons to software
-F_RECEIVER_PAIRING = 0x1817     # replaced by the Bolt registers below
 F_CHANGE_HOST = 0x1814
 F_HOSTS_INFO = 0x1815
 
@@ -1013,22 +1012,67 @@ def write_register(fd, idx, address, params=b"", timeout=DEFAULT_TIMEOUT):
 def unifying_lock(fd, open_, timeout=60):
     """Unifying receiver register 0xB2: [1 open | 2 close, device (0 = any), timeout seconds].
     Raises HidppError/HidppTimeout when the receiver does not accept the write."""
-    if not 0 < timeout <= 255:
+    if open_ and not 0 < timeout <= 255:
         raise ValueError("pairing timeout must be 1..255 seconds")
-    write_register(fd, DEV_RECEIVER, REG_RECEIVER_PAIRING, bytes([1 if open_ else 2, 0, timeout]))
+    write_register(fd, DEV_RECEIVER, REG_RECEIVER_PAIRING,
+                   bytes([1, 0, timeout]) if open_ else bytes([2, 0, 0]))
 
 
-def pairing_open(fd, feature_index, timeout=60):
-    """Receiver pairing feature (0x1817) fn0: open the pairing lock for `timeout` seconds.
-
-    Layout assumed from the ticket (open lock, status/passkey events); not yet
-    verified on hardware."""
-    call(fd, DEV_RECEIVER, feature_index, 0, bytes([timeout]))
+def write_long_register(fd, idx, address, params=b"", timeout=DEFAULT_TIMEOUT):
+    """HID++ 1.0 SET_LONG_REGISTER (sub id 0x82), sent as a long report. Registers
+    0x2xx (Solaar's numbering) have sub id 0x82/0x83 and the low byte as the address."""
+    return bytes(_transact(fd, idx, 0x82, address, params, True, timeout)[4:])
 
 
-def pairing_cancel(fd, feature_index):
-    """Receiver pairing feature (0x1817) fn1: close the pairing lock."""
-    call(fd, DEV_RECEIVER, feature_index, 1)
+BOLT_DISCOVER_START, BOLT_DISCOVER_CANCEL = 1, 2
+BOLT_PAIR, BOLT_PAIR_CANCEL, BOLT_UNPAIR = 1, 2, 3
+
+
+def bolt_discover(fd, timeout=30, cancel=False):
+    """Bolt register 0xC0 (short): [timeout seconds, 1 start | 2 cancel] device discovery.
+    Layout from Solaar's BoltReceiver.discover; the receiver then sends 0x53 and 0x4F."""
+    if not 0 < timeout <= 255:
+        raise ValueError("discovery timeout must be 1..255 seconds")
+    write_register(fd, DEV_RECEIVER, REG_BOLT_DISCOVERY & 0xFF,
+                   bytes([timeout, BOLT_DISCOVER_CANCEL if cancel else BOLT_DISCOVER_START]))
+
+
+def bolt_pair(fd, address, authentication=0, entropy=20, slot=0):
+    """Bolt register 0x2C1 (long): [1 pair, slot, device address (6), authentication,
+    entropy]. Layout from Solaar's BoltReceiver.pair_device; progress arrives as 0x54/0x4D."""
+    address = bytes(address)
+    if len(address) != 6:
+        raise ValueError("a Bolt device address has 6 bytes")
+    write_long_register(fd, DEV_RECEIVER, REG_BOLT_PAIRING & 0xFF,
+                        bytes([BOLT_PAIR, slot]) + address + bytes([authentication, entropy]))
+
+
+def bolt_pair_cancel(fd):
+    """Bolt register 0x2C1: action 2 stops a pairing in progress (Solaar's pair=None)."""
+    write_long_register(fd, DEV_RECEIVER, REG_BOLT_PAIRING & 0xFF, bytes([BOLT_PAIR_CANCEL]))
+
+
+def bolt_unique_id(fd):
+    """Bolt register 0x2FB (read, long): the receiver's unique id, or b"" when it has none."""
+    try:
+        return read_register(fd, DEV_RECEIVER, REG_BOLT_UNIQUE_ID & 0xFF)[:4]
+    except HidppError:
+        return b""
+
+
+BOLT_ERROR_TIMEOUT, BOLT_ERROR_FAILED = 1, 2
+
+
+def parse_device_discovery(address, data):
+    """0x4F notification -> (counter, part, fields): part 0 {kind, address, authentication},
+    part 1 {name}; None when the report is too short. Layout from Solaar."""
+    data = bytes(data).ljust(16, b"\0")
+    counter, part = address + data[0] * 256, data[1]
+    if part == 0:
+        return counter, 0, {"kind": data[3], "address": data[6:12], "authentication": data[14]}
+    if part == 1:
+        return counter, 1, {"name": data[3:3 + min(data[2], 13)].decode("utf-8", "replace")}
+    return None
 
 
 def _device_gone(err):

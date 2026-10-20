@@ -31,6 +31,11 @@ HIDPP_TYPE = {
 }
 
 
+# Bolt advertisement kind byte (Solaar's hidpp10 DEVICE_KIND; unconfirmed on hardware).
+BOLT_KINDS = {1: "keyboard", 2: "mouse", 3: "numpad", 4: "presenter", 7: "remote control",
+              8: "trackball", 9: "trackpad"}
+
+
 def _dtype(raw):
     if isinstance(raw, str):
         return HIDPP_TYPE.get(raw.lower(), "MOUSE")
@@ -177,17 +182,35 @@ class Device:
 
 
 class Receiver:
-    """A Unifying/Bolt receiver, surfaced as a Device.Info of type RECEIVER."""
+    """A Unifying/Bolt receiver, surfaced as a Device.Info of type RECEIVER.
+
+    One Receiver per hidraw node: two receivers of the same model are two Receivers.
+    `lock` guards every pairing transition and what goes with it (the state, the
+    watchdog, the slots seen when pairing began); the pairing code never holds it
+    across a wait for the Reader."""
 
     def __init__(self, rcv_id, node):
         self.id = rcv_id
         self.node = node
         self.pid = node.pid
         self.bolt = bool(getattr(node, "is_bolt", False))
+        self.serial = b""            # Bolt unique id (register 0x2FB); identifies it across a replug
         self.connected = True
-        self.pairing_index = None    # feature index of the pairing feature, None when absent
-        self.pairing = pairing_state(rcv_id, "IDLE" if self.bolt else "UNKNOWN_PAIRING_STATE")
-        self.pairing_lock = threading.Lock()   # guards `pairing` transitions (Unifying path)
+        self.lock = threading.RLock()
+        self.pairing = pairing_state(rcv_id, "UNKNOWN_PAIRING_STATE")
+        self.generation = 0          # counts pairing starts; a watchdog only ends the one it was set for
+        self.watchdog = None         # threading.Timer ending a pairing nobody reports on
+        self.closing = False         # we are closing the lock ourselves: its notification is no news
+        self.slots_before = set()    # device indexes on the node when pairing began
+        self.locked = False          # Unifying lock open, as the receiver last said
+        self.discovery = "UNKNOWN_STATE"    # Bolt discovery: START / STOP / CANCEL
+        self.phase = None            # Bolt: "discovery" or "pairing" while pairing is in progress
+        self.advertised = {}         # Bolt: device address (hex) -> {"payload", "authentication", "kind"}
+        self.candidate = None        # Bolt: the 0x4F device being assembled
+        self.counter = None          # Bolt: counter of the 0x4F notifications being followed
+        self.auto_pair = False       # pair the first advertised device without being told which
+        self.address = ""            # the device address being paired (hex), if known
+        self.timeout = 60            # seconds the lock or discovery was opened for
 
     @property
     def name(self):
@@ -216,18 +239,40 @@ class Receiver:
         }
 
 
-# Pairing state names. The UI enum values are not confirmed against a live agent log
-# (schema_defaults only names the UNKNOWN_* defaults): check them on hardware.
-PAIRING_STATES = ("IDLE", "STARTED", "PASSKEY_DISPLAYED", "PAIRED", "FAILED", "CANCELLED")
+# logi.protocol.devices.Receiver.PairingState.State and .Error names (devices.proto, from the
+# #18 review): the state is UNKNOWN_PAIRING_STATE, START, CANCEL or STOP; a finished pairing is
+# STOP with NO_PAIRING_ERROR (done), TIMEOUT, FAILED or DISCONNECTED. A passkey is not a state:
+# it goes out as Receiver.PassKeyDisplay.
+PAIRING_MARGIN = 5.0            # seconds past the lock's timeout before the watchdog gives up
+SETTLE_SECONDS, SETTLE_TRIES = 0.3, 4   # a paired device may take a moment to answer the receiver
 
 
-def pairing_state(rcv_id, state, error="NO_PAIRING_ERROR", slot=0, device=None):
+def pairing_state(rcv_id, state, error="NO_PAIRING_ERROR", slot=0, device=None, address=""):
     """logi.protocol.devices.Receiver.PairingState payload."""
     out = {"@type": TYPE + "logi.protocol.devices.Receiver.PairingState",
            "receiverId": rcv_id, "state": state, "error": error, "pairingSlot": slot}
+    if address:
+        out["deviceAddress"] = address
     if device is not None:
         out["pairedDevice"] = device
     return out
+
+
+def unifying_error(code):
+    """Receiver.Pairing error for a Unifying lock-closed error code (Solaar's PairingError:
+    1 device timeout, 2 device not supported, 3 too many devices, 6 sequence timeout)."""
+    return "TIMEOUT" if code in (0, 1, 6) else "FAILED"
+
+
+def bolt_error(code):
+    """Receiver.Pairing error for a Bolt error byte (1 device timeout, 2 failed)."""
+    return "TIMEOUT" if code in (0, hidpp.BOLT_ERROR_TIMEOUT) else "FAILED"
+
+
+def basic_info(d):
+    """logi.protocol.devices.Device.Info.Basic of a device."""
+    return {"id": d.id, "deviceType": d.dtype, "deviceModel": d.model_id,
+            "slotPrefix": d.slot_prefix, "pid": d.pid}
 
 
 class CoalescingJobs:
@@ -289,7 +334,10 @@ class Registry:
         self._next_receiver = 0
         self._probed_receivers = []
         self._scan_lock = threading.RLock()
-        self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change
+        self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change;
+                                   # state is None when only a passkey is shown
+        self.on_discovery = []     # callables(rcv_id, Discovery payload, Advertise payload or None)
+        self.on_locking = []       # callables(rcv_id, Locking payload): the Unifying lock opened or closed
         self._jobs = CoalescingJobs()   # work an event starts, off the Reader's dispatch thread
 
     def _fd(self, node):
@@ -357,31 +405,34 @@ class Registry:
         return out
 
     def _reconcile_receivers(self, force, events):
-        """Bring `receivers` in line with the receiver nodes the probe found."""
-        present = {n.pid: n for n in self._probed_receivers}
+        """Bring `receivers` in line with the receiver nodes the probe found.
+
+        A receiver is its hidraw node: two receivers of one model stay two. One that
+        comes back on another node is recognised by its unique id (Bolt), else by model."""
+        free = {n.path: n for n in self._probed_receivers}
         for rid, r in list(self.receivers.items()):
-            node = present.pop(r.pid, None)
+            node = free.pop(r.node.path, None)
             if node is None:
                 r.connected = False
+                self._receiver_gone(r)
                 self.absent_receivers[rid] = r
                 del self.receivers[rid]
                 events["receiver_removed"].append(r)
                 continue
-            if force or node.path != r.node.path:
-                r.node = node
+            r.node = node
+            if force:
                 self._setup_receiver(r)
-                if not force:
-                    events["receiver_added"].append(rid)
-        for rid, r in list(self.absent_receivers.items()):
-            node = present.pop(r.pid, None)
+        for rid, r in sorted(self.absent_receivers.items()):
+            node = self._returning_node(r, free)
             if node is None:
                 continue
+            del free[node.path]
             del self.absent_receivers[rid]
             r.node, r.connected = node, True
             self._setup_receiver(r)
             self.receivers[rid] = r
             events["receiver_added"].append(rid)
-        for node in present.values():
+        for node in free.values():
             rid = "rcv%08d" % self._next_receiver
             self._next_receiver += 1
             r = Receiver(rid, node)
@@ -390,12 +441,30 @@ class Registry:
             events["receiver_added"].append(rid)
         self.receivers = dict(sorted(self.receivers.items()))
 
-    def _setup_receiver(self, r):
+    def _returning_node(self, r, free):
+        """The node among `free` that receiver `r` came back on, or None."""
+        if r.node.path in free:
+            return free[r.node.path]
+        for node in free.values():
+            if node.pid != r.pid:
+                continue
+            serial = self._serial(node)
+            if not (r.serial and serial and r.serial != serial):
+                return node
+        return None
+
+    def _serial(self, node):
+        """Unique id of a Bolt receiver (register 0x2FB), b"" when it has none or does not answer."""
+        fd = self._fds.get(node.path)
+        if fd is None or not getattr(node, "is_bolt", False):
+            return b""
         try:
-            r.pairing_index = hidpp.feature_index(self._fds[r.node.path], hidpp.DEV_RECEIVER,
-                                                  hidpp.F_RECEIVER_PAIRING)
-        except Exception:
-            r.pairing_index = None
+            return hidpp.bolt_unique_id(fd)
+        except (hidpp.HidppError, OSError):
+            return b""
+
+    def _setup_receiver(self, r):
+        r.serial = self._serial(r.node)
 
     def _build(self, dev_id, node, info, previous=None):
         fd = self._fds[node.path]
@@ -522,10 +591,9 @@ class Registry:
             elif feature_index == hidpp.N_PAIRING_LOCK:
                 self._on_unifying_lock(node, function, params)
             else:
-                self._on_pairing_event(node, feature_index, function, params)
+                self._on_bolt_notification(node, feature_index, function, params)
             return
         if index == hidpp.DEV_RECEIVER:
-            self._on_pairing_event(node, feature_index, function, params)
             return
         for dev_id, d in list(self.devices.items()):
             if d.node.path != node.path or d.index != index:
@@ -596,136 +664,363 @@ class Registry:
         self._resume(d.id)
 
     # ---- receiver pairing ---------------------------------------------------
-    def open_pairing(self, rcv_id, timeout=60):
-        """Blocking: open the receiver's pairing lock. Raises when the write fails (the
-        state then stays as it was). Returns the pairing state."""
-        r = self.receivers[rcv_id]
-        if not r.bolt:
-            return self._unifying_open(r, timeout)
-        if r.pairing_index is None:
-            raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
-        hidpp.pairing_open(self._fds[r.node.path], r.pairing_index, timeout)
-        return self._set_pairing(r, pairing_state(r.id, "STARTED"))
+    #
+    # Unifying: register 0xB2 opens and closes the lock; the receiver says so with 0x4A.
+    # Bolt: register 0xC0 starts device discovery (0x53 status, 0x4F one notification pair per
+    # advertising device), then register 0x2C1 pairs the chosen address (0x54 status, 0x4D passkey).
+    # The register layouts and notification fields come from Solaar; none is confirmed on
+    # hardware yet. Every state change happens under Receiver.lock and is announced from there,
+    # so subscribers see the changes in the order they happened. Work that talks to the
+    # receiver (the rescan that finds the new device, the pair write after an advertisement)
+    # runs as a job, never on the Reader's dispatch thread.
+    PAIRING_FROM = frozenset({"UNKNOWN_PAIRING_STATE", "STOP", "CANCEL"})
 
-    def cancel_pairing(self, rcv_id):
-        """Blocking: close the pairing lock. Raises when the write fails."""
-        r = self.receivers[rcv_id]
-        if not r.bolt:
-            return self._unifying_cancel(r)
-        if r.pairing_index is None:
-            raise hidpp.FeatureNotSupported(hidpp.F_RECEIVER_PAIRING)
-        hidpp.pairing_cancel(self._fds[r.node.path], r.pairing_index)
-        return self._set_pairing(r, pairing_state(r.id, "CANCELLED"))
-
-    # ---- Unifying pairing (register 0xB2, PairingState START/CANCEL/STOP) -----
-    def _unifying_open(self, r, timeout):
-        """Blocking: open the Unifying lock. A write the receiver rejects raises and the
-        state stays as it was."""
-        hidpp.unifying_lock(self._fds[r.node.path], True, timeout)
-        return self._unifying_move(r, {None, "UNKNOWN_PAIRING_STATE", "IDLE", "STOP", "CANCEL"},
-                                   "START", wanted=True)
-
-    def _unifying_cancel(self, r):
-        """Blocking: close the Unifying lock. Raises when the write fails."""
-        hidpp.unifying_lock(self._fds[r.node.path], False)
-        return self._unifying_move(r, {"START"}, "CANCEL")
-
-    def _unifying_move(self, r, from_states, state, error="NO_PAIRING_ERROR", slot=0,
-                       device=None, events=None, wanted=False):
-        """Move the pairing state if it is in `from_states` (else keep it, no broadcast);
-        returns the state now held. `wanted` also accepts a START the receiver's own
-        notification already announced."""
-        with r.pairing_lock:
-            current = r.pairing["state"]
-            if current not in from_states and not (wanted and current == state):
-                return r.pairing
-            if current == state:
-                return r.pairing
-            new = pairing_state(r.id, state, error=error, slot=slot, device=device)
+    def _transition(self, r, state, from_states, error="NO_PAIRING_ERROR", slot=0, device=None,
+                    events=None):
+        """Move the pairing state if it is in `from_states` (else change nothing, announce
+        nothing); returns the new state, or None when it did not move."""
+        with r.lock:
+            if r.pairing["state"] not in from_states:
+                return None
+            new = pairing_state(r.id, state, error=error, slot=slot, device=device, address=r.address)
             r.pairing = new
-        self._announce_pairing(r, new, events)
-        return new
+            if state == "START":
+                self._arm(r)
+            else:
+                self._disarm(r)
+                r.phase = None
+            self._announce_pairing(r, new, None, events)
+            return new
 
-    def _announce_pairing(self, r, state, events=None):
-        for hook in list(self.on_pairing):
-            try:
-                hook(r.id, state, None, events)
-            except Exception:
-                log.exception("pairing hook failed for %s", r.id)
-
-    def _on_unifying_lock(self, node, address, params):
-        """Dispatch thread: 0x4A lock status (address bit0 = lock open, params[0] = error)."""
-        r = next((x for x in self.receivers.values() if x.node.path == node.path and not x.bolt), None)
-        if r is None:
-            return
-        if address & 0x01:
-            self._unifying_move(r, {None, "UNKNOWN_PAIRING_STATE", "IDLE", "STOP", "CANCEL"}, "START")
-            return
-        if r.pairing["state"] != "START":
-            return                                            # we closed it, or nobody opened it
-        error = params[0] if params else 0
-        # finish off the dispatch thread: it needs a rescan, which talks to the receiver
-        threading.Thread(target=self._unifying_finish, args=(r, error), daemon=True,
-                         name="unifying-pairing").start()
-
-    def _unifying_finish(self, r, error):
-        """The lock closed while pairing was open: a new device means success."""
-        try:
-            events = self.rescan()
-        except Exception:
-            log.exception("rescan after pairing on %s failed", r.id)
-            events = {"added": [], "returned": []}
-        new = [self.devices[i] for i in events.get("added", []) + events.get("returned", [])
-               if i in self.devices and self.devices[i].node.path == r.node.path]
-        if error:
-            log.warning("receiver %s: pairing error code %d", r.id, error)
-        if new and not error:
-            d = new[0]
-            basic = {"id": d.id, "deviceType": d.dtype, "deviceModel": d.model_id,
-                     "slotPrefix": d.slot_prefix, "pid": d.pid}
-            self._unifying_move(r, {"START"}, "STOP", slot=d.index, device=basic, events=events)
-            return
-        # PairingError: 1 device timeout, 2 too many devices, 3 sequence timeout
-        err = "TIMEOUT" if error in (0, 1, 3) else "FAILED"
-        self._unifying_move(r, {"START"}, "STOP", error=err, events=events)
-
-    def _set_pairing(self, r, state, passkey=None, events=None):
-        r.pairing = state
+    def _announce_pairing(self, r, state, passkey=None, events=None):
         for hook in list(self.on_pairing):
             try:
                 hook(r.id, state, passkey, events)
             except Exception:
                 log.exception("pairing hook failed for %s", r.id)
-        return state
 
-    def _on_pairing_event(self, node, feature_index, function, params):
-        """Reader thread: the receiver reported pairing progress."""
-        r = next((x for x in self.receivers.values()
-                  if x.node.path == node.path and x.pairing_index == feature_index), None)
+    def _announce_discovery(self, r, advertise=None):
+        payload = {"@type": TYPE + "logi.protocol.devices.Receiver.Discovery",
+                   "receiverId": r.id, "state": r.discovery, "timeoutSeconds": r.timeout}
+        for hook in list(self.on_discovery):
+            try:
+                hook(r.id, payload, advertise)
+            except Exception:
+                log.exception("discovery hook failed for %s", r.id)
+
+    def locking_state(self, r):
+        """logi.protocol.devices.Receiver.Locking: whether the Unifying lock is open (OPENED/CLOSED;
+        the names are from the #19 review)."""
+        return {"@type": TYPE + "logi.protocol.devices.Receiver.Locking",
+                "receiverId": r.id, "state": "OPENED" if r.locked else "CLOSED"}
+
+    def discovery_state(self, r):
+        return {"@type": TYPE + "logi.protocol.devices.Receiver.Discovery",
+                "receiverId": r.id, "state": r.discovery, "timeoutSeconds": r.timeout}
+
+    def _arm(self, r):
+        """Start the watchdog: a pairing nobody reports on ends as a timeout."""
+        with r.lock:
+            self._disarm(r)
+            r.generation += 1
+            timer = threading.Timer(r.timeout + PAIRING_MARGIN, self._expired, (r, r.generation))
+            timer.daemon = True
+            r.watchdog = timer
+            timer.start()
+
+    def _disarm(self, r):
+        with r.lock:
+            if r.watchdog is not None:
+                r.watchdog.cancel()
+                r.watchdog = None
+
+    def _expired(self, r, generation):
+        with r.lock:
+            if r.generation != generation or r.pairing["state"] != "START":
+                return
+            log.warning("receiver %s: no word on the pairing in time, giving up", r.id)
+            self._transition(r, "STOP", {"START"}, error="TIMEOUT")
+            if r.discovery == "START":
+                r.discovery = "STOP"
+                self._announce_discovery(r)
+
+    def _receiver_gone(self, r):
+        """The receiver left: a pairing in progress ends as disconnected."""
+        with r.lock:
+            self._transition(r, "STOP", {"START"}, error="DISCONNECTED")
+            self._disarm(r)
+            r.locked, r.closing, r.phase = False, False, None
+            if r.discovery == "START":
+                r.discovery = "STOP"
+
+    def _receiver_at(self, node, bolt):
+        return next((x for x in list(self.receivers.values())
+                     if x.node.path == node.path and x.bolt == bolt), None)
+
+    @staticmethod
+    def _address(address):
+        """6 bytes from a hex string (colons and dashes allowed); ValueError otherwise."""
+        if isinstance(address, (bytes, bytearray)):
+            raw = bytes(address)
+        else:
+            raw = bytes.fromhex(str(address).replace(":", "").replace("-", ""))
+        if len(raw) != 6:
+            raise ValueError("a Bolt device address has 6 bytes")
+        return raw
+
+    def _begin(self, r, timeout, address=""):
+        """Under no lock: reset what the last pairing left. Returns False when one is running."""
+        with r.lock:
+            if r.pairing["state"] == "START":
+                return False
+            r.closing = False
+            r.timeout = timeout
+            r.address = address
+            r.slots_before = {d.index for d in self.devices.values() if d.node.path == r.node.path}
+            r.advertised.clear()
+            r.candidate = None
+            return True
+
+    def open_pairing(self, rcv_id, timeout=60, address=None, authentication=None):
+        """Blocking: start pairing. A Unifying receiver opens its lock. A Bolt receiver pairs
+        `address` when given (hex string), else looks for advertising devices and pairs the
+        first one. A write the receiver rejects raises and leaves the state as it was.
+        Returns the pairing state."""
+        r = self.receivers[rcv_id]
+        if not 0 < timeout <= 255:
+            raise ValueError("pairing timeout must be 1..255 seconds")
+        raw = self._address(address) if address and r.bolt else None
+        if not self._begin(r, timeout, raw.hex() if raw else ""):
+            return r.pairing
+        fd = self._fds[r.node.path]
+        if not r.bolt:
+            hidpp.unifying_lock(fd, True, timeout)
+            r.phase = "pairing"
+        elif raw is not None:
+            self._bolt_pair(r, raw, authentication or 0, 2)
+        else:
+            hidpp.bolt_discover(fd, timeout)
+            with r.lock:
+                r.phase, r.auto_pair = "discovery", True
+                r.discovery = "START"
+                self._announce_discovery(r)
+        return self._transition(r, "START", self.PAIRING_FROM) or r.pairing
+
+    def open_discovery(self, rcv_id, timeout=30):
+        """Blocking: Bolt only. Look for advertising devices without pairing any; each one is
+        announced. Raises when the receiver cannot do that or rejects the write."""
+        r = self.receivers[rcv_id]
+        if not r.bolt:
+            raise hidpp.FeatureNotSupported(hidpp.REG_BOLT_DISCOVERY)
+        if not 0 < timeout <= 255:
+            raise ValueError("discovery timeout must be 1..255 seconds")
+        with r.lock:
+            if r.pairing["state"] == "START":
+                return self.discovery_state(r)
+            r.closing, r.timeout = False, timeout
+            r.advertised.clear()
+            r.candidate = None
+        hidpp.bolt_discover(self._fds[r.node.path], timeout)
+        with r.lock:
+            r.discovery, r.auto_pair = "START", False
+            self._announce_discovery(r)
+            return self.discovery_state(r)
+
+    def _bolt_pair(self, r, address, authentication, kind):
+        """Blocking: write the pair request for `address`. Marks the pairing phase first, so
+        the end of discovery that follows is not mistaken for a failure."""
+        with r.lock:
+            was = r.phase
+            r.phase, r.address = "pairing", address.hex()
+        try:
+            hidpp.bolt_pair(self._fds[r.node.path], address, authentication,
+                            entropy=20 if kind == 2 else 10)
+        except Exception:
+            with r.lock:
+                r.phase = was
+            raise
+
+    def cancel_pairing(self, rcv_id):
+        """Blocking: stop pairing (and discovery). Raises when the write fails. Does nothing,
+        announces nothing, when no pairing or discovery is in progress."""
+        r = self.receivers[rcv_id]
+        with r.lock:
+            pairing = r.pairing["state"] == "START"
+            if not pairing and r.discovery != "START":
+                return r.pairing
+            phase = r.phase
+            r.closing = True            # the receiver's own "closed" notification is no news
+        fd = self._fds[r.node.path]
+        try:
+            if not r.bolt:
+                hidpp.unifying_lock(fd, False)
+            elif phase == "pairing":
+                hidpp.bolt_pair_cancel(fd)
+            else:
+                hidpp.bolt_discover(fd, 1, cancel=True)
+        except Exception:
+            with r.lock:
+                r.closing = False
+            raise
+        with r.lock:
+            if r.discovery == "START":
+                r.discovery = "CANCEL"
+                self._announce_discovery(r)
+            return self._transition(r, "CANCEL", {"START"}) or r.pairing
+
+    # ---- Unifying notifications ---------------------------------------------
+    def _on_unifying_lock(self, node, address, params):
+        """Dispatch thread: 0x4A lock status (address bit0 = lock open, params[0] = error)."""
+        r = self._receiver_at(node, bolt=False)
         if r is None:
             return
-        if function == 1:                                  # passkey to show the user
-            digits = bytes(params).rstrip(b"\0").decode("ascii", "replace")
-            self._set_pairing(r, pairing_state(r.id, "PASSKEY_DISPLAYED"), passkey=digits)
-            return
-        if function != 0 or len(params) < 3:
-            return
-        status, error, slot = params[0], params[1], params[2]
-        if status == 1:
-            self._set_pairing(r, pairing_state(r.id, "STARTED"))
-        elif status == 0:
-            if r.pairing["state"] in ("STARTED", "PASSKEY_DISPLAYED"):
-                self._set_pairing(r, pairing_state(r.id, "CANCELLED"))
-        elif status == 2:
+        code = params[0] if params else 0
+        with r.lock:
+            r.locked = bool(address & 0x01)
+            for hook in list(self.on_locking):
+                try:
+                    hook(r.id, self.locking_state(r))
+                except Exception:
+                    log.exception("locking hook failed for %s", r.id)
+            if r.locked:
+                r.closing = False
+                if r.pairing["state"] != "START":       # opened by another tool, or by us a moment ago
+                    r.phase = "pairing"
+                    if not r.slots_before:
+                        r.slots_before = {d.index for d in self.devices.values() if d.node.path == r.node.path}
+                    self._transition(r, "START", self.PAIRING_FROM)
+                return
+            if r.closing or r.pairing["state"] != "START":
+                return                                  # we closed it, or nobody opened it
+            generation = r.generation
+        self._jobs.post(("pairing", r.id), lambda: self._unifying_finish(r, code, generation))
+
+    def _joined(self, r, slot=None):
+        """Devices on the receiver's node that were not there when pairing began (or at `slot`)."""
+        return [d for d in list(self.devices.values()) if d.node.path == r.node.path
+                and (d.index == slot if slot else d.index not in r.slots_before)]
+
+    def _settle(self, r, slot=None, tries=SETTLE_TRIES):
+        """Job: rescan until the paired device shows up. -> (devices, rescan events)."""
+        new, events = [], None
+        for attempt in range(max(tries, 1)):
             events = self.rescan()
-            dev = next((d for d in self.devices.values()
-                        if d.node.path == r.node.path and d.index == slot), None)
-            basic = None if dev is None else {"id": dev.id, "displayName": dev.name,
-                                              "deviceType": dev.dtype, "pid": dev.pid}
-            self._set_pairing(r, pairing_state(r.id, "PAIRED", slot=slot, device=basic), events=events)
-        elif status == 3:
-            log.warning("receiver %s: pairing failed, code %d", r.id, error)
-            self._set_pairing(r, pairing_state(r.id, "FAILED", error="UNKNOWN_PAIRING_ERROR"))
+            new = self._joined(r, slot)
+            if new or attempt == tries - 1:
+                break
+            time.sleep(SETTLE_SECONDS)
+        return new, events
+
+    def _unifying_finish(self, r, code, generation):
+        """Job: the lock closed while pairing was open. A device that was not there when
+        pairing began, and no error code, means success (it does not matter which rescan
+        found the device first)."""
+        new, events = self._settle(r, tries=1 if code else SETTLE_TRIES)
+        if code:
+            log.warning("receiver %s: pairing ended with code %d", r.id, code)
+        with r.lock:
+            if r.generation != generation or r.closing or r.pairing["state"] != "START":
+                return
+            if new and not code:
+                d = new[0]
+                self._transition(r, "STOP", {"START"}, slot=d.index, device=basic_info(d), events=events)
+            else:
+                self._transition(r, "STOP", {"START"}, error=unifying_error(code), events=events)
+
+    # ---- Bolt notifications -------------------------------------------------
+    def _on_bolt_notification(self, node, sub_id, address, data):
+        """Dispatch thread: 0x53 discovery status, 0x4F advertising device, 0x54 pairing
+        status, 0x4D passkey. Only state changes here; anything that talks to the receiver
+        is posted as a job."""
+        r = self._receiver_at(node, bolt=True)
+        if r is None:
+            return
+        data = bytes(data)
+        if sub_id == hidpp.N_DISCOVERY_STATUS:
+            self._on_discovery_status(r, address, data[0] if data else 0)
+        elif sub_id == hidpp.N_DEVICE_DISCOVERY:
+            self._on_advertised(r, address, data)
+        elif sub_id == hidpp.N_PAIRING_STATUS:
+            self._on_bolt_pairing_status(r, address, data)
+        elif sub_id == hidpp.N_PASSKEY_REQUEST:
+            digits = data[:6].decode("ascii", "replace")
+            with r.lock:
+                self._announce_pairing(r, None, digits)
+
+    def _on_discovery_status(self, r, address, code):
+        with r.lock:
+            if r.closing:
+                return
+            if address == 0:                            # discovery is running
+                r.discovery, r.candidate = "START", None
+                self._announce_discovery(r)
+                return
+            r.discovery = "STOP"
+            self._announce_discovery(r)
+            if r.phase == "discovery":                  # it ended without a device being paired
+                self._transition(r, "STOP", {"START"}, error=bolt_error(code))
+
+    def _on_advertised(self, r, address, data):
+        parsed = hidpp.parse_device_discovery(address, data)
+        if parsed is None:
+            return
+        counter, part, fields = parsed
+        with r.lock:
+            if part == 0:
+                r.candidate = (counter, fields)
+                return
+            if r.candidate is None or r.candidate[0] != counter:
+                return
+            first = r.candidate[1]
+            r.candidate = None
+            raw = first["address"]
+            kind = _dtype(BOLT_KINDS.get(first["kind"], ""))
+            advertise = {"@type": TYPE + "logi.protocol.devices.Receiver.Advertise",
+                         "receiverId": r.id, "deviceAddress": raw.hex(), "name": fields["name"],
+                         "deviceType": kind}
+            r.advertised[raw.hex()] = {"authentication": first["authentication"], "kind": first["kind"]}
+            self._announce_discovery(r, advertise)
+            auto = r.auto_pair and r.pairing["state"] == "START" and r.phase == "discovery"
+            if auto:
+                r.auto_pair = False
+        if auto:
+            self._jobs.post(("pair", r.id), lambda: self._pair_advertised(r, raw, first))
+
+    def _pair_advertised(self, r, raw, first):
+        """Job: pair the first device that advertised itself."""
+        with r.lock:
+            if r.closing or r.pairing["state"] != "START":
+                return
+        try:
+            self._bolt_pair(r, raw, first["authentication"], first["kind"])
+        except Exception as exc:
+            log.warning("receiver %s: pairing %s failed: %s", r.id, raw.hex(), exc)
+            self._transition(r, "STOP", {"START"}, error="FAILED")
+
+    def _on_bolt_pairing_status(self, r, address, data):
+        code = data[0] if data else 0
+        slot = data[7] if len(data) > 7 else 0
+        with r.lock:
+            if r.closing or r.pairing["state"] != "START":
+                return
+            if code:
+                log.warning("receiver %s: pairing error %d", r.id, code)
+                self._transition(r, "STOP", {"START"}, error=bolt_error(code))
+            elif address == 2:                          # paired, in `slot`
+                generation = r.generation
+                self._jobs.post(("pairing", r.id), lambda: self._bolt_finish(r, slot, generation))
+
+    def _bolt_finish(self, r, slot, generation):
+        """Job: the receiver says a device paired in `slot`; find it."""
+        new, events = self._settle(r, slot=slot)
+        with r.lock:
+            if r.generation != generation or r.closing or r.pairing["state"] != "START":
+                return
+            if new:
+                self._transition(r, "STOP", {"START"}, slot=slot, device=basic_info(new[0]), events=events)
+            else:
+                log.warning("receiver %s: device in slot %d did not show up", r.id, slot)
+                self._transition(r, "STOP", {"START"}, error="FAILED", slot=slot, events=events)
 
     # ---- per-device feature reads ----------------------------------------
     def refresh_battery(self, dev_id):
@@ -923,6 +1218,8 @@ class Registry:
 
     def close(self):
         self._jobs.close()
+        for r in list(self.receivers.values()) + list(self.absent_receivers.values()):
+            self._disarm(r)
         for fd in self._fds.values():
             try:
                 hidpp.close_node(fd)

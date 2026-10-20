@@ -1,11 +1,14 @@
 """Unifying receiver pairing (ticket #19): register 0xB2 behind the same routes and
 broadcasts as Bolt, driven through the simulated Unifying receiver."""
 
+import threading
 import time
 
 import pytest
 
-from tests.fakes.hidpp_device import SimulatedUnifying
+from opl_agent import model
+from tests.fakes.hidpp_device import (F_WAKE, LOCK_DEVICE_TIMEOUT, LOCK_NOT_SUPPORTED, LOCK_SEQUENCE_TIMEOUT,
+                                      LOCK_TOO_MANY_DEVICES, SimulatedUnifying)
 from tests.test_battery import next_push
 from tests.test_pairing import request
 
@@ -119,18 +122,14 @@ def test_a_device_pairing_completes_and_appears(unifying, pairing):
     assert [d["id"] for d in infos(pairing)] == [MOUSE, NEW_MOUSE, RCV]
 
 
-def test_too_many_devices_stops_pairing_as_failed(unifying, pairing):
+@pytest.mark.parametrize("code,error", [
+    (LOCK_DEVICE_TIMEOUT, "TIMEOUT"), (LOCK_NOT_SUPPORTED, "FAILED"),
+    (LOCK_TOO_MANY_DEVICES, "FAILED"), (LOCK_SEQUENCE_TIMEOUT, "TIMEOUT")])
+def test_the_receivers_error_code_decides_how_pairing_stops(unifying, pairing, code, error):
     pairing.call("SET", PAIR)
-    unifying.emit_lock_status(open_=False, error=2)
-    failed = until_state(pairing, "STOP")
-    assert failed["error"] == "FAILED"
+    unifying.emit_lock_status(open_=False, error=code)
+    assert until_state(pairing, "STOP")["error"] == error
     assert [d["id"] for d in infos(pairing)] == [MOUSE, RCV]
-
-
-def test_a_device_timeout_stops_pairing_as_timed_out(unifying, pairing):
-    pairing.call("SET", PAIR)
-    unifying.emit_lock_status(open_=False, error=1)
-    assert until_state(pairing, "STOP")["error"] == "TIMEOUT"
 
 
 def test_the_lock_closing_without_a_new_device_times_pairing_out(unifying, pairing):
@@ -142,7 +141,7 @@ def test_the_lock_closing_without_a_new_device_times_pairing_out(unifying, pairi
 
 def test_opening_the_lock_does_not_announce_start_twice(unifying, pairing):
     _, seen = send(pairing, "SET", PAIR)              # the receiver also confirms the open itself
-    unifying.emit_lock_status(open_=False, error=1)
+    unifying.emit_lock_status(open_=False, error=LOCK_DEVICE_TIMEOUT)
     states = seen
     while "STOP" not in states:
         states.append(next_push(pairing, CHANGED)["state"])
@@ -153,6 +152,115 @@ def test_cancelling_is_not_followed_by_a_timeout(unifying, pairing):
     pairing.call("SET", PAIR)
     _, seen = send(pairing, "SET", PAIR + "/cancel")
     assert "CANCEL" in seen or until_state(pairing, "CANCEL")
+    pairing.subscribe("/battery/dev00000000/state/changed")
     unifying.emit_lock_status(open_=False)            # the receiver confirming the close
-    time.sleep(0.4)
+    unifying.emit_event(F_WAKE)                       # handled after it, on the same thread, in order
+    while True:
+        m = pairing.recv()
+        if m.get("path") == "/battery/dev00000000/state/changed" and m.get("verb") == "BROADCAST":
+            break
     assert status(pairing)["state"] == "CANCEL"
+
+
+def test_the_close_notification_may_beat_the_cancel_reply_without_changing_the_outcome(unifying, pairing):
+    unifying.notify_before_reply = True               # the receiver says "closed", then answers the write
+    for _ in range(15):
+        assert pairing.call("SET", PAIR)["result"]["code"] == "SUCCESS"
+        assert pairing.call("SET", PAIR + "/cancel")["result"]["code"] == "SUCCESS"
+        assert status(pairing)["state"] == "CANCEL"
+
+
+def test_cancel_closes_the_lock_without_a_timeout_of_its_own(unifying, pairing):
+    pairing.call("SET", PAIR)
+    pairing.call("SET", PAIR + "/cancel")
+    assert pairing_writes(unifying)[-1][4:7] == bytes([0x02, 0x00, 0x00])
+
+
+def test_the_locking_routes_follow_the_lock(unifying, pairing):
+    locking = "/devices/%s/locking" % RCV
+    pairing.subscribe(locking + "/changed")
+    assert pairing.call("GET", locking + "/status")["payload"]["state"] == "CLOSED"
+    _, pushes = request(pairing, "SET", PAIR)         # the open may be announced before the reply
+    seen = [p["payload"] for p in pushes if p["path"] == locking + "/changed"]
+    seen = seen[-1] if seen else next_push(pairing, locking + "/changed")
+    while seen["state"] != "OPENED":
+        seen = next_push(pairing, locking + "/changed")
+    assert pairing.call("GET", locking + "/status")["payload"]["state"] == "OPENED"
+    assert seen["receiverId"] == RCV
+
+
+# ---- registry level: races that tests used to hide behind sleeps -------------------------
+
+@pytest.fixture
+def reg(unifying):
+    r = model.Registry(transport=unifying)
+    r.scan()
+    yield r
+    r.close()
+
+
+def wait_for(cond, timeout=5):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+def test_a_device_the_periodic_rescan_found_first_still_counts_as_the_one_paired(unifying, reg):
+    seen = []
+    reg.on_pairing.append(lambda rid, state, passkey, events: seen.append(state))
+    reg.open_pairing(RCV)
+    index = unifying.add_device("Second Mouse Z2", 0x4343)
+    reg.rescan()                                      # the watcher gets there before the lock closes
+    assert NEW_MOUSE in reg.devices
+    unifying.emit_lock_status(open_=False)
+    assert wait_for(lambda: seen and seen[-1]["state"] == "STOP")
+    assert seen[-1]["error"] == "NO_PAIRING_ERROR" and seen[-1]["pairingSlot"] == index
+    assert seen[-1]["pairedDevice"]["id"] == NEW_MOUSE
+
+
+def test_a_lock_that_never_reports_back_times_out(unifying, reg, monkeypatch):
+    monkeypatch.setattr(model, "PAIRING_MARGIN", 0.1)
+    reg.open_pairing(RCV, timeout=1)
+    assert wait_for(lambda: reg.receivers[RCV].pairing["state"] == "STOP")
+    assert reg.receivers[RCV].pairing["error"] == "TIMEOUT"
+
+
+def test_unplugging_mid_pairing_stops_it_as_disconnected(unifying, reg):
+    reg.open_pairing(RCV, timeout=30)
+    unifying.unplug()
+    reg.rescan()
+    assert reg.absent_receivers[RCV].pairing["state"] == "STOP"
+    assert reg.absent_receivers[RCV].pairing["error"] == "DISCONNECTED"
+
+
+def test_pairing_can_be_started_again_after_it_ended(unifying, reg):
+    reg.open_pairing(RCV)
+    unifying.emit_lock_status(open_=False, error=LOCK_DEVICE_TIMEOUT)
+    assert wait_for(lambda: reg.receivers[RCV].pairing["state"] == "STOP")
+    assert reg.open_pairing(RCV)["state"] == "START"
+
+
+def test_the_finish_does_not_run_on_the_dispatch_thread(unifying, reg, monkeypatch):
+    gate, entered = threading.Event(), threading.Event()
+    real = reg.rescan
+
+    def slow(force=False):
+        entered.set()
+        gate.wait(10)
+        return real(force)
+
+    buttons = []
+    reg.on_button_event.append(lambda dev_id, fn, params: buttons.append(dev_id))
+    reg.set_divert(MOUSE, 82, True)
+    reg.open_pairing(RCV)
+    monkeypatch.setattr(reg, "rescan", slow)
+    try:
+        unifying.complete_pairing()
+        assert entered.wait(2)
+        unifying.press_button(82)
+        assert wait_for(lambda: buttons, timeout=2)
+    finally:
+        gate.set()
