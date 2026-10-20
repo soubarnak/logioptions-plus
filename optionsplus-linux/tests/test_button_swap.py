@@ -298,3 +298,34 @@ def test_with_no_mouse_connected_the_choice_is_kept_for_when_one_connects(bolt, 
 
 def test_swapping_back_when_nothing_is_swapped_is_not_an_error(client):
     assert swap(client, "LEFT")["result"]["code"] == "SUCCESS"
+
+
+# ---- feedback on a refusal (the UI shows nothing of the reply) ------------------------------
+
+def test_a_refused_swap_snaps_the_toggle_back_and_says_why(agent_factory, monkeypatch):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    runner = FakeRunner(installed={"notify-send"})
+    running = agent_factory(runner=runner)
+    client = running.client()
+    watcher = running.client()
+    try:
+        watcher.subscribe("/mouse/global/swap")
+        reply = swap(client, "RIGHT")
+        assert reply["result"]["code"] == "NOT_SUPPORTED"
+        push = watcher.recv()
+        assert push["path"] == "/mouse/global/swap" and push["verb"] == "BROADCAST"
+        assert push["payload"]["state"] == "LEFT"
+        (argv,) = runner.launched
+        assert argv[0] == "notify-send" and reply["result"]["what"] in argv
+    finally:
+        watcher.close()
+        client.close()
+
+
+def test_a_refused_swap_without_notify_send_still_answers(agent_factory, monkeypatch):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    runner = FakeRunner()
+    client = agent_factory(runner=runner).client()
+    assert swap(client, "RIGHT")["result"]["code"] == "NOT_SUPPORTED"
+    assert runner.launched == []
+    client.close()

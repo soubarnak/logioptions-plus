@@ -39,6 +39,10 @@ def hermetic(monkeypatch):
         raise AssertionError("test touched the real /dev/uinput")
     monkeypatch.setattr(real_uinput, "open_default", no_uinput)
     monkeypatch.setattr(real_uinput.OsBackend, "open", no_uinput)
+    from opl_agent import runner as real_runner
+
+    # a test that lets the agent use the real runner must not start desktop tools (notify-send ...)
+    monkeypatch.setattr(real_runner.SubprocessRunner, "run", lambda _self, argv: None)
     for var in ("DISPLAY", "WAYLAND_DISPLAY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("OPL_REPLAY", raising=False)

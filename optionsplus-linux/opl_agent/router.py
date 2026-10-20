@@ -467,12 +467,26 @@ class Router:
             try:
                 await asyncio.get_running_loop().run_in_executor(None, self.button_swap.set, wanted)
             except swap.SwapUnsupported as exc:
+                # the UI ignores the reply text and leaves the toggle where the user put it:
+                # push the real state back and say why on the desktop
+                self._broadcast_swap()
+                self._notify("Cannot swap the mouse buttons", str(exc))
                 return "NOT_SUPPORTED", None, str(exc)
             except Exception as exc:
                 log.warning("swapping the buttons failed: %s", exc)
                 return "FAULTED", None, "could not swap the buttons: %s" % exc
         return "SUCCESS", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
                            "state": self.button_swap.state}, ""
+
+    def _broadcast_swap(self):
+        if self.server is not None:
+            self.server.broadcast("/mouse/global/swap", {"@type": TYPE + "logi.protocol.mouse.MouseButtonSwap",
+                                                         "state": self.button_swap.state})
+
+    def _notify(self, summary, body):
+        """A desktop notification, when notify-send is installed; never an error."""
+        if self.runner.which("notify-send"):
+            self.runner.run(["notify-send", "--app-name=Options+", summary, body])
 
     async def _app_for(self, profile_id):
         """The installed application a non-default profile id is for, else "" (a stale or made-up id)."""
