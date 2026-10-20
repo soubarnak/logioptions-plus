@@ -1,0 +1,2 @@
+site="https://github.com/soubarnak/logioptions-plus/releases/latest"
+pattern="(?<=releases/tag/optionsplus-linux-v)[\d.]+"

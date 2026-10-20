@@ -1,0 +1,93 @@
+# Push a tag named optionsplus-linux-vX.Y.Z (X.Y.Z must equal __version__ in optionsplus-linux/opl_agent/__init__.py).
+# The workflow runs the tests, builds the .xbps, checks its contents against the allow-list, signs an
+# XBPS repository for every supported architecture and attaches it, with the package, to the GitHub
+# release (xbps reads it from releases/latest/download). Then it commits a bump of version and
+# checksum in srcpkgs/optionsplus-linux/template and the package name in the README to main.
+# No step fetches anything from a vendor server.
+name: release
+
+on:
+  push:
+    tags: ["optionsplus-linux-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: ghcr.io/void-linux/void-glibc:latest
+    steps:
+      - name: Install build tools
+        run: |
+          xbps-install -Syu xbps
+          xbps-install -Sy python3 python3-pytest python3-yaml nodejs bash openssl tar zstd git shadow github-cli
+      - uses: actions/checkout@v4
+      - name: Check tag against version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version=$(tools/release-check-tag.sh "$GITHUB_REF_NAME")
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - name: Test
+        run: |
+          # The tests assume a normal user, so run them as one.
+          useradd -m builder
+          mkdir -p "$RUNNER_TEMP/repo"
+          chown -R builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/repo"
+          su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && optionsplus-linux/dev/test.sh"
+      - name: Build and check contents
+        run: |
+          # build-xbps.sh fails on any file outside the contents allow-list, so nothing is
+          # signed or published after a violation.
+          su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && OPL_BUILD_DIR='$RUNNER_TEMP/repo' tools/build-xbps.sh"
+      - name: Sign repository
+        env:
+          XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
+        run: |
+          [ -n "$XBPS_PRIVKEY" ] || { echo "secret XBPS_PRIVKEY is not set; refusing to publish an unsigned release" >&2; exit 1; }
+          out="$RUNNER_TEMP/assets"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP/repo/optionsplus-linux-${VERSION}_1.noarch.xbps" "$out/"
+          key="$RUNNER_TEMP/privkey.pem"
+          umask 077
+          printf '%s\n' "$XBPS_PRIVKEY" > "$key"
+          umask 022
+          trap 'rm -f "$key"' EXIT
+          tools/sign-repo.sh "$out" "optionsplus-linux-${VERSION}_1.noarch.xbps" "$key"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Add the repository once, then install and update like any other package:
+
+          \`\`\`sh
+          echo 'repository=https://github.com/${GITHUB_REPOSITORY}/releases/latest/download' | sudo tee /etc/xbps.d/20-optionsplus-linux.conf
+          sudo xbps-install -S optionsplus-linux
+          \`\`\`
+
+          Later updates arrive with \`sudo xbps-install -Su\`. The first sync asks you to accept the
+          repository key. Check that the fingerprint matches the README before you accept.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --title "Options+ for Linux ${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes \
+            "$RUNNER_TEMP"/assets/*
+
+  template:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Bump template and README
+        run: |
+          version=${GITHUB_REF_NAME#optionsplus-linux-v}
+          sum=$(curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" | sha256sum | cut -d' ' -f1)
+          tools/bump-template.sh "$version" "$sum"
+          if git diff --quiet; then echo "template already current"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Template and README: optionsplus-linux ${version}"
+          git push origin HEAD:main
