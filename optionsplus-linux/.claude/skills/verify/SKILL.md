@@ -23,7 +23,7 @@ OPL_ASAR=... OPL_DATA_DIR=... OPL_DEPOT_DIR=... OPL_SHOT=/some/dir/shot.png dev/
 ```
 
 - A fresh `mktemp` state dir is used unless `OPL_STATE_DIR` is set. A fresh dir exercises first run.
-- Logs: `agent.log` (every IPC frame and HID++ tx/rx), `ui.log`, `pids`, all next to `OPL_SHOT`.
+- Logs: `agent.log` (every IPC frame, in full because `live.sh` sets `OPL_IPC_LOG_FULL=1`, and HID++ tx/rx), `ui.log`, `pids`, all next to `OPL_SHOT`.
 - Stop it with `kill $UI` from `pids`. The agent exits with the UI.
 
 ## Drive (from dev/verify, with OPL_SHOT exported)
@@ -40,12 +40,13 @@ OPL_ASAR=... OPL_DATA_DIR=... OPL_DEPOT_DIR=... OPL_SHOT=/some/dir/shot.png dev/
 
 - Home card: `#device-list-device-item-anchor-image`. Device page tabs: BUTTONS, POINT AND SCROLL, SETTINGS.
 - Hotspots: `#button-body-title-c82|c83|c86|c195|c196|thumb_wheel_adapter|mouse_settings`.
-- Pointer speed: click the track in the side panel, then read the mouse's DPI with
-  `hidpp.get_dpi(hidpp.open_node('/dev/hidrawN'), idx)` to check that it reached the hardware.
+- Pointer speed: click the track in the side panel, then run `dev/verify/readback.py` to read
+  the mouse's own state (DPI, SmartShift, wheel, thumb wheel, controls, hosts). Run it first as
+  the baseline; `--save FILE` keeps the values and `--restore FILE` writes them back at the end.
 - App settings gear (891,77): theme and language persist to `configuration.json` in the state dir.
 
 ## Gotchas
 
 - `OPL_UI_LOGGING=1` is set by `live.sh`, so App Settings shows "Data is being logged". This is a dev aid, not a bug.
-- Unknown SETs return SUCCESS from the agent. A UI change that "sticks" proves nothing until the HID++ tx shows up in `agent.log` or a hardware read-back confirms it.
+- A setting counts only when the `dev/verify/readback.py` output changes (or the HID++ tx shows in `agent.log`). A UI change that "sticks" proves nothing: the UI keeps its own state.
 - Do not click LOGIN/CREATE ACCOUNT or Bluetooth pairing. Both leave the local machine.
