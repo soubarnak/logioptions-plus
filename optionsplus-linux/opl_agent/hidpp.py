@@ -768,7 +768,9 @@ THUMB_NATIVE, THUMB_DIVERTED = 0, 1     # reporting mode byte: HID native / sent
 
 
 def get_thumbwheel_info(fd, idx):
-    """fn0 getThumbwheelInfo -> {native, diverted}: rotation units per notch-equivalent in each mode."""
+    """fn0 getThumbwheelInfo -> {native, diverted}: rotation units per notch-equivalent in each mode.
+    The bytes after the two resolutions (the default direction among them) are not read: a positive
+    rotation is taken as "right" whatever the wheel's own default direction is; unconfirmed on hardware."""
     p = _fcall(fd, idx, F_THUMB_WHEEL, 0)
     native, diverted = struct.unpack(">HH", bytes(p[:4]))
     return {"native": native, "diverted": diverted}
@@ -805,6 +807,7 @@ def parse_thumb_event(params):
 CTRL_REPROGRAMMABLE, CTRL_DIVERTABLE = 0x10, 0x20      # control info flags1
 CTRL_RAW_XY = 0x01              # control info flags2 (byte 8): can report raw XY while held
 REPORT_DIVERT = 0x01            # setCidReporting flags: the divert value; the change bit is value << 1
+REPORT_PERSISTENT = 0x04        # same byte: divert that survives a power cycle; its change bit is 0x08
 REPORT_RAW_XY = 0x10            # same byte: divert raw XY motion; the change bit is value << 1
 
 
@@ -821,10 +824,21 @@ def get_controls(fd, idx):
     return out
 
 
-def get_cid_reporting(fd, idx, cid):
-    """fn2 getCidReporting(cid) -> (diverted to software, raw XY diverted, the control id it acts as)."""
+def _cid_reporting(fd, idx, cid):
+    """fn2 getCidReporting(cid) -> (flags byte, the control id it acts as). The reply names the control
+    it describes in bytes 0-1; one for another control (a reply that crossed a concurrent request)
+    raises HidppError rather than being taken for this control's."""
     p = _fcall(fd, idx, F_REPROG_CONTROLS, 2, struct.pack(">H", cid))
-    return bool(p[2] & REPORT_DIVERT), bool(p[2] & REPORT_RAW_XY), (struct.unpack(">H", p[3:5])[0] or cid)
+    if struct.unpack(">H", bytes(p[:2]))[0] != cid:
+        raise HidppError(F_REPROG_CONTROLS, 2, 4)       # HW_ERROR: not the answer to this request
+    return p[2], (struct.unpack(">H", p[3:5])[0] or cid)
+
+
+def get_cid_reporting(fd, idx, cid):
+    """fn2 getCidReporting(cid) -> (diverted to software, raw XY diverted, the control id it acts as).
+    A control counts as diverted when either the temporary (0x01) or the persistent (0x04) bit is set."""
+    flags, remap = _cid_reporting(fd, idx, cid)
+    return bool(flags & (REPORT_DIVERT | REPORT_PERSISTENT)), bool(flags & REPORT_RAW_XY), remap
 
 
 def get_cid_diverted(fd, idx, cid):
@@ -850,11 +864,13 @@ def set_cid_diverted(fd, idx, cid, divert, raw_xy=None):
     """fn3 setCidReporting(cid, flags, remap): divert the control or hand it back; `raw_xy` True or
     False also diverts or releases its raw motion, None leaves that alone. The device state is read
     back; raises HidppError when it did not take."""
+    # a request that names no target resets the remap, so say the one the control has now
+    current, remap = _cid_reporting(fd, idx, cid)
     flags = (REPORT_DIVERT << 1) | (REPORT_DIVERT if divert else 0)
+    if not divert and current & REPORT_PERSISTENT:
+        flags |= REPORT_PERSISTENT << 1         # a stale persistent divert: clear it too (value bit 0)
     if raw_xy is not None:
         flags |= (REPORT_RAW_XY << 1) | (REPORT_RAW_XY if raw_xy else 0)
-    # a request that names no target resets the remap, so say the one the control has now
-    remap = get_cid_remap(fd, idx, cid)
     _fcall(fd, idx, F_REPROG_CONTROLS, 3, struct.pack(">HBH", cid, flags, remap))
     got_divert, got_raw, _ = get_cid_reporting(fd, idx, cid)
     if got_divert != bool(divert) or (raw_xy is not None and got_raw != bool(raw_xy)):

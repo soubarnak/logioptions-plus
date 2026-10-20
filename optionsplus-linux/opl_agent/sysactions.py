@@ -16,6 +16,7 @@ that does not parse is ignored (the default stays), so a typo never disables a b
 
 import logging
 import os
+import threading
 
 from . import keymap
 
@@ -81,13 +82,19 @@ def parse_chord(text):
 
 C, S, A, M = KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_LEFTALT, KEY_LEFTMETA
 
-# SYSTEM macro action -> chord. GNOME-style defaults; override per user.
+# SYSTEM macro action -> chord. Defaults follow GNOME 40+ where it binds the action; override per user.
+# Two are risky and worth overriding or avoiding: CONSOLE_CLIENT is Ctrl+Alt+T (an Ubuntu binding, not
+# stock GNOME; other desktops ignore it) and SHUT_DOWN sends KEY_POWER, which logind turns into an
+# immediate power-off when nothing inhibits it (no confirmation dialog on every desktop).
 DEFAULTS = {
     "SWITCH_APPS": (A, KEY_TAB), "SHIFT_SWITCH_APPS": (A, S, KEY_TAB),
-    "DESKTOP": (M, 32), "SHOW_DESKTOP": (M, 32),                     # Super+D
+    # stock GNOME has no show-desktop key; Super+D is Ubuntu's (and KDE's, Xfce's) binding
+    "DESKTOP": (M, 32), "SHOW_DESKTOP": (M, 32),
     "SWITCH_BETWEEN_DESKTOPS": (M,),                                 # the overview
-    "SWITCH_BETWEEN_DESKTOPS_LEFT": (C, A, KEY_LEFT), "SWITCH_BETWEEN_DESKTOPS_RIGHT": (C, A, KEY_RIGHT),
-    "CLOSE": (A, KEY_F4), "MINIMIZE": (M, KEY_DOWN), "MAXIMIZE": (M, KEY_UP), "FULLSCREEN": (KEY_F11,),
+    "TASK_VIEW": (M,), "APP_EXPOSE": (M,),                           # the overview is GNOME's nearest
+    "SWITCH_BETWEEN_DESKTOPS_LEFT": (M, KEY_PAGEUP), "SWITCH_BETWEEN_DESKTOPS_RIGHT": (M, KEY_PAGEDOWN),
+    "SWITCH_LANGUAGE": (M, KEY_SPACE),                               # GNOME's next input source
+    "CLOSE": (A, KEY_F4), "MINIMIZE": (M, 35), "MAXIMIZE": (M, KEY_UP), "FULLSCREEN": (KEY_F11,),   # Super+H hides
     "SNAP_LEFT": (M, KEY_LEFT), "SNAP_RIGHT": (M, KEY_RIGHT),
     "COPY": (C, 46), "PASTE": (C, 47), "UNDO": (C, 44), "REDO": (C, S, 44),
     "ZOOM_IN": (C, KEY_EQUAL), "ZOOM_OUT": (C, KEY_MINUS),
@@ -101,6 +108,9 @@ DEFAULTS = {
     "MAIL_CLIENT": (XF86["xf86mail"],), "MEDIA_CLIENT": (XF86["xf86audiomedia"],),
     "CONSOLE_CLIENT": (C, A, 20),                                    # Ctrl+Alt+T
 }
+
+# SYSTEM actions that move the horizontal wheel rather than press keys: action -> sign
+SCROLL_ACTIONS = {"SCROLL_LEFT": -1, "SCROLL_RIGHT": 1}
 
 # MEDIA macro usage -> key
 MEDIA_KEYS = {
@@ -123,33 +133,38 @@ class ActionTable:
         self.path = path
         self._stamp = None
         self._overrides = {}
+        self._lock = threading.Lock()   # the player, assign and sync threads all ask
 
     def _reload(self):
-        try:
-            st = os.stat(self.path)
-            stamp = (st.st_mtime_ns, st.st_size)
-        except (OSError, TypeError):
-            self._stamp, self._overrides = None, {}
-            return
-        if stamp == self._stamp:
-            return
-        self._stamp, self._overrides = stamp, {}
-        try:
-            import tomllib
-            with open(self.path, "rb") as fh:
-                section = tomllib.load(fh).get("system", {})
-            if not isinstance(section, dict):
-                raise ValueError("[system] is not a table")
-        except Exception as exc:
-            log.warning("ignoring %s: %s", self.path, exc)
-            return
-        for action, text in section.items():
+        """The current overrides. A new table is built aside and swapped in whole, so a reader
+        never sees one half filled."""
+        with self._lock:
             try:
-                self._overrides[action] = parse_chord(text)
-            except ValueError as exc:
-                log.warning("%s: %s: %s (default kept)", self.path, action, exc)
+                st = os.stat(self.path)
+                stamp = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+            except (OSError, TypeError):
+                self._stamp, self._overrides = None, {}
+                return self._overrides
+            if stamp == self._stamp:
+                return self._overrides
+            overrides = {}
+            try:
+                import tomllib
+                with open(self.path, "rb") as fh:
+                    section = tomllib.load(fh).get("system", {})
+                if not isinstance(section, dict):
+                    raise ValueError("[system] is not a table")
+            except Exception as exc:
+                log.warning("ignoring %s: %s", self.path, exc)
+                section = {}
+            for action, text in section.items():
+                try:
+                    overrides[action] = parse_chord(text)
+                except ValueError as exc:
+                    log.warning("%s: %s: %s (default kept)", self.path, action, exc)
+            self._stamp, self._overrides = stamp, overrides
+            return overrides
 
     def chord(self, action):
         """The key codes to send for `action`, or None when it has no Linux keystroke."""
-        self._reload()
-        return self._overrides.get(action) or DEFAULTS.get(action)
+        return self._reload().get(action) or DEFAULTS.get(action)
