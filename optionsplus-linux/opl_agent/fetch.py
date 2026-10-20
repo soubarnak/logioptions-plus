@@ -25,6 +25,7 @@ EXIT_DECLINED = 2
 EXIT_FAILED = 1
 MAGICS = (bytes.fromhex("10011720"), bytes.fromhex("06052120"))   # main app, device assets
 EOCD = b"PK\x05\x06"
+SCAN_LIMIT = (16 << 20) + (64 << 10) + 22     # how far from the end of an installer the ZIP record is sought
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
@@ -338,28 +339,43 @@ class _Window(io.RawIOBase):
         return len(data)
 
 
-def find_zip_end(fh, size):
+def find_zip_end(fh, size, chunk=1 << 20):
     """Offset just past the ZIP end-of-central-directory record, or None. Scans backwards from the
-    end of the file: Logitech's installer carries an Authenticode signature (about 96 KB) after the
-    record, which is beyond the 64 KiB that zipfile searches."""
-    chunk, tail = 1 << 20, b""
-    pos = size
-    while pos > 0:
-        start = max(0, pos - chunk)
+    end of the file (at most SCAN_LIMIT bytes): Logitech's installer carries an Authenticode
+    signature (about 96 KB) after the record, beyond the 64 KiB that zipfile searches. A candidate
+    counts only if it is a single-disk record whose central directory starts with a file header."""
+    lower = max(0, size - SCAN_LIMIT)
+    tail, pos = b"", size
+    while pos > lower:
+        start = max(lower, pos - chunk)
         fh.seek(start)
         buf = fh.read(pos - start) + tail
         i = buf.rfind(EOCD)
         while i >= 0:
-            at = start + i
-            rec = buf[i:i + 22]
-            if len(rec) == 22:
-                cd_size, cd_off, clen = struct.unpack("<IIH", rec[12:22])
-                if at + 22 + clen <= size and cd_size + cd_off <= at:
-                    return at + 22 + clen
+            end = _valid_eocd(fh, size, start + i, buf[i:i + 22])
+            if end:
+                return end
             i = buf.rfind(EOCD, 0, i)
         tail = buf[:len(EOCD) - 1 + 22]       # a record may straddle the chunk boundary
         pos = start
     return None
+
+
+def _valid_eocd(fh, size, at, rec):
+    if len(rec) < 22:
+        return None
+    disk, cd_disk, n_disk, n_total, cd_size, cd_off, clen = struct.unpack("<4x4H2LH", rec)
+    if disk or cd_disk or n_disk != n_total or at + 22 + clen > size:
+        return None
+    if 0xFFFF in (n_disk, n_total) or 0xFFFFFFFF in (cd_size, cd_off):
+        raise FetchError("this installer uses ZIP64, which is not supported")
+    if cd_size + cd_off > at:
+        return None
+    if cd_size:
+        fh.seek(at - cd_size)
+        if fh.read(4) != b"PK\x01\x02":
+            return None
+    return at + 22 + clen
 
 
 def collect_installer(manifest, exe):
@@ -455,7 +471,7 @@ def main(argv=None):
             raise FetchError("no such installer: %s" % args.from_installer)
         ui = UI(not args.no_gui)
         if not ui.confirm(eula_text(manifest, args.from_installer), args.accept_eula):
-            sys.stderr.write("Declined. Nothing was downloaded.\n")
+            sys.stderr.write("Declined. Nothing was %s.\n" % ("installed" if args.from_installer else "downloaded"))
             return EXIT_DECLINED
         if system and os.geteuid() != 0 and not args.elevated:
             rest = [a for a in argv if a not in ("--accept-eula", "--manifest") and a != args.manifest]

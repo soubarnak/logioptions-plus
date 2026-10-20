@@ -90,10 +90,11 @@ def make_world(corrupt=False):
     return srv, manifest, {"logioptionsplus": main, "test_mouse": dev}
 
 
-def offline_installer(path, depots, version="9.9.2", trailer=b"", depot_macs=None):
+def offline_installer(path, depots, version="9.9.2", trailer=b"", depot_macs=None, comment=b""):
     """A fake offline installer: junk PE-like prefix, then a ZIP holding offline.json and depots."""
     entries = []
     with zipfile.ZipFile(path, "w") as z:
+        z.comment = comment
         for name, data in depots.items():
             fname = "%s.depot" % name
             z.writestr(fname, data)

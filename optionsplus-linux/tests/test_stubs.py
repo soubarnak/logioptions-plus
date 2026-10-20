@@ -133,11 +133,32 @@ def test_depot_info_answers_install_status_for_an_installed_depot(client, tmp_pa
         r = client.call("SET", "/updates/depot/info", {"name": name, "state": "REQUESTED"})
         assert r["result"]["code"] == "SUCCESS"
         assert r["payload"]["@type"] == TYPE + "logi.protocol.updates.Depot.InstallStatus"
-        assert r["payload"]["depotName"] == name and r["payload"]["state"] == "INSTALLED"
+        assert r["payload"]["depotName"] == name and r["payload"]["state"] == "COMPLETED"
+
+
+# updates.proto, Depot.InstallStatus.InstallState
+INSTALL_STATES = {"INVALID", "INSTALLING", "COMPLETED"}
+
+
+def test_depot_info_states_are_names_of_the_proto_enum(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {"mx_master_3s": {"url": "/depots/u-1/mx_master_3s.depot"}})
+    for name in ("mx_master_3s", "u-1", "other"):
+        r = client.call("SET", "/updates/depot/info", {"name": name, "state": "REQUESTED"})
+        assert r["payload"]["state"] in INSTALL_STATES
+
+
+def test_depot_info_ignores_a_partial_uuid_and_malformed_records(client, tmp_path, monkeypatch):
+    _install_record(tmp_path, monkeypatch, {"a": "junk", "mx_master_3s": {
+        "url": "https://u.invalid/depots/9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81/mx_master_3s.depot"}})
+    r = client.call("SET", "/updates/depot/info", {"name": "9c81feae", "state": "REQUESTED"})
+    assert r["payload"]["state"] == "INVALID"
+    (tmp_path / "payload.json").write_text("[1]")
+    r = client.call("SET", "/updates/depot/info", {"name": "x"})
+    assert r["payload"]["state"] == "INVALID"
 
 
 def test_depot_info_answers_not_installed_for_a_missing_depot(client, tmp_path, monkeypatch):
     _install_record(tmp_path, monkeypatch, {})
     r = client.call("SET", "/updates/depot/info", {"name": "mx_master_3s", "state": "REQUESTED"})
     assert r["result"]["code"] == "SUCCESS"
-    assert r["payload"]["depotName"] == "mx_master_3s" and r["payload"]["state"] == "NOT_INSTALLED"
+    assert r["payload"]["depotName"] == "mx_master_3s" and r["payload"]["state"] == "INVALID"

@@ -88,15 +88,17 @@ _LOGIVOICE_SET = re.compile(r"^/logivoice/set_[a-z_]+$")
 
 def _depot_install_status(payload):
     """Depot.InstallStatus for SET /updates/depot/info. The UI names the depot by name or by the
-    uuid in its URL; nothing is downloaded here (the fetcher installs depots). The state names
-    are a guess: only REQUESTED has been observed in the UI's requests."""
+    uuid in its URL; nothing is downloaded here (the fetcher installs depots). The UI sends a
+    Depot.Info (state REQUESTED); the reply uses Depot.InstallStatus.InstallState: COMPLETED when the depot
+    is installed, INVALID (the proto default) when not. Which of these the UI expects is unconfirmed."""
     name = str((payload or {}).get("name", "")) if isinstance(payload, dict) else ""
-    have = (paths.installed_versions(paths.payload_dir()) or {}).get("depots", {})
-    installed = bool(name) and any(
-        name == dname or "/%s/" % name in str((d or {}).get("url", ""))
+    rec = paths.installed_versions(paths.payload_dir())
+    have = rec.get("depots") if isinstance(rec, dict) else None
+    installed = bool(name) and isinstance(have, dict) and any(
+        name == dname or (isinstance(d, dict) and name in str(d.get("url", "")).split("/"))
         for dname, d in have.items())
     return _msg("logi.protocol.updates.Depot.InstallStatus", depotName=name,
-                state="INSTALLED" if installed else "NOT_INSTALLED")
+                state="COMPLETED" if installed else "INVALID")
 
 
 def lookup(verb, path, payload=None):

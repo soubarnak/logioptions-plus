@@ -118,8 +118,8 @@ the downloaded Logitech data stay.
 Start **Options+ for Linux** from the menu (or run `optionsplus-linux`). The first launch finds
 no Options+ data and runs `optionsplus-fetch-payload`. It says that the data (three depots,
 about 554 MB in total) comes from Logitech's servers, shows the size and the link to Logitech's
-EULA (https://www.logitech.com/legal/eula.html), and waits for you to confirm (a `zenity` or `kdialog` box when a display and the tool exist, otherwise the terminal).
-Declining exits without downloading or writing anything. After a confirmed download the SHA-256
+EULA (https://www.logitech.com/legal/eula.html), and waits for you to confirm (a `zenity` or
+`kdialog` box when a display and the tool exist, otherwise the terminal). Declining exits without downloading or writing anything. After a confirmed download the SHA-256
 is checked against the value pinned in `depots.json` before anything is unpacked; on a mismatch
 nothing is installed.
 
