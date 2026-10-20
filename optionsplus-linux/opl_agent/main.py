@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 
-from . import resources
+from . import resources, updates
 from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
@@ -66,16 +66,24 @@ class Agent:
 
     def __init__(self, transport=None, socket_path=None, state_dir=None,
                  depot_dir=None, data_dir=None, poll_seconds=POLL_SECONDS,
-                 runner=None, app_dirs=None):
+                 runner=None, app_dirs=None,
+                 build_id=None, payload_path=None, os_release_path=None,
+                 release_base_url=None, clock=None):
         if depot_dir is not None or data_dir is not None:
             resources.configure(depot_dir, data_dir)
         self.reg = Registry(transport)
-        self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs)
+        updater = updates.Updater(build_id=build_id or os.environ.get("OPL_BUILD_ID", "dev"),
+                                  payload_path=payload_path, release_base_url=release_base_url,
+                                  clock=clock, state_dir=state_dir)
+        self.router = Router(self.reg, state_dir=state_dir, runner=runner, app_dirs=app_dirs,
+                             updater=updater, os_release_path=os_release_path)
         self.server = Server(self.router, path=socket_path)
         self.router.server = self.server
+        updater.broadcast = self.server.broadcast
         self.poll_seconds = poll_seconds
         self._srv = None
         self._poller = None
+        self._updates = None
 
     async def start(self):
         loop = asyncio.get_event_loop()
@@ -83,6 +91,7 @@ class Agent:
         log.info("%d device(s) discovered", len(self.reg.devices))
         self._srv = await self.server.start()
         self._poller = asyncio.ensure_future(_poll(self.server, self.reg, self.poll_seconds))
+        self._updates = asyncio.ensure_future(self.router.updater.run())
 
     async def serve_forever(self):
         async with self._srv:
@@ -91,6 +100,8 @@ class Agent:
     async def stop(self):
         if self._poller:
             self._poller.cancel()
+        if self._updates:
+            self._updates.cancel()
         if self._srv:
             self._srv.close()
             await self._srv.wait_closed()
