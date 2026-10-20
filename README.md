@@ -50,6 +50,16 @@ Releases will be signed xbps packages attached to GitHub releases, installable w
 with the in-app "Check for update" wired to the same releases. See feature-parity.md §3
 and §8 for the design; nothing is published yet.
 
+## Support
+
+Links in the Options+ UI (support, device support, release notes, feedback) open this
+project's pages instead of Logitech's; Logitech's EULA and privacy links are left alone, and
+Logitech cloud features (LogiID, marketplace, recommendations) show "not available in
+Options+ for Linux". Report problems through the
+[issue chooser](https://github.com/soubarnak/logioptions-plus/issues/new/choose) (bug report
+or device support request). Logs are in `~/.local/state/optionsplus-linux/`. Device notes are
+in the [Devices wiki](https://github.com/soubarnak/logioptions-plus/wiki/Devices).
+
 ## License
 
 Apache-2.0 for the code in this repository. Logitech's software and data remain under
