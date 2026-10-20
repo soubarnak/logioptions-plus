@@ -24,10 +24,12 @@ LIB=$DEST/usr/lib/optionsplus-linux
 install -d "$DEST/usr/bin" "$LIB/bootstrap" "$DEST/usr/lib/udev/rules.d" \
     "$DEST/etc/xdg/autostart" "$DEST/usr/share/applications" \
     "$DEST/usr/share/icons/hicolor/scalable/apps" "$DEST/usr/share/licenses/optionsplus-linux"
-install -m755 "$SRC/bin/optionsplus-linux" "$SRC/bin/optionsplus-agent" "$DEST/usr/bin/"
+install -m755 "$SRC/bin/optionsplus-linux" "$SRC/bin/optionsplus-agent" \
+    "$SRC/bin/optionsplus-fetch-payload" "$DEST/usr/bin/"
 cp -r "$SRC/opl_agent" "$LIB/opl_agent"
 find "$LIB/opl_agent" -name __pycache__ -prune -exec rm -rf {} +
-install -m644 "$SRC/bootstrap/main.js" "$SRC/bootstrap/package.json" "$LIB/bootstrap/"
+install -m644 "$SRC/bootstrap/main.js" "$SRC/bootstrap/links.js" "$SRC/bootstrap/package.json" "$LIB/bootstrap/"
+install -m644 "$SRC/data/depots.json" "$LIB/depots.json"
 install -m644 "$SRC/data/70-optionsplus-linux.rules" "$DEST/usr/lib/udev/rules.d/"
 install -m644 "$SRC/data/optionsplus-linux-agent.desktop" "$DEST/etc/xdg/autostart/"
 install -m644 "$SRC/data/optionsplus-linux.desktop" "$DEST/usr/share/applications/"
