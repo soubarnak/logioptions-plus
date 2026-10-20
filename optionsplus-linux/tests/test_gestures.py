@@ -6,12 +6,14 @@ import time
 
 import pytest
 
+from opl_agent import gestures as gestures_mod
 from tests.fakes import depot as fx
 from tests.fakes.hidpp_device import F_WAKE
 from tests.test_button_remap import BACK, DEFAULT_PROFILE, TYPE, assigned_card_id, keystroke, slot
 from tests.test_wake_reapply import wait_for
 
 GESTURE = 195
+NOTCH = 14                  # thumb wheel units per notch the simulated mouse reports when diverted
 THUMB_SLOT = fx.SLOT_PREFIX + "_thumb_wheel_adapter"
 # HID usage -> evdev key: 4 a (30), 5 b (48), 7 d (32), 8 e (18), 9 f (33); no modifiers, so one key each
 ACTIONS = {"up": 4, "down": 5, "left": 7, "right": 8, "click": 9}
@@ -265,8 +267,8 @@ def test_assigning_a_two_way_card_diverts_the_thumb_wheel(client, bolt):
 
 def test_thumb_wheel_turned_right_and_left_runs_the_two_actions(client, bolt, uinput):
     assign_thumb(client)
-    bolt.rotate_thumb(1)
-    bolt.rotate_thumb(-1)
+    bolt.rotate_thumb(NOTCH)
+    bolt.rotate_thumb(-NOTCH)
     assert wait_for(lambda: len(keys_down(uinput)) >= 2)
     settle()
     assert keys_down(uinput) == [KEY_OF["right"], KEY_OF["left"]]
@@ -274,7 +276,7 @@ def test_thumb_wheel_turned_right_and_left_runs_the_two_actions(client, bolt, ui
 
 def test_a_turn_of_several_steps_runs_the_action_once_per_step(client, bolt, uinput):
     assign_thumb(client)
-    bolt.rotate_thumb(3)
+    bolt.rotate_thumb(3 * NOTCH)
     assert wait_for(lambda: len(keys_down(uinput)) >= 3)
     settle()
     assert keys_down(uinput) == [KEY_OF["right"]] * 3
@@ -328,5 +330,68 @@ def test_thumb_assignment_survives_an_agent_restart(agent, agent_factory, bolt, 
     bolt.mouse.thumb["mode"] = 0
     agent_factory()
     assert wait_for(lambda: bolt.mouse.thumb["mode"] == 1)
-    bolt.rotate_thumb(2)
+    bolt.rotate_thumb(2 * NOTCH)
     assert wait_for(lambda: keys_down(uinput))
+
+
+def test_a_short_flick_of_the_thumb_wheel_is_not_an_action(client, bolt, uinput):
+    assign_thumb(client)
+    for _ in range(NOTCH - 1):
+        bolt.rotate_thumb(1)              # one reporting unit each: less than a notch in all
+    settle()
+    assert keys_down(uinput) == []
+    bolt.rotate_thumb(1)                  # the unit that completes the notch
+    assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
+
+
+def test_the_thumb_step_is_the_wheels_own_resolution(client, bolt, uinput):
+    bolt.mouse.thumb_diverted_units = 28
+    assign_thumb(client)
+    bolt.rotate_thumb(NOTCH)
+    settle()
+    assert keys_down(uinput) == []
+    bolt.rotate_thumb(NOTCH)
+    assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
+
+
+def test_the_thumb_step_falls_back_when_the_resolution_is_unknown(client, bolt, uinput):
+    bolt.mouse.thumb_diverted_units = 0
+    assign_thumb(client)
+    bolt.rotate_thumb(gestures_mod.THUMB_STEP)
+    assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
+
+
+# ---- which nested card is which direction ----------------------------------------------------
+
+def test_a_nested_cards_own_id_does_not_name_its_slot():
+    from opl_agent import gestures
+    card = {"attribute": "ADAPTER_4WAYS", "nestedCards": {
+        "down": {"id": "card_global_presets_volume_up"}, "up": {"id": "card_global_presets_volume_down"}}}
+    found = gestures.nested_actions(card)
+    assert found["down"]["id"] == "card_global_presets_volume_up"
+    assert found["up"]["id"] == "card_global_presets_volume_down"
+
+
+def test_slots_without_a_word_take_their_place_from_the_directions_list():
+    from opl_agent import gestures
+    card = {"attribute": "ADAPTER_4WAYS",
+            "nestedCards": {"s1": {"id": "a"}, "s2": {"id": "b"}, "s3": {"id": "c"}, "s4": {"id": "d"}},
+            "nestedCardsOrder": ["s1", "s2", "s3", "s4"],
+            "gestureInfo": {"directions": [{"direction": d, "enabled": True}
+                                           for d in ("UP", "DOWN", "LEFT", "RIGHT")]}}
+    found = gestures.nested_actions(card)
+    assert {w: c["id"] for w, c in found.items()} == {"up": "a", "down": "b", "left": "c", "right": "d"}
+
+
+def test_slots_without_a_word_and_no_directions_are_not_guessed():
+    from opl_agent import gestures
+    card = {"attribute": "ADAPTER_4WAYS", "nestedCards": {"s1": {"id": "x"}}, "nestedCardsOrder": ["s1"]}
+    assert gestures.nested_actions(card) == {}
+
+
+def test_a_preset_gesture_card_with_no_actions_is_refused_by_name(client):
+    card = {"id": "card_switch_desktops", "attribute": "ADAPTER_4WAYS",
+            "gestureInfo": {"implementation": "CUSTOM_SWITCH_DESKTOPS", "directionLocked": True}}
+    reply = assign_gesture(client, card)
+    assert reply["result"]["code"] == "NOT_SUPPORTED"
+    assert "CUSTOM_SWITCH_DESKTOPS" in str(reply["result"])

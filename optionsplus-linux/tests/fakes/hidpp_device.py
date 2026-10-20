@@ -33,6 +33,7 @@ CONTROLS = [
     (195, 195, 0x31, 6, 3, 4, 0x01),            # gesture button
 ]
 DIVERT = 0x01                                   # setCidReporting flags: divert; the change bit is DIVERT << 1
+PERSISTENT = 0x04                               # same byte: divert kept across power cycles; change bit 0x08
 RAW_XY = 0x10                                   # same byte: divert raw XY; the change bit is RAW_XY << 1
 
 # the receiver's own feature table (device index 0xFF)
@@ -64,6 +65,7 @@ class SimulatedMouse:
                                                     # high resolution on, invert off
         # 0x2150 thumb wheel: reporting mode 0 native / 1 diverted, direction inverted, smooth
         self.thumb = {"mode": 0, "invert": 0, "smooth": 0}
+        self.thumb_diverted_units = 14              # getThumbwheelInfo: units per notch while diverted
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
         # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
         self.hosts = [
@@ -76,6 +78,7 @@ class SimulatedMouse:
         self.fail_host_name_write = False           # answer setHostFriendlyName with an error
         # 0x1b04: cids the mouse reports to software instead of acting on, and cids held now
         self.diverted = set()
+        self.persistent = set()                     # cids diverted persistently (flag 0x04), also reported to software
         self.divert_writes = []                     # cids software asked to divert or undivert, in order
         self.raw_xy = set()                         # controls whose motion is reported as raw XY
         self.held = []
@@ -170,7 +173,7 @@ class SimulatedMouse:
         elif fid == 0x2150:
             t = self.thumb
             if fn == 0:                               # info: native res, diverted res, default dir, caps
-                return struct.pack(">HHBB", 120, 14, 0, 0x03)
+                return struct.pack(">HHBB", 120, self.thumb_diverted_units, 0, 0x03)
             if fn == 1:
                 return bytes([t["mode"], t["invert"], t["smooth"]])
             if fn == 2:
@@ -192,7 +195,8 @@ class SimulatedMouse:
             if cid not in [c[0] for c in CONTROLS]:
                 return 2
             if fn == 2:                               # getCidReporting: cid, flags, remapped cid, flags2
-                flags = (DIVERT if cid in self.diverted else 0) | (RAW_XY if cid in self.raw_xy else 0)
+                flags = ((DIVERT if cid in self.diverted else 0) | (PERSISTENT if cid in self.persistent else 0)
+                         | (RAW_XY if cid in self.raw_xy else 0))
                 return struct.pack(">HBHB", cid, flags, self.remap.get(cid, cid), 0)
             if fn == 3:                               # setCidReporting: cid, flags, remap cid
                 if self.fail_divert_write:
@@ -216,6 +220,8 @@ class SimulatedMouse:
                         return 2                      # not divertable
                     if not self.ignore_divert:
                         (self.diverted.add if params[2] & DIVERT else self.diverted.discard)(cid)
+                if params[2] & (PERSISTENT << 1):
+                    (self.persistent.add if params[2] & PERSISTENT else self.persistent.discard)(cid)
                 if params[2] & (RAW_XY << 1):
                     if not next(c for c in CONTROLS if c[0] == cid)[6] & 0x01:
                         return 2                      # no raw XY on this control
@@ -352,7 +358,7 @@ class SimulatedBolt:
         mouse = self.mice[index]
         if mouse.thumb["mode"] != 1:
             return False
-        self.emit_event(F_THUMB_WHEEL, 0, struct.pack(">hHB", rotation, 0, 2), index=index)
+        self.emit_event(F_THUMB_WHEEL, 0, struct.pack(">hHBB", rotation, 0, 2, 0), index=index)
         return True
 
     def press_button(self, cid, index=MOUSE_INDEX):
@@ -370,7 +376,7 @@ class SimulatedBolt:
     def rotate_thumb(self, amount, index=MOUSE_INDEX):
         """The user turns the thumb wheel; reported to software only while it is diverted."""
         if self.mice[index].thumb["mode"] == 1:
-            self.emit_event(0x2150, 0, struct.pack(">hBB", amount, 2, 0), index=index)
+            self.emit_event(0x2150, 0, struct.pack(">hHBB", amount, 0, 2, 0), index=index)
 
     def release_button(self, cid, index=MOUSE_INDEX):
         mouse = self.mice[index]
@@ -378,8 +384,9 @@ class SimulatedBolt:
         self._button_event(mouse, index)
 
     def _button_event(self, mouse, index):
-        if any(c in mouse.diverted for c in mouse.held) or not mouse.held:
-            held = [c for c in mouse.held if c in mouse.diverted]
+        reported = mouse.diverted | mouse.persistent
+        if any(c in reported for c in mouse.held) or not mouse.held:
+            held = [c for c in mouse.held if c in reported]
             self.emit_event(F_REPROG, 0, b"".join(struct.pack(">H", c) for c in held), index=index)
 
     def emit_pairing_status(self, status, error=0, slot=0):

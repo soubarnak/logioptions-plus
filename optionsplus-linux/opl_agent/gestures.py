@@ -2,9 +2,21 @@
 
 Pure logic, no device I/O. A card of these kinds carries one nested card per action, keyed by a
 direction word ("up", "down", "left", "right"; the gesture card also "click", the press with no
-swipe). The key or the nested card's id may carry the word as one of its tokens, so
-"gesture_left" and "left" both work. The real depot layout is not confirmed on hardware: see
-feature-parity.md.
+swipe). The key of the nested card carries the word as one of its tokens, so "gesture_left" and
+"left" both work. The nested card's own id never counts: it names the action ("..._volume_up"),
+not the slot it sits in. A key without a word falls back to its place in `nestedCardsOrder`,
+matched with the same place in `gestureInfo.directions` (UP, DOWN, LEFT, RIGHT) when the two lists
+are as long as each other. The real depot layout is not confirmed on hardware: see feature-parity.md.
+
+Presets: a card whose `gestureInfo.implementation` names a Logitech preset (CUSTOM_SWITCH_DESKTOPS,
+CUSTOM_APP_EXPOSE_MISSION_CONTROL, ...) and that carries no nested cards would need the preset's own
+actions, which are not in the data. Those are refused (`preset_name`); only GENERIC, and presets
+that carry their actions as nested cards, run.
+
+The swipe distance comes from `gestureInfo.x/y.actionThreshold` (a protobuf field of the real
+schema, profiles_v2.proto GestureInfo.AxisInfo). Captures of the real card carry only
+directionLocked, implementation and directions, so in practice DEFAULT_LIMIT applies; the
+threshold path is exercised by tests only.
 
 The engine compiles each nested card to events and hands them to `Gesture` or `Thumb`, which only
 decide *which* events a stream of raw motion asks for.
@@ -20,7 +32,10 @@ WORDS = {FOUR_WAYS: SWIPES + (CLICK,), TWO_WAYS: ("left", "right")}
 ALIASES = {"press": CLICK, "tap": CLICK, "center": CLICK, "centre": CLICK}
 
 DEFAULT_LIMIT = 50              # raw XY counts of travel before a swipe counts, when the card has none
-THUMB_STEP = 1                  # thumb wheel reporting units per action
+# Thumb wheel reporting units per action when the wheel's own resolution is unknown. Assumption:
+# getThumbwheelInfo's diverted resolution is the units one notch-equivalent turn reports, and
+# 14 is the value the MX Master 3 family is believed to give; confirm on hardware.
+THUMB_STEP = 14
 
 
 def kind(card):
@@ -29,21 +44,44 @@ def kind(card):
     return attribute if attribute in WORDS else None
 
 
-def _word(key, nested, allowed):
-    for text in (key, (nested or {}).get("id")):
-        for token in re.split(r"[^a-z0-9]+", str(text or "").lower()):
-            token = ALIASES.get(token, token)
-            if token in allowed:
-                return token
+def _word(key, allowed):
+    """The direction word in a nested card's slot key, else None."""
+    for token in re.split(r"[^a-z0-9]+", str(key or "").lower()):
+        token = ALIASES.get(token, token)
+        if token in allowed:
+            return token
     return None
+
+
+def _ordered_words(card, allowed):
+    """{slot key: word} read from `nestedCardsOrder` against `gestureInfo.directions`, when both
+    list the same number of places; the key itself carries no word then."""
+    order = card.get("nestedCardsOrder") or []
+    directions = (card.get("gestureInfo") or {}).get("directions") or []
+    if not order or len(order) != len(directions):
+        return {}
+    out = {}
+    for key, entry in zip(order, directions):
+        name = str((entry or {}).get("direction", "")).lower() if isinstance(entry, dict) else ""
+        if name in allowed:
+            out[key] = name
+    return out
+
+
+def preset_name(card):
+    """The Logitech preset a card's gestureInfo names, or None for a generic card."""
+    impl = ((card or {}).get("gestureInfo") or {}).get("implementation")
+    return None if impl in (None, "", 0, "GENERIC") else str(impl)
 
 
 def nested_actions(card):
     """{direction word: nested card} the card assigns, for a card of either kind."""
     allowed = WORDS[kind(card)]
+    nested_cards = card.get("nestedCards") or {}
+    by_order = _ordered_words(card, allowed)
     out = {}
-    for key, nested in (card.get("nestedCards") or {}).items():
-        word = _word(key, nested, allowed)
+    for key, nested in nested_cards.items():
+        word = _word(key, allowed) or by_order.get(key)
         if word and word not in out:
             out[word] = nested
     return out
@@ -102,10 +140,13 @@ class Swipe:
 
 
 class Thumb:
-    """The compiled thumb wheel: events for a step left and right."""
+    """The compiled thumb wheel: events for a step left and right. A step is `step` reporting
+    units (the wheel's diverted units per notch, set by the engine), so a short flick is not
+    dozens of actions."""
 
-    def __init__(self, actions):
+    def __init__(self, actions, step=THUMB_STEP):
         self.actions = actions
+        self.step = max(1, int(step))   # reporting units that make one action
         self.pending = 0
 
     def turn(self, amount):
@@ -114,9 +155,9 @@ class Thumb:
             self.pending = 0                    # reversed: the partial step does not carry over
         self.pending += amount
         out = []
-        while abs(self.pending) >= THUMB_STEP:
+        while abs(self.pending) >= self.step:
             sign = 1 if self.pending > 0 else -1
-            self.pending -= sign * THUMB_STEP
+            self.pending -= sign * self.step
             events = self.actions.get("right" if sign > 0 else "left")
             if events:
                 out.append(events)
