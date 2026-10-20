@@ -35,6 +35,19 @@ STRING_PACKAGES = {
 _cache = {}
 
 
+def configure(depot_dir=None, data_dir=None):
+    """Point the module at another depot tree (tests, relocated installs) and
+    drop everything read from the previous one. None keeps the env default."""
+    global DEPOT_DIR, DATA_DIR, _catalogue
+    if depot_dir is not None:
+        DEPOT_DIR = depot_dir
+        DATA_DIR = os.path.join(depot_dir, "logioptionsplus", "data")
+    if data_dir is not None:
+        DATA_DIR = data_dir
+    _cache.clear()
+    _catalogue = None
+
+
 def _load_yaml(path):
     try:
         import yaml

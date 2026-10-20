@@ -190,14 +190,63 @@ _lock = threading.RLock()
 _feat_cache = {}
 
 
+class HidrawHandle:
+    """One open /dev/hidrawN node. The I/O surface hidpp needs from any
+    transport handle: ``write``, ``read``, ``drain`` and ``close``."""
+
+    def __init__(self, fd):
+        self.fd = fd
+
+    def write(self, data):
+        os.write(self.fd, data)
+
+    def drain(self):
+        """Drop stale input so old replies/notifications cannot match."""
+        while select.select([self.fd], [], [], 0)[0]:
+            try:
+                if not os.read(self.fd, 64):
+                    break
+            except BlockingIOError:
+                break
+
+    def read(self, timeout):
+        """One report, b"" for a spurious wakeup, None when `timeout` expires."""
+        if not select.select([self.fd], [], [], timeout)[0]:
+            return None
+        try:
+            return os.read(self.fd, 64)
+        except BlockingIOError:
+            return b""
+        except OSError as e:
+            if e.errno in (errno.EINTR, errno.EAGAIN):
+                return b""
+            raise
+
+    def close(self):
+        os.close(self.fd)
+
+
+class HidrawTransport:
+    """The production transport: discovery through sysfs, I/O through hidraw."""
+
+    def list_nodes(self):
+        return list_receivers_and_devices()
+
+    def open(self, path):
+        return HidrawHandle(os.open(path, os.O_RDWR | os.O_NONBLOCK))
+
+
+HIDRAW = HidrawTransport()
+
+
 def open_node(path):
-    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    return HIDRAW.open(path)
 
 
 def close_node(fd):
-    for k in [k for k in _feat_cache if k[0] == fd]:
+    for k in [k for k in _feat_cache if k[0] is fd]:
         del _feat_cache[k]
-    os.close(fd)
+    fd.close()
 
 
 @contextmanager
@@ -221,30 +270,17 @@ def _transact(fd, idx, b2, b3, params=b"", long=None, timeout=DEFAULT_TIMEOUT):
     msg = msg.ljust(size, b"\0")
     fn = b3 >> 4
     with _lock:
-        # drop stale input so old replies/notifications cannot match
-        while select.select([fd], [], [], 0)[0]:
-            try:
-                if not os.read(fd, 64):
-                    break
-            except BlockingIOError:
-                break
+        fd.drain()
         log.debug("tx %s", msg.hex())
-        os.write(fd, msg)
+        fd.write(msg)
         deadline = time.monotonic() + timeout
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
                 raise HidppTimeout(b2, fn)
-            if not select.select([fd], [], [], left)[0]:
+            r = fd.read(left)
+            if r is None:
                 raise HidppTimeout(b2, fn)
-            try:
-                r = os.read(fd, 64)
-            except BlockingIOError:
-                continue
-            except OSError as e:
-                if e.errno in (errno.EINTR, errno.EAGAIN):
-                    continue
-                raise
             log.debug("rx %s", r.hex())
             if len(r) < 4 or r[0] not in (SHORT, LONG, 0x12) or r[1] != idx:
                 continue

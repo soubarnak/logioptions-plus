@@ -39,6 +39,18 @@ CONN_BOLT = "BLE_PRO"
 CONN_USB = "USB"
 
 
+def format_firmware(fw):
+    """Windows-style firmware string from DeviceFwInfo (0x0003) entities.
+
+    "RBM 22.01.B0006": name, major.minor, then "B" and the 4-digit build.
+    Uses the main application entity (type 0), else the first one.
+    """
+    if not fw or not isinstance(fw, list):
+        return ""
+    ent = next((e for e in fw if e.get("type") == 0), fw[0])
+    return "%s %s.B%04X" % (ent["name"], ent["version"], ent["build"])
+
+
 class Device:
     def __init__(self, dev_id, node, index, name, dtype, pid):
         self.id = dev_id
@@ -123,7 +135,8 @@ class Device:
 class Registry:
     """Owns open HID++ transports and the set of live devices."""
 
-    def __init__(self):
+    def __init__(self, transport=None):
+        self.transport = transport or hidpp.HIDRAW   # node discovery + open
         self.devices = {}          # id -> Device
         self._fds = {}             # node.path -> fd
         self._receivers = []
@@ -131,7 +144,7 @@ class Registry:
     def _fd(self, node):
         fd = self._fds.get(node.path)
         if fd is None:
-            fd = hidpp.open_node(node.path)
+            fd = self.transport.open(node.path)
             self._fds[node.path] = fd
         return fd
 
@@ -140,7 +153,7 @@ class Registry:
         self.devices.clear()
         n = 0
         try:
-            nodes = hidpp.list_receivers_and_devices()
+            nodes = self.transport.list_nodes()
         except Exception:
             log.exception("HID++ discovery failed")
             return
