@@ -21,7 +21,8 @@ install -m755 "$SRC/bin/optionsplus-linux" "$SRC/bin/optionsplus-agent" \
     "$SRC/bin/optionsplus-fetch-payload" "$DEST/usr/bin/"
 cp -r "$SRC/opl_agent" "$LIB/opl_agent"
 find "$LIB/opl_agent" -name __pycache__ -prune -exec rm -rf {} +
-install -m644 "$SRC/bootstrap/main.js" "$SRC/bootstrap/links.js" "$SRC/bootstrap/package.json" "$LIB/bootstrap/"
+install -m644 "$SRC/bootstrap/main.js" "$SRC/bootstrap/links.js" "$SRC/bootstrap/guard.js" \
+    "$SRC/bootstrap/package.json" "$LIB/bootstrap/"
 install -m644 "$SRC/data/depots.json" "$LIB/depots.json"
 install -m644 "$SRC/data/70-optionsplus-linux.rules" "$DEST/usr/lib/udev/rules.d/"
 install -m644 "$SRC/data/io.github.soubarnak.optionsplus-linux.policy" "$DEST/usr/share/polkit-1/actions/"

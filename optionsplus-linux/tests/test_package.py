@@ -33,6 +33,7 @@ def clean_tree(root):
         "usr/bin/optionsplus-linux", "usr/bin/optionsplus-agent", "usr/bin/optionsplus-fetch-payload",
         "usr/lib/optionsplus-linux/depots.json",
         "usr/lib/optionsplus-linux/bootstrap/links.js",
+        "usr/lib/optionsplus-linux/bootstrap/guard.js",
         "usr/lib/optionsplus-linux/opl_agent/__init__.py",
         "usr/lib/optionsplus-linux/opl_agent/main.py",
         "usr/lib/optionsplus-linux/bootstrap/main.js",
@@ -237,6 +238,7 @@ def test_built_package_carries_hooks_and_all_parts(built):
                  "usr/lib/optionsplus-linux/depots.json",
                  "usr/lib/optionsplus-linux/bootstrap/main.js",
                  "usr/lib/optionsplus-linux/bootstrap/links.js",
+                 "usr/lib/optionsplus-linux/bootstrap/guard.js",
                  "usr/lib/optionsplus-linux/opl_agent/fetch.py",
                  "usr/lib/optionsplus-linux/opl_agent/main.py"):
         assert need in names, need
@@ -277,10 +279,25 @@ def test_stage_installs_everything_the_first_run_needs(tmp_path):
     files = tree(tmp_path)
     for need in ("usr/bin/optionsplus-fetch-payload",
                  "usr/lib/optionsplus-linux/bootstrap/links.js",
+                 "usr/lib/optionsplus-linux/bootstrap/guard.js",
                  "usr/lib/optionsplus-linux/depots.json",       # where fetch.py looks for it
                  "INSTALL", "REMOVE"):
         assert need in files
     assert check(tmp_path).returncode == 0
+
+
+def test_stage_installs_every_module_the_bootstrap_requires(tmp_path):
+    assert subprocess.run(["sh", str(STAGE), str(tmp_path)]).returncode == 0
+    staged = tmp_path / "usr/lib/optionsplus-linux/bootstrap"
+    todo, seen = ["main.js"], set()
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        assert (staged / name).is_file(), name
+        todo += [m + ".js" for m in re.findall(r"require\('\./([\w-]+)'\)", (staged / name).read_text())]
+    assert {"main.js", "links.js", "guard.js"} <= seen
 
 
 def test_template_installs_the_same_files_as_stage_and_build_xbps(tmp_path):
