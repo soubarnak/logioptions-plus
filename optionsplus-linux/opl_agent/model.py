@@ -367,6 +367,15 @@ class Registry:
             self._fds[node.path] = fd
         return fd
 
+    def _forget_fd(self, path):
+        """Close and drop the handle on `path`, so the next scan opens it afresh."""
+        fd = self._fds.pop(path, None)
+        if fd is not None:
+            try:
+                hidpp.close_node(fd)
+            except OSError:
+                pass
+
     @staticmethod
     def _identity(info, node):
         """Hardware identity that survives a replug (hidraw node and index may change)."""
@@ -394,10 +403,8 @@ class Registry:
             try:
                 fd = self._fd(node)
             except OSError as exc:
-                log.warning("cannot open %s: %s", node.path, exc)
+                log.warning("cannot open %s: %s", node.path, exc)      # not ready (EACCES just after plug): next tick
                 continue
-            if node.is_receiver:
-                receivers.append(node)
             bolt = getattr(node, "is_bolt", False)
             try:
                 if node.is_receiver:
@@ -410,6 +417,13 @@ class Registry:
                               "type": hidpp.get_device_type(fd, 0xFF)}]
             except hidpp.HidppError:
                 found = []
+            except OSError as exc:
+                # EIO / ENODEV from a node that is being unplugged: it counts as gone for this scan
+                log.warning("cannot talk to %s: %s", node.path, exc)
+                self._forget_fd(node.path)
+                continue
+            if node.is_receiver:
+                receivers.append(node)
             out += [(node, info) for info in found]
         self._probed_receivers = receivers
         return out
