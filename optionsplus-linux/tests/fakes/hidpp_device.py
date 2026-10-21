@@ -8,6 +8,7 @@ unsolicited notifications on demand. All identifiers are invented.
 import queue
 import struct
 import threading
+import time
 
 from opl_agent import hidpp
 
@@ -669,6 +670,7 @@ class SimulatedUnifying(SimulatedBolt):
         self.ignore_pairing_writes = False        # never answer a write to 0xB2 (receiver hung)
         self.notify_before_reply = False          # close notification goes out before the reply to the close
         self.hold_lock_status = False             # queue 0x4A notifications until release_lock_status()
+        self.pairing_reply_delay = 0.0            # seconds the receiver takes to answer a write to 0xB2
         self._held_lock_status = []
 
     def list_nodes(self):
@@ -717,6 +719,7 @@ class SimulatedUnifying(SimulatedBolt):
         if sub == 0x80 and address == 0xB2:
             if self.ignore_pairing_writes:
                 return True
+            time.sleep(self.pairing_reply_delay)
             action = params[0]
             if action == 0x01:                    # open the lock: [1, device (0 = any), timeout]
                 if self.fail_pairing_open:

@@ -334,3 +334,15 @@ def test_cancelling_with_the_lock_already_shut_waits_for_no_close(unifying, reg,
     unifying.emit_lock_status(open_=False)            # a device paired: news, not our close
     assert wait_for(lambda: seen and seen[-1]["state"] == "STOP")
     assert seen[-1]["error"] == "NO_PAIRING_ERROR" and seen[-1]["pairingSlot"] == index
+
+
+def test_a_slow_receiver_does_not_outlast_the_wait_for_its_echoes(unifying, reg, monkeypatch):
+    monkeypatch.setattr(model, "ECHO_SECONDS", 0.2)
+    unifying.pairing_reply_delay = 0.3                # each lock write takes longer than the wait
+    seen = _locking_seen(reg)
+    unifying.hold_lock_status = True
+    reg.open_pairing(RCV)
+    assert reg.cancel_pairing(RCV)["state"] == "CANCEL"
+    unifying.release_lock_status()                    # "open", then "closed", right after the cancel
+    assert wait_for(lambda: "CLOSED" in seen)
+    assert reg.receivers[RCV].pairing["state"] == "CANCEL"

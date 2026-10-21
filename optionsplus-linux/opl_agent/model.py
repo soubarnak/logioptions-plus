@@ -939,6 +939,7 @@ class Registry:
             except Exception:
                 self._drop_echo(r, echo)
                 raise
+            self._refresh_echoes(r, [echo])
             r.phase = "pairing"
         elif raw is not None:
             self._bolt_pair(r, raw, authentication or 0, 2)
@@ -994,7 +995,7 @@ class Registry:
                 return r.pairing
             phase = r.phase
             r.closing = True            # the receiver's own "closed" notification is no news
-            echo, staled = None, []
+            echo, staled, waiting = None, [], []
             if not r.bolt:
                 # opens still on their way belong to the pairing being cancelled; a "closed"
                 # comes back only when the lock is open
@@ -1003,6 +1004,8 @@ class Registry:
                     e[1] = True
                 if self._lock_open(r):
                     echo = self._expect_echo(r, False)
+                now = time.monotonic()
+                waiting = [e for e in r.echoes if e[2] > now]
         try:
             fd = self._receiver_fd(r)
             if not r.bolt:
@@ -1018,6 +1021,7 @@ class Registry:
                     e[1] = False
             self._drop_echo(r, echo)
             raise
+        self._refresh_echoes(r, waiting)
         with r.lock:
             if r.discovery == "START":
                 r.discovery = "CANCEL"
@@ -1031,6 +1035,15 @@ class Registry:
         echo = [opened, False, time.monotonic() + ECHO_SECONDS]
         r.echoes.append(echo)
         return echo
+
+    @staticmethod
+    def _refresh_echoes(r, echoes):
+        """The lock write just returned: the wait for `echoes` starts now. A receiver slow to
+        answer the write (up to hidpp's own timeout) is as slow to report it."""
+        with r.lock:
+            deadline = time.monotonic() + ECHO_SECONDS
+            for e in echoes:
+                e[2] = deadline
 
     @staticmethod
     def _drop_echo(r, echo):
