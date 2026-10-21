@@ -642,6 +642,48 @@ def test_a_diversion_the_kernel_driver_rewrote_after_a_reconnect_is_asserted_aga
         WheelRelay.REASSERT_DELAY = 2.0
 
 
+def test_a_lost_thumb_diversion_is_not_asserted_again_without_a_scale(agent, client, bolt, uinput):
+    import time
+    from opl_agent.wheel_relay import WheelRelay
+    WheelRelay.REASSERT_DELAY = 0.2
+    try:
+        thumb(client, speed=FAST)
+        bolt.emit_event(F_WAKE)
+        agent.settle()
+        bolt.mouse.thumb["mode"] = 0
+        bolt.mouse.thumb_diverted_resolution = 0         # the mouse no longer says how big a notch is
+        time.sleep(1.0)
+        assert bolt.mouse.thumb["mode"] == 0             # stays native, and nothing divided by zero
+        assert not bolt.turn_thumb(7)
+    finally:
+        WheelRelay.REASSERT_DELAY = 2.0
+
+
+# ---- thumb direction: the user's invert flips the sign once, whatever the mouse's own byte ---
+
+@pytest.mark.parametrize("default_direction", [0, 1])
+def test_thumb_invert_flips_the_relayed_sign_exactly_once(client, bolt, uinput, default_direction):
+    bolt.mouse.thumb_default_direction = default_direction
+    thumb(client, speed=FAST, isSmooth=True, dir="STANDARD")
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)           # to the right
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES) == [480])
+    thumb(client, speed=FAST, isSmooth=True, dir="NATURAL")
+    assert bolt.mouse.thumb["invert"] == 0                # applied here, not by the mouse as well
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES) == [480, -480])
+
+
+@pytest.mark.parametrize("default_direction", [0, 1])
+def test_a_neutral_thumb_stays_native_with_the_users_invert_and_no_sign(client, bolt, uinput, default_direction):
+    bolt.mouse.thumb_default_direction = default_direction
+    thumb(client, speed=NEUTRAL, dir="NATURAL")
+    assert bolt.mouse.thumb["mode"] == 0 and bolt.mouse.thumb["invert"] == 1
+    assert not bolt.turn_thumb(DIVERTED_RESOLUTION)        # nothing is reported to software
+    assert uinput.events == []
+    thumb(client, speed=NEUTRAL, dir="STANDARD")
+    assert bolt.mouse.thumb["mode"] == 0 and bolt.mouse.thumb["invert"] == 0
+
+
 # ---- accumulation and the speed a relay that cannot run must not forget --------------------
 
 def test_reversing_direction_drops_the_motion_held_back_the_other_way(client, bolt, uinput):

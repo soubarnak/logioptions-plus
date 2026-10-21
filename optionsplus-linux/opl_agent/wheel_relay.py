@@ -339,6 +339,8 @@ class WheelRelay:
                         self._checked_wheel(dev, True, invert=False)
                     else:
                         units = self.reg.thumb_scale(dev_id)
+                        if not units:
+                            raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 0, 2)    # no scale to relay by: stay native
                         self._checked_thumb(dev, False, ax.smooth, True)
                     with self._lock:
                         ax.units = units
@@ -409,6 +411,8 @@ class WheelRelay:
                 return
             if axis == THUMB and self.thumb_owned(dev_id):
                 return                  # the action engine consumes this motion
+            if not ax.units:
+                return                  # no scale known: nothing to divide by
             if axis == WHEEL:
                 hires, delta = parsed
                 motion = delta * HIRES_PER_NOTCH / (ax.units if hires else 1)

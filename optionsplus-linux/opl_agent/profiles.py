@@ -275,7 +275,8 @@ class ProfileStore:
             self.cards = dict(data.get("assignments") or {})
             self.apps = {a: dict(c) for a, c in (data.get("applications") or {}).items()}
             self.profile_ids = dict(data.get("profileIds") or {})
-            if data.get("speedScale", 1) < SPEED_SCALE:
+            scale = data.get("speedScale", 1)
+            if not isinstance(scale, int) or isinstance(scale, bool) or scale < SPEED_SCALE:
                 self._migrate_speed_scale()
         except FileNotFoundError:
             pass

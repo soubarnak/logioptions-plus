@@ -3,6 +3,8 @@ profiles.json written before the move holds 0.5 in the cards the agent seeded.""
 
 import json
 
+import pytest
+
 from opl_agent import profiles
 
 SCROLL = "slot_mouse_scroll_wheel_settings"
@@ -55,6 +57,14 @@ def test_a_card_that_is_not_a_wheel_card_is_left_alone(tmp_path):
     other = {"id": "x", "mouseScrollWheelSettings": {"speed": 0.5}}
     write(tmp_path, {"assignments": {"slot_other": other}})
     assert profiles.ProfileStore(str(tmp_path)).get("slot_other") == other
+
+
+@pytest.mark.parametrize("scale", [None, "2", [], True])
+def test_a_marker_that_is_no_number_counts_as_unmigrated(tmp_path, caplog, scale):
+    write(tmp_path, {"speedScale": scale, "assignments": {SCROLL: scroll_card(0.5)}})
+    store = profiles.ProfileStore(str(tmp_path))
+    assert store.get(SCROLL)["mouseScrollWheelSettings"]["speed"] == 0
+    assert "unreadable" not in caplog.text
 
 
 def test_a_new_store_writes_the_current_scale(tmp_path):

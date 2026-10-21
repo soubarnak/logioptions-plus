@@ -369,8 +369,8 @@ class InputEngine:
                 info = self.reg.thumb_info(dev.id)
                 units, right = info["per_notch"], info["positive_is_right"]
             except Exception as exc:
-                log.debug("thumb wheel resolution unknown for %s: %s", dev.id, exc)
-                units, right = 0, True
+                log.warning("thumb wheel resolution unknown for %s, assuming the usual direction: %s", dev.id, exc)
+                units, right = 0, False       # the only mouse seen reports a turn to the right as negative
             binding.step = units if units and units > 0 else gestures.THUMB_STEP
             binding.sign = 1 if right else -1
 
