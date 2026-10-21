@@ -120,7 +120,7 @@ class Device:
         out = {
             "id": self.id,
             "pid": self.pid,
-            "state": "ACTIVE" if self.connected else "ABSENT",
+            "state": "ACTIVE" if self.connected else "NOT_CONNECTED",
             "connectionType": CONN_BOLT,
             "hasWirelessInterface": True,
             "deviceType": self.catalogue.get("type") or self.dtype,
@@ -143,6 +143,9 @@ class Device:
             "firstConnectedTimestamp": str(self.first_connected),
             **self._battery_fields(),
         }
+        if not self.connected:
+            # the real agent keeps a device it cannot reach on the home screen as NOT_CONNECTED
+            out["disconnectReason"] = {"reason": "LINK_LOSS"}
         if self.connected and out["firmwareVersion"]:
             # SETTINGS reads the version from the DEVIO interface, not the top-level field
             out["activeInterfaces"] = [{"type": "DEVIO", "id": self.id, "pid": self.pid,

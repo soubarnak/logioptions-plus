@@ -50,6 +50,15 @@ def _receiver_info(receiver):
     return info
 
 
+def _announce_unreachable(server, info):
+    """A device that is known but unreachable (switched off, out of range, receiver unplugged): the real
+    agent broadcasts /devices/state/changed with state NOT_CONNECTED (disconnectReason LINK_LOSS) and
+    keeps the card on the home screen, so the open device page can leave. /devices/state/deactivated
+    stays for clients that listen to it."""
+    server.broadcast("/devices/state/changed", info)
+    server.broadcast("/devices/state/deactivated", info)
+
+
 def _announce_gone(server, info):
     """Tell the UI a device or receiver is gone. The UI subscribes neither /devices/state/deactivated
     nor (for a supported device) /devices/options/device_removal: it drops a card when
@@ -68,7 +77,7 @@ def _announce(server, reg, events):
         try:
             info = d.info()
             info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
-            _announce_gone(server, info)
+            _announce_unreachable(server, info)
         except Exception:
             log.exception("announcing removal of %s failed", d.id)
     for r in events["receiver_removed"]:

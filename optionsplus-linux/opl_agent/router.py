@@ -988,7 +988,7 @@ class Router:
     def _device_route(self, verb, parts, path, payload):
         reg = self.reg
         if parts[:2] == ["devices", "list"]:
-            infos = [d.info() for d in reg.devices.values()] + [r.info() for r in reg.receivers.values()]
+            infos = [d.info() for d in reg.devices.values()] + [d.info() for d in reg.absent.values()] + [r.info() for r in reg.receivers.values()]
             return "SUCCESS", {"@type": TYPE + "logi.protocol.devices.Device.Info.List",
                                "deviceInfos": infos}, ""
         if parts[:3] == ["devices", "ever_connected", "list"]:

@@ -40,8 +40,13 @@ def next_active(client):
     """Next /devices/state/changed push of a device that is not absent (a removal also travels there)."""
     while True:
         p = next_push(client, "/devices/state/changed")
-        if p["state"] != "ABSENT":
+        if p["state"] not in ("ABSENT", "NOT_CONNECTED"):
             return p
+
+
+def device_states(client):
+    infos = client.call("GET", "/devices/list")["payload"].get("deviceInfos", [])
+    return {d["id"]: d["state"] for d in infos if d["deviceType"] != "RECEIVER"}
 
 
 def device_ids(client):
@@ -51,34 +56,31 @@ def device_ids(client):
 
 # ---- receiver unplug / replug ----------------------------------------------
 
-def test_unplugging_the_receiver_deactivates_the_device_and_drops_its_card(bolt, live):
+def test_unplugging_the_receiver_leaves_the_device_not_connected_on_the_home_screen(bolt, live):
+    """Issue #36: the real agent reports an unreachable device as NOT_CONNECTED (LINK_LOSS) and keeps
+    its card, so the open device page can leave instead of showing INACTIVE / MISSING ASSIGNMENT."""
     bolt.unplug()
     gone = next_push(live, "/devices/state/deactivated")
-    assert gone["id"] == DEV and gone["state"] == "ABSENT" and gone["connected"] is False
-    assert device_ids(live) == []
+    assert gone["id"] == DEV and gone["state"] == "NOT_CONNECTED" and gone["connected"] is False
+    assert gone["disconnectReason"]["reason"] == "LINK_LOSS"
+    assert device_states(live) == {DEV: "NOT_CONNECTED"}
 
 
-def test_the_ui_drops_the_card_on_unplug_through_the_paths_it_subscribes(bolt, ui):
-    """The UI removes a card when /devices/state/changed carries the device with state ABSENT;
-    /devices/devio/device_removal carries {deviceId} (its firmware-update unplug handling)."""
+def test_the_ui_gets_not_connected_on_unplug_through_the_path_it_subscribes(bolt, ui):
+    """The UI subscribes /devices/state/changed: the device arrives there NOT_CONNECTED with
+    LINK_LOSS (as the real agent sends it) and stays in /devices/list; no removal event goes out."""
     bolt.unplug()
-    seen = {}
-    while len(seen) < 2:
-        m = ui.recv()
-        if m.get("verb") != "BROADCAST":
-            continue
-        if m["path"] == "/devices/state/changed" and m["payload"].get("id") == DEV:
-            seen["changed"] = m["payload"]
-        elif m["path"] == "/devices/devio/device_removal" and m["payload"].get("deviceId") == DEV:
-            seen["removal"] = m["payload"]
-    assert seen["changed"]["state"] == "ABSENT" and seen["changed"]["connected"] is False
-    assert seen["removal"]["deviceId"] == DEV
-    assert device_ids(ui) == []
+    p = next_push(ui, "/devices/state/changed")
+    while p["id"] != DEV:
+        p = next_push(ui, "/devices/state/changed")
+    assert p["state"] == "NOT_CONNECTED" and p["connected"] is False
+    assert p["disconnectReason"]["reason"] == "LINK_LOSS"
+    assert device_states(ui) == {DEV: "NOT_CONNECTED"}
 
 
 def test_the_ui_gets_the_card_back_active_on_replug(bolt, ui):
     bolt.unplug()
-    assert next_push(ui, "/devices/state/changed")["state"] == "ABSENT"
+    assert next_push(ui, "/devices/state/changed")["state"] == "NOT_CONNECTED"
     bolt.plug()
     back = next_active(ui)
     while back["id"] != DEV:
@@ -109,7 +111,7 @@ def test_a_different_mouse_on_the_replugged_receiver_gets_a_new_id(bolt, live):
     bolt.mouse.wpid = 0x4343
     bolt.plug()
     assert next_active(live)["id"] == "dev00000001"
-    assert device_ids(live) == ["dev00000001"]
+    assert device_states(live) == {"dev00000001": "ACTIVE", DEV: "NOT_CONNECTED"}
 
 
 def test_battery_is_refreshed_on_return(bolt, live):
@@ -137,7 +139,7 @@ def test_settings_are_reapplied_when_the_receiver_returns(bolt, live):
 def test_switching_the_mouse_off_deactivates_it(bolt, live):
     bolt.mouse.power(False)
     assert next_push(live, "/devices/state/deactivated")["id"] == DEV
-    assert device_ids(live) == []
+    assert device_states(live) == {DEV: "NOT_CONNECTED"}
 
 
 def test_switching_the_mouse_on_restores_it_with_settings_and_battery(bolt, live):
