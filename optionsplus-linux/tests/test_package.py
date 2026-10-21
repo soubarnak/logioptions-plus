@@ -296,7 +296,10 @@ def test_stage_installs_every_module_the_bootstrap_requires(tmp_path):
             continue
         seen.add(name)
         assert (staged / name).is_file(), name
-        todo += [m + ".js" for m in re.findall(r"require\('\./([\w-]+)'\)", (staged / name).read_text())]
+        here = Path(name).parent
+        for m in re.findall(r"""require\(\s*(['"])\./([\w./-]+?)\1\s*\)""", (staged / name).read_text()):
+            rel = (here / m[1]).as_posix()
+            todo.append(rel if rel.endswith(".js") else rel + ".js")
     assert {"main.js", "links.js", "guard.js"} <= seen
 
 
