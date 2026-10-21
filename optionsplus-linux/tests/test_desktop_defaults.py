@@ -121,3 +121,42 @@ def test_the_workspace_actions_are_not_in_what_the_ui_is_served(client):
     from tests.test_action_catalogue import presets, rac
     served = json.dumps([presets(client), rac(client)])
     assert "SWITCH_WORKSPACE" not in served
+
+
+# Issue #37: niri's own default config (resources/default-config.kdl) binds these; the GNOME chords
+# for the same actions run something else there (Super+Up is focus-window-up, Super+D the launcher).
+KEY_Q, KEY_L, KEY_F, KEY_LEFTALT = 16, 38, 33, 56
+KEY_LEFTSHIFT = 42
+
+
+@pytest.mark.parametrize("action, expected", [
+    ("CLOSE", (M, KEY_Q)),                          # Mod+Q: close-window
+    ("LOCK", (M, KEY_LEFTALT, KEY_L)),              # Super+Alt+L: spawn swaylock
+    ("MAXIMIZE", (M, KEY_F)),                       # Mod+F: maximize-column
+    ("FULLSCREEN", (M, KEY_LEFTSHIFT, KEY_F)),      # Mod+Shift+F: fullscreen-window
+])
+def test_niri_uses_its_own_default_binds(action, expected):
+    assert chord("niri", action) == expected
+
+
+@pytest.mark.parametrize("action", ["SHOW_DESKTOP", "DESKTOP", "MINIMIZE"])
+def test_niri_leaves_actions_it_has_no_default_bind_for_unassigned(action):
+    assert chord("niri", action) is None
+    assert chord("GNOME", action) is not None       # the other desktops keep theirs
+
+
+def test_an_unassigned_niri_action_is_refused_until_actions_toml_sets_it(tmp_path):
+    card = {"id": "x", "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "SYSTEM", "system": {"action": "MINIMIZE"}}}
+    with pytest.raises(engine.Unsupported, match="MINIMIZE"):
+        engine.compile_card(card, sysactions.ActionTable(desktop="niri"))
+    path = tmp_path / "actions.toml"
+    path.write_text('[system]\nMINIMIZE = "super+h"\n')
+    table = sysactions.ActionTable(str(path), desktop="niri")
+    assert engine.compile_card(card, table) == [("system", "MINIMIZE")]
+    assert table.chord("MINIMIZE") == sysactions.parse_chord("super+h")
+
+
+def test_other_desktops_keep_the_gnome_window_actions():
+    assert chord("GNOME", "CLOSE") == (KEY_LEFTALT, 62) and chord("GNOME", "LOCK") == (M, KEY_L)
+    assert chord("GNOME", "MAXIMIZE") == (M, 103) and chord("GNOME", "FULLSCREEN") == (87,)

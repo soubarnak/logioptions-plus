@@ -124,11 +124,19 @@ DEFAULTS = {
 }
 
 # Per-desktop overrides of DEFAULTS, by lower-case XDG_CURRENT_DESKTOP name. "chords" replace default
-# chords; "cards" swap the SYSTEM action a depot card compiles to (card id -> action), only while
+# chords (None leaves the action unassigned: the desktop has no bind for it and the GNOME one would
+# run something else; the user's actions.toml can still set it); "cards" swap the SYSTEM action a depot card compiles to (card id -> action), only while
 # the card still holds its Windows chord (see engine.WINDOWS_CHORD_ACTIONS).
 DESKTOPS = {
     "niri": {
+        # niri's own default config (resources/default-config.kdl). It has no minimize and no
+        # show-desktop, and Mod+D is its launcher, so those stay unassigned.
         "chords": {"TASK_VIEW": (M, 24), "APP_EXPOSE": (M, 24),                  # Mod+O: toggle-overview
+                   "CLOSE": (M, 16),                                            # Mod+Q: close-window
+                   "LOCK": (M, A, 38),                                          # Super+Alt+L: spawn swaylock
+                   "MAXIMIZE": (M, 33),                                         # Mod+F: maximize-column
+                   "FULLSCREEN": (M, S, 33),                                    # Mod+Shift+F: fullscreen-window
+                   "SHOW_DESKTOP": None, "DESKTOP": None, "MINIMIZE": None,
                    "SWITCH_BETWEEN_DESKTOPS_LEFT": (M, KEY_LEFT),               # Mod+Left: focus-column-left
                    "SWITCH_BETWEEN_DESKTOPS_RIGHT": (M, KEY_RIGHT)},
         "cards": {"inner_card_vd_start_menu": "SWITCH_WORKSPACE_UP",
@@ -214,8 +222,11 @@ class ActionTable:
 
     def chord(self, action):
         """The key codes to send for `action`, or None when it has no Linux keystroke."""
-        return (self._reload().get(action) or self._desktop.get("chords", {}).get(action)
-                or DEFAULTS.get(action))
+        user = self._reload().get(action)
+        if user:
+            return user
+        chords = self._desktop.get("chords", {})
+        return chords[action] if action in chords else DEFAULTS.get(action)
 
     def card_action(self, card_id):
         """The action this desktop gives the depot card `card_id` in place of its usual one, or None."""

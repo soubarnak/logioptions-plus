@@ -137,7 +137,7 @@ def _windows_chord_action(card):
         return None
     ks = macro.get("keystroke") or {}
     action, code, mods = entry
-    if ks.get("code") == code and tuple(sorted(ks.get("modifiers") or ())) == mods:
+    if (ks.get("code") or None) == code and tuple(sorted(ks.get("modifiers") or ())) == mods:
         return action
     return None
 
@@ -160,7 +160,7 @@ def compile_card(card, table=None):
             if usage not in keymap.MODIFIER_USAGES:
                 raise Unsupported("modifier %r is not a modifier key" % (usage,))
             mods.append(keymap.linux_key(usage))
-        if ks.get("code") is None and mods:
+        if not ks.get("code") and mods:                 # HID usage 0 is "no event": the proto default for no key
             return [("emit", _tap(mods))]               # a modifier on its own, such as the Windows key
         key = keymap.linux_key(ks.get("code"))
         if key is None:

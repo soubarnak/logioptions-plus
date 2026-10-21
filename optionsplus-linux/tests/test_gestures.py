@@ -618,3 +618,21 @@ def test_resetting_to_defaults_leaves_a_depot_shaped_default_wrapper_diverted(de
     assert bolt.mouse.raw_xy == set()           # a plain key needs the press only
     assert client.call("SET", "/v2/profiles/reset", {"deviceId": "dev00000000"})["result"]["code"] == "SUCCESS"
     assert bolt.mouse.diverted == {GESTURE} and bolt.mouse.raw_xy == {GESTURE}
+
+
+@pytest.mark.parametrize("keystroke", [{"code": 0, "modifiers": [META]}, {"modifiers": [META]}])
+def test_the_windows_modifier_preset_card_taps_the_meta_key(keystroke):
+    """Issue #37: card_global_presets_modifier_windows carries code 0 (the proto default, HID
+    "no event"), not a missing code; it is the Windows key on its own."""
+    from opl_agent import engine
+    card = {"id": "card_global_presets_modifier_windows", "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "KEYSTROKE", "keystroke": keystroke}}
+    assert engine.compile_card(card) == [("emit", [(1, KEY_META, 1), (1, KEY_META, 0)])]
+
+
+def test_code_zero_without_a_modifier_is_still_refused():
+    from opl_agent import engine
+    card = {"id": "x", "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "KEYSTROKE", "keystroke": {"code": 0, "modifiers": []}}}
+    with pytest.raises(engine.Unsupported):
+        engine.compile_card(card)
