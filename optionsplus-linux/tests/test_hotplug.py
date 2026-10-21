@@ -529,47 +529,83 @@ def _hiccup_probe(monkeypatch, errno_):
     return on
 
 
-def test_a_node_that_keeps_timing_out_is_dropped_after_the_held_scans_run_out(bolt, monkeypatch):
-    import errno
-    from opl_agent.model import HELD_SCANS, Registry
+class Clock:
+    """A clock the test moves by hand, for the held-node budget."""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _held_registry(bolt):
+    from opl_agent.model import Registry
     reg = Registry(bolt)
+    reg._now = clock = Clock()
     reg.scan()
+    return reg, clock
+
+
+def test_a_node_that_keeps_timing_out_is_dropped_once_its_time_runs_out(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import HELD_SECONDS
+    reg, clock = _held_registry(bolt)
     _hiccup_probe(monkeypatch, errno.ETIMEDOUT)
-    for _ in range(HELD_SCANS):
+    for _ in range(3):
         events = reg.rescan()
         assert events["removed"] == [] and events["receiver_removed"] == []
+        clock.t += HELD_SECONDS / 3 - 0.1
+    events = reg.rescan()
+    assert events["removed"] == [] and events["receiver_removed"] == []     # just inside the budget
+    clock.t += 0.5
     events = reg.rescan()
     assert [r.id for r in events["receiver_removed"]] == ["rcv00000000"]
     assert [d.id for d in events["removed"]] == [DEV]
     assert reg.devices == {} and reg.receivers == {} and DEV in reg.absent
 
 
-def test_an_answer_between_hiccups_starts_the_held_count_again(bolt, monkeypatch):
+def test_rapid_rescans_while_pairing_settles_do_not_use_up_the_budget(bolt, monkeypatch):
     import errno
-    from opl_agent.model import HELD_SCANS, Registry
-    reg = Registry(bolt)
-    reg.scan()
+    from opl_agent.model import SETTLE_SECONDS, SETTLE_TRIES
+    reg, clock = _held_registry(bolt)
+    _hiccup_probe(monkeypatch, errno.ETIMEDOUT)
+    for _ in range(5):                              # five pairing settles, back to back
+        for _ in range(SETTLE_TRIES):
+            events = reg.rescan()
+            assert events["removed"] == [] and events["receiver_removed"] == []
+            clock.t += SETTLE_SECONDS
+    assert list(reg.devices) == [DEV] and list(reg.receivers) == ["rcv00000000"]
+
+
+def test_an_answer_between_hiccups_starts_the_held_time_again(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import HELD_SECONDS
+    reg, clock = _held_registry(bolt)
     hiccup = _hiccup_probe(monkeypatch, errno.EPIPE)
-    for _ in range(HELD_SCANS):
-        reg.rescan()
+    reg.rescan()
+    clock.t += HELD_SECONDS - 1
+    reg.rescan()
     hiccup["fail"] = False
     reg.rescan()
     hiccup["fail"] = True
-    for _ in range(HELD_SCANS):
-        events = reg.rescan()
-        assert events["removed"] == [] and events["receiver_removed"] == []
+    clock.t += 2
+    events = reg.rescan()                           # 11 s since the first hold, 0 s since the answer
+    assert events["removed"] == [] and events["receiver_removed"] == []
     assert list(reg.devices) == [DEV] and list(reg.receivers) == ["rcv00000000"]
 
 
 def test_a_dropped_node_that_answers_again_returns_with_the_same_ids(bolt, monkeypatch):
     import errno
-    from opl_agent.model import HELD_SCANS, Registry
-    reg = Registry(bolt)
-    reg.scan()
+    from opl_agent.model import HELD_SECONDS
+    reg, clock = _held_registry(bolt)
     hiccup = _hiccup_probe(monkeypatch, errno.ETIMEDOUT)
-    for _ in range(HELD_SCANS + 2):
-        reg.rescan()
+    reg.rescan()
+    clock.t += HELD_SECONDS + 1
+    reg.rescan()
     assert reg.devices == {} and reg.receivers == {}
+    assert reg._held_since == {}                    # a later hold starts a budget of its own
+    reg.rescan()
     hiccup["fail"] = False
     events = reg.rescan()
     assert events["receiver_added"] == ["rcv00000000"]
