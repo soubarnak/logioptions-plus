@@ -476,12 +476,28 @@ def test_a_hiccup_while_a_device_is_rebuilt_in_place_keeps_it_without_flicker(bo
     reg = Registry(bolt)
     reg.scan()
     old = reg.devices[DEV]
-    bolt.unplug()
-    bolt.plug("/dev/hidraw-sim7")                   # back on another node before any scan
     _fail_in_build(monkeypatch, errno.ETIMEDOUT)
-    events = reg.rescan()
+    events = reg.rescan(force=True)                 # rebuilt on the node it is already on
     assert events["removed"] == [] and events["returned"] == []
     assert reg.devices[DEV] is old and reg.absent == {}
+
+
+def test_a_hiccup_while_a_device_is_rebuilt_on_another_node_does_not_keep_the_old_node(bolt, monkeypatch):
+    import errno
+    from opl_agent import hidpp
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    bolt.unplug()
+    bolt.plug("/dev/hidraw-sim7")                   # back on another node before any scan
+    real = _fail_in_build(monkeypatch, errno.ETIMEDOUT)
+    events = reg.rescan()
+    assert [d.id for d in events["removed"]] == [DEV]
+    assert reg.devices == {} and DEV in reg.absent  # not kept on the node that went away
+    monkeypatch.setattr(hidpp, "feature_index", real)
+    events = reg.rescan()
+    assert events["returned"] == [DEV] and events["added"] == []
+    assert reg.devices[DEV].node.path == "/dev/hidraw-sim7"
 
 
 def test_pairing_on_a_receiver_whose_handle_was_released_fails_cleanly(bolt):

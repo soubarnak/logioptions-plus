@@ -652,8 +652,9 @@ class Registry:
             if built is not None:
                 new_devices[dev_id] = built
                 events["returned"].append(dev_id)
-            elif node.path not in self._gone:
+            elif node.path not in self._gone and d.node.path == node.path:
                 new_devices[dev_id] = d          # a hiccup: keep it as it was, no ABSENT/ACTIVE flicker
+            # else it moved to another node: absent, and the next scan builds it there (same id)
         for dev_id, d in list(self.absent.items()):
             hit = by_key.pop((d.pid, d.name), None)
             if hit is None:
