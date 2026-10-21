@@ -659,6 +659,29 @@ def test_a_lost_thumb_diversion_is_not_asserted_again_without_a_scale(agent, cli
         WheelRelay.REASSERT_DELAY = 2.0
 
 
+def test_a_scroll_wheel_without_a_scale_stays_native(client, bolt):
+    bolt.mouse.wheel_multiplier = 0                      # the mouse does not say how many steps make a notch
+    reply = scroll(client, speed=FAST)
+    assert reply["result"]["code"] != "SUCCESS"
+    assert bolt.mouse.wheel_mode & TARGET_BIT == 0
+
+
+def test_a_lost_scroll_diversion_is_not_asserted_again_without_a_scale(agent, client, bolt):
+    import time
+    from opl_agent.wheel_relay import WheelRelay
+    WheelRelay.REASSERT_DELAY = 0.2
+    try:
+        scroll(client, speed=FAST)
+        bolt.emit_event(F_WAKE)
+        agent.settle()
+        bolt.mouse.wheel_mode &= ~TARGET_BIT
+        bolt.mouse.wheel_multiplier = 0
+        time.sleep(1.0)
+        assert bolt.mouse.wheel_mode & TARGET_BIT == 0
+    finally:
+        WheelRelay.REASSERT_DELAY = 2.0
+
+
 # ---- thumb direction: the user's invert flips the sign once, whatever the mouse's own byte ---
 
 @pytest.mark.parametrize("default_direction", [0, 1])

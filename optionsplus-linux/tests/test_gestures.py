@@ -275,6 +275,18 @@ def test_the_thumb_wheels_default_direction_does_not_swap_the_actions(client, bo
     assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
 
 
+def test_a_thumb_wheel_whose_info_cannot_be_read_still_runs_the_right_action(client, bolt, uinput, monkeypatch, caplog):
+    from opl_agent import model
+
+    def unreadable(self, dev_id):
+        raise OSError("no answer")
+    monkeypatch.setattr(model.Registry, "thumb_info", unreadable)
+    assign_thumb(client)
+    bolt.rotate_thumb(gestures_mod.THUMB_STEP)      # a right turn, the usual direction assumed, the default step
+    assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
+    assert caplog.text.count("thumb wheel resolution unknown") <= 1
+
+
 def test_a_turn_of_several_steps_runs_the_action_once_per_step(client, bolt, uinput):
     assign_thumb(client)
     bolt.rotate_thumb(3 * NOTCH)

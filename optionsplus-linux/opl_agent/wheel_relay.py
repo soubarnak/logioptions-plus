@@ -149,6 +149,8 @@ class WheelRelay:
                 if not is_neutral(new["speed"]):
                     self._sink()        # a diverted wheel with nowhere to go would not scroll at all
                     units = self.reg.wheel_units_per_notch(dev.id)
+                    if not units:
+                        raise hidpp.HidppError(hidpp.F_HIRES_WHEEL, 0, 2)    # no scale to relay by: stay native
                     self._checked_wheel(dev, True, invert=False)
                 else:
                     units = 0
@@ -336,6 +338,8 @@ class WheelRelay:
                     log.info("%s wheel of %s lost its diversion; diverting it again", axis, dev_id)
                     if axis == WHEEL:
                         units = self.reg.wheel_units_per_notch(dev_id)
+                        if not units:
+                            raise hidpp.HidppError(hidpp.F_HIRES_WHEEL, 0, 2)    # no scale to relay by: stay native
                         self._checked_wheel(dev, True, invert=False)
                     else:
                         units = self.reg.thumb_scale(dev_id)

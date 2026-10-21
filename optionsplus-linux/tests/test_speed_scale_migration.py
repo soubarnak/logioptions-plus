@@ -67,6 +67,12 @@ def test_a_marker_that_is_no_number_counts_as_unmigrated(tmp_path, caplog, scale
     assert "unreadable" not in caplog.text
 
 
+@pytest.mark.parametrize("scale", [2, 2.0, 3])
+def test_a_marker_that_is_a_real_number_at_the_scale_counts_as_migrated(tmp_path, scale):
+    write(tmp_path, {"speedScale": scale, "assignments": {SCROLL: scroll_card(0.5)}})
+    assert profiles.ProfileStore(str(tmp_path)).get(SCROLL)["mouseScrollWheelSettings"]["speed"] == 0.5
+
+
 def test_a_new_store_writes_the_current_scale(tmp_path):
     store = profiles.ProfileStore(str(tmp_path))
     store.set(SCROLL, scroll_card(0.25))

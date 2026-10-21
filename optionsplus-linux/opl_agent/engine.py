@@ -251,7 +251,8 @@ class InputEngine:
         self._held = {}                 # dev_id -> set of cids held down now
         self._holding = {}              # dev_id -> {cid: key codes} a Hold keeps pressed now
         self.active_app = None          # application id whose profile is in force; None: the default
-        self._swipes = {}               # dev_id -> (cid, Swipe) of the gesture button press in progress
+        self._thumb_warned = set()      # dev ids whose unreadable thumb wheel info was already logged
+        self._swipes = {}              # dev_id -> (cid, Swipe) of the gesture button press in progress
         self.held_elsewhere = lambda dev_id, key: False   # True: another owner (the wheel relay) diverted `key`
         self.on_stale = []              # callables(dev_id, slot_id, app_id, message): a stored card that no longer runs
         registry.on_button_event.append(self.on_event)
@@ -369,7 +370,9 @@ class InputEngine:
                 info = self.reg.thumb_info(dev.id)
                 units, right = info["per_notch"], info["positive_is_right"]
             except Exception as exc:
-                log.warning("thumb wheel resolution unknown for %s, assuming the usual direction: %s", dev.id, exc)
+                if dev.id not in self._thumb_warned:       # once per device, not on every sync
+                    self._thumb_warned.add(dev.id)
+                    log.warning("thumb wheel resolution unknown for %s, assuming the usual direction: %s", dev.id, exc)
                 units, right = 0, False       # the only mouse seen reports a turn to the right as negative
             binding.step = units if units and units > 0 else gestures.THUMB_STEP
             binding.sign = 1 if right else -1
