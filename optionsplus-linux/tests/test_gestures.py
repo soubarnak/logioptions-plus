@@ -442,22 +442,47 @@ def test_a_keystroke_without_key_or_modifier_is_refused():
 
 
 # Top-level preset cards (ticket #22): the depot ships them as the same Windows chords.
+# id -> (keystroke code, modifiers) as the depot has it, and the action it compiles to.
 PRESET_CHORDS = {
-    "card_global_presets_desktop_left": ((80, CTRL, META), "SWITCH_BETWEEN_DESKTOPS_LEFT"),
-    "card_global_presets_desktop_right": ((79, CTRL, META), "SWITCH_BETWEEN_DESKTOPS_RIGHT"),
-    "card_global_presets_win_hide_show_desktop": ((7, META), "SHOW_DESKTOP"),
-    "card_global_presets_win_switch_language": ((44, META), "SWITCH_LANGUAGE"),
-    "card_global_presets_win_screen_snip": ((22, 225, META), "WINDOWS_SCREEN_CAPTURE"),
+    "card_global_presets_desktop_left": ((80, [224, 227]), "SWITCH_BETWEEN_DESKTOPS_LEFT"),
+    "card_global_presets_desktop_right": ((79, [224, 227]), "SWITCH_BETWEEN_DESKTOPS_RIGHT"),
+    "card_global_presets_win_hide_show_desktop": ((7, [227]), "SHOW_DESKTOP"),
+    "card_global_presets_win_switch_language": ((44, [227]), "SWITCH_LANGUAGE"),
+    "card_global_presets_win_screen_snip": ((22, [225, 227]), "WINDOWS_SCREEN_CAPTURE"),
 }
+
+
+def preset_card(card_id, code=None, mods=None):
+    (depot_code, depot_mods), _ = PRESET_CHORDS[card_id]
+    return {"id": card_id, "attribute": "MACRO_PLAYBACK", "readOnly": True,
+            "macro": {"type": "KEYSTROKE", "keystroke": {"code": depot_code if code is None else code,
+                                                         "modifiers": depot_mods if mods is None else mods}}}
 
 
 @pytest.mark.parametrize("card_id", sorted(PRESET_CHORDS))
 def test_a_windows_chord_preset_card_compiles_to_the_linux_desktop_action(card_id):
     from opl_agent import engine
-    (code, *mods), action = PRESET_CHORDS[card_id]
-    card = {"id": card_id, "attribute": "MACRO_PLAYBACK",
-            "macro": {"type": "KEYSTROKE", "keystroke": {"code": code, "modifiers": mods}}}
-    assert engine.compile_card(card) == [("system", action)]
+    assert engine.compile_card(preset_card(card_id)) == [("system", PRESET_CHORDS[card_id][1])]
+
+
+@pytest.mark.parametrize("card_id", sorted(PRESET_CHORDS))
+def test_a_button_bound_to_a_windows_chord_preset_card_runs_the_linux_desktop_action(card_id):
+    from opl_agent import engine
+    assert engine.compile_binding(preset_card(card_id)) == [("system", PRESET_CHORDS[card_id][1])]
+
+
+def test_a_wrapper_card_plays_the_mapped_preset_card_it_has_selected():
+    from opl_agent import engine
+    wrapper = {"id": "card_wrapper", "attribute": "ONE_OF", "selectedNestedCard": "right",
+               "nestedCards": {"right": preset_card("card_global_presets_desktop_right")}}
+    assert engine.compile_card(wrapper) == [("system", "SWITCH_BETWEEN_DESKTOPS_RIGHT")]
+    assert engine.compile_binding(wrapper) == [("system", "SWITCH_BETWEEN_DESKTOPS_RIGHT")]
+
+
+def test_a_preset_id_whose_keystroke_was_changed_plays_the_recorded_chord():
+    from opl_agent import engine
+    card = preset_card("card_global_presets_desktop_right", code=4, mods=[224])   # Ctrl+A
+    assert engine.compile_card(card) == [("emit", [(1, KEY_CTRL, 1), (1, 30, 1), (1, 30, 0), (1, KEY_CTRL, 0)])]
 
 
 def test_a_preset_card_without_a_linux_equivalent_keeps_its_chord():

@@ -112,28 +112,45 @@ def _compile_sequence(seq):
 # Cards of the depot, by id, that carry a Windows chord (Win+Ctrl+Left, Win+D, the Windows key) that no
 # Linux desktop binds: the nested cards of the default gesture card and the top-level preset cards
 # (card_global_presets_*). They compile to the SYSTEM action of the same meaning, whose chord the user
-# can retune in actions.toml. Any other keystroke card injects its chord unchanged.
+# can retune in actions.toml. Any other keystroke card injects its chord unchanged. Each entry is
+# (action, key code, modifiers) of the depot's own chord: a card of that id whose keystroke has been
+# changed is the user's own chord and plays as recorded. The depot marks these cards read-only, so the
+# UI should not let a preset keep its id after an edit; the check is a guard, not a known case.
 WINDOWS_CHORD_ACTIONS = {
-    "inner_card_vd_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
-    "inner_card_vd_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
-    "inner_card_vd_hide_show_desktop": "SHOW_DESKTOP",
-    "inner_card_vd_start_menu": "TASK_VIEW",                     # the overview
-    "card_global_presets_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
-    "card_global_presets_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
-    "card_global_presets_win_hide_show_desktop": "SHOW_DESKTOP",
-    "card_global_presets_win_switch_language": "SWITCH_LANGUAGE",
-    "card_global_presets_win_screen_snip": "WINDOWS_SCREEN_CAPTURE",
+    "inner_card_vd_desktop_left": ("SWITCH_BETWEEN_DESKTOPS_LEFT", 80, (224, 227)),
+    "inner_card_vd_desktop_right": ("SWITCH_BETWEEN_DESKTOPS_RIGHT", 79, (224, 227)),
+    "inner_card_vd_hide_show_desktop": ("SHOW_DESKTOP", 7, (227,)),
+    "inner_card_vd_start_menu": ("TASK_VIEW", None, (227,)),                 # the overview
+    "card_global_presets_desktop_left": ("SWITCH_BETWEEN_DESKTOPS_LEFT", 80, (224, 227)),
+    "card_global_presets_desktop_right": ("SWITCH_BETWEEN_DESKTOPS_RIGHT", 79, (224, 227)),
+    "card_global_presets_win_hide_show_desktop": ("SHOW_DESKTOP", 7, (227,)),
+    "card_global_presets_win_switch_language": ("SWITCH_LANGUAGE", 44, (227,)),
+    "card_global_presets_win_screen_snip": ("WINDOWS_SCREEN_CAPTURE", 22, (225, 227)),
 }
+
+
+def _windows_chord_action(card):
+    """The SYSTEM action `card` stands for, when it is a depot card still holding its Windows chord."""
+    entry = WINDOWS_CHORD_ACTIONS.get(card.get("id"))
+    macro = card.get("macro") or {}
+    if not entry or macro.get("type") != "KEYSTROKE":
+        return None
+    ks = macro.get("keystroke") or {}
+    action, code, mods = entry
+    if ks.get("code") == code and tuple(sorted(ks.get("modifiers") or ())) == mods:
+        return action
+    return None
 
 
 def compile_card(card, table=None):
     """The steps a press of `card` plays: ("emit", events), ("wait", seconds) or ("system", action).
     Raises Unsupported. System actions are resolved when pressed, so the user's file applies live."""
     table = table or sysactions.ActionTable()
-    action = WINDOWS_CHORD_ACTIONS.get((card or {}).get("id"))
+    card = resolve_card(card)                       # a wrapper plays the card it has selected
+    action = _windows_chord_action(card)
     if action:
         return compile_card({"macro": {"type": "SYSTEM", "system": {"action": action}}}, table)
-    macro = resolve_card(card).get("macro") or {}
+    macro = card.get("macro") or {}
     kind = macro.get("type")
     if kind == "KEYSTROKE":
         ks = macro.get("keystroke") or {}
