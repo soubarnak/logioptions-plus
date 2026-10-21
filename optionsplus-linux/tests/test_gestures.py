@@ -441,6 +441,32 @@ def test_a_keystroke_without_key_or_modifier_is_refused():
         engine.compile_card(card)
 
 
+# Top-level preset cards (ticket #22): the depot ships them as the same Windows chords.
+PRESET_CHORDS = {
+    "card_global_presets_desktop_left": ((80, CTRL, META), "SWITCH_BETWEEN_DESKTOPS_LEFT"),
+    "card_global_presets_desktop_right": ((79, CTRL, META), "SWITCH_BETWEEN_DESKTOPS_RIGHT"),
+    "card_global_presets_win_hide_show_desktop": ((7, META), "SHOW_DESKTOP"),
+    "card_global_presets_win_switch_language": ((44, META), "SWITCH_LANGUAGE"),
+    "card_global_presets_win_screen_snip": ((22, 225, META), "WINDOWS_SCREEN_CAPTURE"),
+}
+
+
+@pytest.mark.parametrize("card_id", sorted(PRESET_CHORDS))
+def test_a_windows_chord_preset_card_compiles_to_the_linux_desktop_action(card_id):
+    from opl_agent import engine
+    (code, *mods), action = PRESET_CHORDS[card_id]
+    card = {"id": card_id, "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "KEYSTROKE", "keystroke": {"code": code, "modifiers": mods}}}
+    assert engine.compile_card(card) == [("system", action)]
+
+
+def test_a_preset_card_without_a_linux_equivalent_keeps_its_chord():
+    from opl_agent import engine
+    card = {"id": "card_global_presets_win_switch_screen", "attribute": "MACRO_PLAYBACK",
+            "macro": {"type": "KEYSTROKE", "keystroke": {"code": 19, "modifiers": [META]}}}
+    assert engine.compile_card(card) == [("emit", [(1, KEY_META, 1), (1, 25, 1), (1, 25, 0), (1, KEY_META, 0)])]
+
+
 def test_the_default_gesture_card_compiles_with_linux_desktop_actions():
     from opl_agent import engine
     binding = engine.compile_binding(default_gesture_card())

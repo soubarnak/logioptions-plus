@@ -109,14 +109,20 @@ def _compile_sequence(seq):
     return steps
 
 
-# Nested cards of the depot's default gesture card, by id: Windows chords (Win+Ctrl+Left, Win+D, the
-# Windows key) that no Linux desktop binds. They compile to the SYSTEM action of the same meaning, whose
-# chord the user can retune in actions.toml. Any other keystroke card injects its chord unchanged.
+# Cards of the depot, by id, that carry a Windows chord (Win+Ctrl+Left, Win+D, the Windows key) that no
+# Linux desktop binds: the nested cards of the default gesture card and the top-level preset cards
+# (card_global_presets_*). They compile to the SYSTEM action of the same meaning, whose chord the user
+# can retune in actions.toml. Any other keystroke card injects its chord unchanged.
 WINDOWS_CHORD_ACTIONS = {
     "inner_card_vd_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
     "inner_card_vd_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
     "inner_card_vd_hide_show_desktop": "SHOW_DESKTOP",
     "inner_card_vd_start_menu": "TASK_VIEW",                     # the overview
+    "card_global_presets_desktop_left": "SWITCH_BETWEEN_DESKTOPS_LEFT",
+    "card_global_presets_desktop_right": "SWITCH_BETWEEN_DESKTOPS_RIGHT",
+    "card_global_presets_win_hide_show_desktop": "SHOW_DESKTOP",
+    "card_global_presets_win_switch_language": "SWITCH_LANGUAGE",
+    "card_global_presets_win_screen_snip": "WINDOWS_SCREEN_CAPTURE",
 }
 
 
