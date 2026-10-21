@@ -27,7 +27,7 @@ python3 "$REPO/tools/check-package-contents.py" "$DEST"
 
 (cd "$OUT" && xbps-create -q -A noarch -n "$PKGVER" \
     -s "Logitech Options+ for Linux: native agent and launcher" \
-    -D "python3>=3.11 python3-yaml ${ELECTRON_PKG} eudev" \
+    -D "python3>=3.11 python3-yaml>=0 ${ELECTRON_PKG}>=0 eudev>=0" \
     -l "Apache-2.0" -m "soubarnak <soubarna@live.in>" \
     -H "https://github.com/soubarnak/logioptions-plus" "$DEST")
 

@@ -219,9 +219,10 @@ def test_build_produces_versioned_noarch_package(built):
 def test_built_package_declares_runtime_dependencies(built):
     pkg = built / ("optionsplus-linux-%s_1.noarch.xbps" % version())
     props = html.unescape(archive_member(pkg, "props.plist"))
-    for dep in ("python3>=3.11", "python3-yaml", "eudev"):
+    # xbps rejects a bare pkgname in a dependency ("can't guess pkgname").
+    for dep in ("python3>=3.11", "python3-yaml>=0", "eudev>=0"):
         assert "<string>%s</string>" % dep in props, dep
-    assert re.search(r"<string>electron3\d</string>", props)
+    assert re.search(r"<string>electron3\d>=0</string>", props)
     assert "<string>noarch</string>" in props
 
 
