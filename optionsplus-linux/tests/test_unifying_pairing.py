@@ -163,6 +163,32 @@ def test_cancelling_is_not_followed_by_a_timeout(unifying, pairing):
     assert status(pairing)["state"] == "CANCEL"
 
 
+def wait_for_wake(unifying, client):
+    """Return once every notification queued so far has been handled: a wake event queued
+    after them is handled after them, on the same thread, and ends in a battery broadcast."""
+    client.subscribe("/battery/dev00000000/state/changed")
+    unifying.emit_event(F_WAKE)
+    next_push(client, "/battery/dev00000000/state/changed")
+
+
+def test_a_late_open_notification_after_cancel_does_not_restart_pairing(unifying, pairing):
+    unifying.hold_lock_status = True                  # the receiver is slow to report the open
+    pairing.call("SET", PAIR)
+    _, seen = send(pairing, "SET", PAIR + "/cancel")
+    assert "CANCEL" in seen or until_state(pairing, "CANCEL")
+    unifying.release_lock_status()                    # "open", then "closed", both after the cancel
+    wait_for_wake(unifying, pairing)
+    assert status(pairing)["state"] == "CANCEL"
+
+
+def test_another_tool_opening_the_lock_after_a_cancel_is_still_reported(unifying, pairing):
+    pairing.call("SET", PAIR)
+    pairing.call("SET", PAIR + "/cancel")
+    wait_for_wake(unifying, pairing)                  # our own "closed" echo has been handled
+    unifying.emit_lock_status(open_=True)
+    assert until_state(pairing, "START")["state"] == "START"
+
+
 def test_the_close_notification_may_beat_the_cancel_reply_without_changing_the_outcome(unifying, pairing):
     unifying.notify_before_reply = True               # the receiver says "closed", then answers the write
     for _ in range(15):

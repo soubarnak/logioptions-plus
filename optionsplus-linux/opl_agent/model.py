@@ -995,23 +995,28 @@ class Registry:
         if r is None:
             return
         code = params[0] if params else 0
+        opened = bool(address & 0x01)
         with r.lock:
-            r.locked = bool(address & 0x01)
+            if opened and r.closing:
+                return              # our own open, reported after we closed the lock: its "closed" follows
+            r.locked = opened
             for hook in list(self.on_locking):
                 try:
                     hook(r.id, self.locking_state(r))
                 except Exception:
                     log.exception("locking hook failed for %s", r.id)
             if r.locked:
-                r.closing = False
                 if r.pairing["state"] != "START":       # opened by another tool, or by us a moment ago
                     r.phase = "pairing"
                     if not r.slots_before:
                         r.slots_before = {d.index for d in self.devices.values() if d.node.path == r.node.path}
                     self._transition(r, "START", self.PAIRING_FROM)
                 return
-            if r.closing or r.pairing["state"] != "START":
-                return                                  # we closed it, or nobody opened it
+            if r.closing:
+                r.closing = False                       # we closed it: an open after this is news again
+                return
+            if r.pairing["state"] != "START":
+                return                                  # nobody opened it
             generation = r.generation
         self._jobs.post(("pairing", r.id), lambda: self._unifying_finish(r, code, generation))
 

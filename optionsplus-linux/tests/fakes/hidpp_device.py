@@ -499,6 +499,13 @@ class SimulatedBolt:
         self.mice[index] = SimulatedMouse(name, wpid)
         return index
 
+    def release_lock_status(self):
+        """Send the held 0x4A notifications, in order, as a receiver that was slow to report."""
+        self.hold_lock_status = False
+        held, self._held_lock_status = self._held_lock_status, []
+        for open_, error in held:
+            self.emit_lock_status(open_, error)
+
     def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
         """The device in the open lock pairs: it takes the next index and the receiver says so."""
         index = self.add_device(name, wpid)
@@ -668,6 +675,8 @@ class SimulatedUnifying(SimulatedBolt):
         self.path = self.PATH
         self.ignore_pairing_writes = False        # never answer a write to 0xB2 (receiver hung)
         self.notify_before_reply = False          # close notification goes out before the reply to the close
+        self.hold_lock_status = False             # queue 0x4A notifications until release_lock_status()
+        self._held_lock_status = []
 
     def list_nodes(self):
         if not self.present:
@@ -677,7 +686,17 @@ class SimulatedUnifying(SimulatedBolt):
 
     def emit_lock_status(self, open_, error=0):
         """Queue a 0x4A lock-status notification from the receiver."""
+        if self.hold_lock_status:
+            self._held_lock_status.append((open_, error))
+            return
         self.emit(bytes([hidpp.SHORT, 0xFF, 0x4A, 0x01 if open_ else 0x00, error, 0, 0]))
+
+    def release_lock_status(self):
+        """Send the held 0x4A notifications, in order, as a receiver that was slow to report."""
+        self.hold_lock_status = False
+        held, self._held_lock_status = self._held_lock_status, []
+        for open_, error in held:
+            self.emit_lock_status(open_, error)
 
     def complete_pairing(self, name="Second Mouse Z2", wpid=0x4343):
         """A device pairs in the open lock: it takes the next index and the lock closes."""
