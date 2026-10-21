@@ -97,8 +97,14 @@ function wheelRelayEnabled(env) {
 
 // The agent relays the wheel only when it can open its virtual input device (opl_agent/uinput.py
 // UINPUT_PATH); without it the agent reports adjustableSpeed false and the row would do nothing.
-// The UI process has no channel to the agent, so it asks the same question of the same node: both
-// run as the same user. A mouse without high-resolution scrolling is not told apart here.
+// The UI process has no channel to the agent, so it asks the same question of the same node: the
+// launcher starts the UI and the agent together, as the same user with the same environment. So
+// the row shows only while OPL_WHEEL_RELAY is not 0 and /dev/uinput is writable.
+// Known limits, all from not asking the agent itself:
+// - a mouse without high-resolution scrolling, which the agent also reports as not adjustable,
+//   still gets the row;
+// - an agent started separately, as another user or with another environment, can disagree;
+// - a uinput that is writable but fails to set up in the agent still shows the row.
 const UINPUT_PATH = '/dev/uinput';
 
 function uinputWritable(access = fs.accessSync) {
