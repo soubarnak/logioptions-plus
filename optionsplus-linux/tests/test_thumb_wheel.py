@@ -41,7 +41,7 @@ def test_thumb_wheel_slot_is_seeded_from_the_live_status(client):
     assert asg["card"]["attribute"] == "MOUSE_THUMB_WHEEL_SETTINGS"
     s = settings(asg)
     assert s["dir"] == "STANDARD" and s["isSmooth"] is False
-    assert s["speed"] == 0.5                      # neutral: the wheel relay can apply a speed (ticket #25)
+    assert s["speed"] == 0                        # 50% on the UI scale: the wheel relay can apply a speed (ticket #25)
 
 
 def test_seed_reflects_a_mouse_that_is_already_inverted_and_smooth(agent_factory, bolt):

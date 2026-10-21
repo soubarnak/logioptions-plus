@@ -150,10 +150,13 @@ def scroll_slot(slot_prefix):
 
 
 def shown_speed(speed, adjustable):
-    """The speed a card shows: 0 while the relay cannot apply one, else the value, neutral when unset."""
+    """The speed a card shows (the UI's -1..1 scale, 0 = 50%): 0 while the relay cannot apply
+    one, else the value, neutral when unset."""
     if not adjustable:
         return 0
-    return speed if isinstance(speed, (int, float)) and speed > 0 else wheel_relay.NEUTRAL_SPEED
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or speed != speed:
+        return wheel_relay.NEUTRAL_SPEED
+    return max(-1.0, min(float(speed), 1.0))
 
 
 def scroll_card(state, speed=0):
@@ -234,6 +237,28 @@ def thumb_wheel_fields(card):
     return invert, smooth
 
 
+SPEED_SCALE = 2         # profiles.json: 1 (absent) kept wheel speed as 0..1 with 0.5 neutral, 2 is the UI's -1..1 with 0 neutral
+
+
+def _is_wheel_slot(slot_id):
+    return slot_id.endswith((SCROLL_SUFFIX, THUMB_WHEEL_SUFFIX))
+
+
+def _migrate_speeds(cards):
+    """Old-scale neutral (0.5, the agent's own default) -> 0 in the wheel cards of `cards`;
+    returns whether any changed."""
+    changed = False
+    for slot, card in cards.items():
+        if not _is_wheel_slot(slot) or not isinstance(card, dict):
+            continue
+        for key in ("mouseScrollWheelSettings", "mouseThumbWheelSettings"):
+            s = card.get(key)
+            if isinstance(s, dict) and s.get("speed") == 0.5 and not isinstance(s.get("speed"), bool):
+                s["speed"] = wheel_relay.NEUTRAL_SPEED
+                changed = True
+    return changed
+
+
 class ProfileStore:
     """User settings that override the depot defaults, persisted as profiles.json.
 
@@ -250,10 +275,26 @@ class ProfileStore:
             self.cards = dict(data.get("assignments") or {})
             self.apps = {a: dict(c) for a, c in (data.get("applications") or {}).items()}
             self.profile_ids = dict(data.get("profileIds") or {})
+            if data.get("speedScale", 1) < SPEED_SCALE:
+                self._migrate_speed_scale()
         except FileNotFoundError:
             pass
         except Exception as exc:
             log.warning("ignoring unreadable %s: %s", self.path, exc)
+
+    def _migrate_speed_scale(self):
+        """Wheel speeds were once kept on a 0..1 scale where the agent's own default, 0.5, meant
+        unchanged; the UI's scale is -1..1 and 0.5 on it is 75% (2x). Every 0.5 is taken for the
+        old default and made neutral. A speed the user picked that happens to be exactly 0.5
+        is lost; any other old value already meant the same on both scales."""
+        changed = _migrate_speeds(self.cards)
+        for cards in self.apps.values():
+            changed = _migrate_speeds(cards) or changed
+        try:
+            self._save()            # stamps the scale, so a 75% chosen later is not migrated again
+        except OSError:
+            if changed:
+                log.warning("wheel speeds were migrated in memory only")
 
     def _save(self):
         """Write profiles.json; raises OSError (after putting the in-memory state back as the
@@ -262,8 +303,8 @@ class ProfileStore:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w") as fh:
-                json.dump({"assignments": self.cards, "applications": self.apps, "profileIds": self.profile_ids},
-                          fh, indent=1)
+                json.dump({"speedScale": SPEED_SCALE, "assignments": self.cards, "applications": self.apps,
+                           "profileIds": self.profile_ids}, fh, indent=1)
             os.replace(tmp, self.path)
         except OSError as exc:
             log.warning("cannot save profiles: %s", exc)

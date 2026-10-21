@@ -362,14 +362,17 @@ class InputEngine:
         self.reg.set_divert(dev.id, key, binding is not None, raw if info["raw_xy"] else None)
 
     def _tune(self, dev, binding):
-        """Blocking: give a thumb binding its step, the wheel's diverted units per notch."""
+        """Blocking: give a thumb binding its step, the wheel's diverted units per notch, and
+        the direction a positive rotation points."""
         if isinstance(binding, gestures.Thumb):
             try:
-                units = self.reg.thumb_units_per_notch(dev.id)
+                info = self.reg.thumb_info(dev.id)
+                units, right = info["per_notch"], info["positive_is_right"]
             except Exception as exc:
                 log.debug("thumb wheel resolution unknown for %s: %s", dev.id, exc)
-                units = 0
+                units, right = 0, True
             binding.step = units if units and units > 0 else gestures.THUMB_STEP
+            binding.sign = 1 if right else -1
 
     def _check(self, dev, key, binding):
         """Raise Unsupported unless control `key` of `dev` can run `binding`."""

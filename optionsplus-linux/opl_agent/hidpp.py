@@ -813,12 +813,19 @@ THUMB_NATIVE, THUMB_DIVERTED = 0, 1     # reporting mode byte: HID native / sent
 
 
 def get_thumbwheel_info(fd, idx):
-    """fn0 getThumbwheelInfo -> {native, diverted}: rotation units per notch-equivalent in each mode.
-    The bytes after the two resolutions (the default direction among them) are not read: a positive
-    rotation is taken as "right" whatever the wheel's own default direction is; unconfirmed on hardware."""
+    """fn0 getThumbwheelInfo -> {native, diverted, default_dir, per_notch, positive_is_right}.
+
+    native and diverted are rotation units per revolution in each mode (live, MX Master 3S: 18 and
+    120), so `per_notch` is diverted / native units (6.67); 0 when either is unknown. Native
+    mode gives one notch per native unit. default_dir is the byte after them (0 on that mouse):
+    live, with the reporting invert flag clear, a turn to the right came as a negative rotation
+    with 0 there, so `positive_is_right` is read as default_dir == 1 (1 is not seen on hardware)."""
     p = _fcall(fd, idx, F_THUMB_WHEEL, 0)
     native, diverted = struct.unpack(">HH", bytes(p[:4]))
-    return {"native": native, "diverted": diverted}
+    default_dir = p[4] if len(p) > 4 else 0
+    return {"native": native, "diverted": diverted, "default_dir": default_dir,
+            "per_notch": diverted / native if native and diverted else 0.0,
+            "positive_is_right": default_dir == 1}
 
 
 def get_thumbwheel(fd, idx):

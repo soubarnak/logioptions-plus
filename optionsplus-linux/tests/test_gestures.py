@@ -15,7 +15,7 @@ from tests.test_button_remap import BACK, DEFAULT_PROFILE, TYPE, assigned_card_i
 from tests.harness import keys_down, wait_for  # noqa: F401  (keys_down is re-exported)
 
 GESTURE = 195
-NOTCH = 14                  # thumb wheel units per notch the simulated mouse reports when diverted
+NOTCH = 7                   # thumb wheel units per notch the simulated mouse reports when diverted
 THUMB_SLOT = fx.SLOT_PREFIX + "_thumb_wheel_adapter"
 # HID usage -> evdev key: 4 a (30), 5 b (48), 7 d (32), 8 e (18), 9 f (33); no modifiers, so one key each
 ACTIONS = {"up": 4, "down": 5, "left": 7, "right": 8, "click": 9}
@@ -268,6 +268,13 @@ def test_thumb_wheel_turned_right_and_left_runs_the_two_actions(client, bolt, ui
     assert keys_down(uinput) == [KEY_OF["right"], KEY_OF["left"]]
 
 
+def test_the_thumb_wheels_default_direction_does_not_swap_the_actions(client, bolt, uinput):
+    bolt.mouse.thumb_default_direction = 1          # a positive rotation already points right
+    assign_thumb(client)
+    bolt.rotate_thumb(NOTCH)
+    assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])
+
+
 def test_a_turn_of_several_steps_runs_the_action_once_per_step(client, bolt, uinput):
     assign_thumb(client)
     bolt.rotate_thumb(3 * NOTCH)
@@ -339,9 +346,9 @@ def test_a_short_flick_of_the_thumb_wheel_is_not_an_action(client, bolt, uinput)
 
 
 def test_the_thumb_step_is_the_wheels_own_resolution(client, bolt, uinput):
-    bolt.mouse.thumb_diverted_units = 28
+    bolt.mouse.thumb_diverted_resolution = 28 * 18
     assign_thumb(client)
-    bolt.rotate_thumb(NOTCH)
+    bolt.rotate_thumb(3 * NOTCH)            # the step is 28 units: four notches of the default
     bolt.settle()
     assert keys_down(uinput) == []
     bolt.rotate_thumb(NOTCH)
@@ -349,7 +356,7 @@ def test_the_thumb_step_is_the_wheels_own_resolution(client, bolt, uinput):
 
 
 def test_the_thumb_step_falls_back_when_the_resolution_is_unknown(client, bolt, uinput):
-    bolt.mouse.thumb_diverted_units = 0
+    bolt.mouse.thumb_diverted_resolution = 0
     assign_thumb(client)
     bolt.rotate_thumb(gestures_mod.THUMB_STEP)
     assert wait_for(lambda: keys_down(uinput) == [KEY_OF["right"]])

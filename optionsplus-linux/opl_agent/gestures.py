@@ -164,11 +164,14 @@ class Thumb:
 
     def __init__(self, actions, step=THUMB_STEP):
         self.actions = actions
-        self.step = max(1, int(step))   # reporting units that make one action
+        self.step = max(1.0, float(step))   # reporting units that make one action (a notch is not a whole number of them)
+        self.sign = 1                   # -1 when the wheel reports a turn to the right as negative
         self.pending = 0
 
     def turn(self, amount):
-        """Rotation reported by the wheel (right is positive) -> events, one run per step."""
+        """Rotation reported by the wheel (right is positive once `sign` is applied) -> events,
+        one run per step."""
+        amount *= self.sign
         if amount and self.pending and (amount > 0) != (self.pending > 0):
             self.pending = 0                    # reversed: the partial step does not carry over
         self.pending += amount

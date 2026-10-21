@@ -66,7 +66,12 @@ class SimulatedMouse:
                                                     # high resolution on, invert off
         # 0x2150 thumb wheel: reporting mode 0 native / 1 diverted, direction inverted, smooth
         self.thumb = {"mode": 0, "invert": 0, "smooth": 0}
-        self.thumb_diverted_units = 14              # getThumbwheelInfo: units per notch while diverted
+        # getThumbwheelInfo, as the MX Master 3S answers it: 18 native and 120 diverted units per
+        # revolution (6.67 diverted units per notch). The default here is 126 = 7 units per notch
+        # so a whole number of units makes a notch; tests set `thumb_diverted_resolution` for the real 120.
+        self.thumb_native_resolution = 18
+        self.thumb_diverted_resolution = 126
+        self.thumb_default_direction = 0            # that answer's direction byte: 0 on the real mouse
         self.fail_thumb_write = False               # answer setThumbwheelReporting with an error
         self.thumb_ignores_mode = False             # accept setThumbwheelReporting but keep the reporting mode
         # 0x1814 / 0x1815 Easy-Switch: host slots (name bytes, paired, bus, os) and the current host
@@ -183,7 +188,8 @@ class SimulatedMouse:
         elif fid == 0x2150:
             t = self.thumb
             if fn == 0:                               # info: native res, diverted res, default dir, caps
-                return struct.pack(">HHBB", 120, self.thumb_diverted_units, 0, 0x03)
+                return struct.pack(">HHBB", self.thumb_native_resolution, self.thumb_diverted_resolution,
+                                   self.thumb_default_direction, 0x0f)
             if fn == 1:
                 return bytes([t["mode"], t["invert"], t["smooth"]])
             if fn == 2:
@@ -411,11 +417,14 @@ class SimulatedBolt:
         return True
 
     def turn_thumb(self, rotation, index=MOUSE_INDEX):
-        """The thumb wheel turns by `rotation` units (signed); reported only while diverted."""
+        """The user turns the thumb wheel to the right by `rotation` units (negative: left);
+        reported only while diverted. A mouse whose default direction byte is 0 (the real one)
+        reports a turn to the right as a negative rotation."""
         mouse = self.mice[index]
         if mouse.thumb["mode"] != 1:
             return False
-        self.emit_event(F_THUMB_WHEEL, 0, struct.pack(">hHBB", rotation, 0, 2, 0), index=index)
+        raw = rotation if mouse.thumb_default_direction else -rotation
+        self.emit_event(F_THUMB_WHEEL, 0, struct.pack(">hHBB", raw, 0, 2, 0), index=index)
         return True
 
     def press_button(self, cid, index=MOUSE_INDEX):
@@ -431,9 +440,12 @@ class SimulatedBolt:
             self.emit_event(F_REPROG, 1, struct.pack(">hh", dx, dy), index=index)
 
     def rotate_thumb(self, amount, index=MOUSE_INDEX):
-        """The user turns the thumb wheel; reported to software only while it is diverted."""
-        if self.mice[index].thumb["mode"] == 1:
-            self.emit_event(0x2150, 0, struct.pack(">hHBB", amount, 0, 2, 0), index=index)
+        """The user turns the thumb wheel to the right by `amount` (negative: left); reported to
+        software only while it is diverted, with the sign the mouse's default direction gives."""
+        mouse = self.mice[index]
+        if mouse.thumb["mode"] == 1:
+            raw = amount if mouse.thumb_default_direction else -amount
+            self.emit_event(0x2150, 0, struct.pack(">hHBB", raw, 0, 2, 0), index=index)
 
     def release_button(self, cid, index=MOUSE_INDEX):
         mouse = self.mice[index]

@@ -16,7 +16,7 @@ import threading
 import time
 
 from . import hidpp, resources
-from .wheel_relay import NEUTRAL_SPEED
+from .wheel_relay import THUMB_OVERRIDE_SPEED
 
 log = logging.getLogger("opl.model")
 
@@ -149,7 +149,7 @@ class Device:
             caps["hostInfos"] = True
         if self.thumb_wheel:
             # speed 0 keeps the thumb wheel speed control disabled: it is on only with the relay
-            caps["mouseThumbWheelOverride"] = {"speed": NEUTRAL_SPEED if self.relay["thumb"] else 0}
+            caps["mouseThumbWheelOverride"] = {"speed": THUMB_OVERRIDE_SPEED if self.relay["thumb"] else 0}
         return out
 
     def _scroll_capabilities(self):
@@ -1166,10 +1166,21 @@ class Registry:
             mode = hidpp.THUMB_DIVERTED if divert else hidpp.THUMB_NATIVE
         return hidpp.set_thumbwheel(fd, d.index, invert, smooth, mode)
 
-    def thumb_units_per_notch(self, dev_id):
-        """Blocking 0x2150 read: rotation units the diverted thumb wheel reports per notch."""
+    def thumb_info(self, dev_id):
+        """Blocking 0x2150 read: getThumbwheelInfo, see hidpp.get_thumbwheel_info."""
         d = self.devices[dev_id]
-        return hidpp.get_thumbwheel_info(self._fds[d.node.path], d.index)["diverted"]
+        return hidpp.get_thumbwheel_info(self._fds[d.node.path], d.index)
+
+    def thumb_units_per_notch(self, dev_id):
+        """Blocking 0x2150 read: rotation units the diverted thumb wheel reports per notch
+        (diverted resolution / native resolution); 0 when the mouse does not say."""
+        return self.thumb_info(dev_id)["per_notch"]
+
+    def thumb_scale(self, dev_id):
+        """Blocking 0x2150 read: `thumb_units_per_notch`, negative when a positive rotation
+        points left."""
+        info = self.thumb_info(dev_id)
+        return info["per_notch"] * (1 if info["positive_is_right"] else -1)
 
     def wheel_units_per_notch(self, dev_id):
         """Blocking 0x2121 read: hi-res steps the diverted wheel reports per notch."""

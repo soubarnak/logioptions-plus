@@ -358,8 +358,11 @@ a remap do something.
   (`0x2121` target bit, `0x2150` reporting mode 1) and re-emitted as `REL_(H)WHEEL_HI_RES` plus
   whole-notch `REL_(H)WHEEL`; direction is applied in software while diverted. Speed controls are
   reported on only when the virtual device can be created; `OPL_WHEEL_RELAY=0` turns the relay off.
-  The speed range (assumed 0..1, 0.5 = unchanged, 1 = 4x) and the thumb scale (`divertedResolution`
-  units per notch) still need confirming on hardware.
+  The speed is on the UI's own scale, confirmed live: -1..1, 0 = 50% = unchanged, shown as
+  `round(50 * (speed + 1))` percent; the relay multiplies by `4 ** speed` (0.25x to 4x). The thumb
+  wheel reports rotation per revolution (MX Master 3S: 18 native, 120 diverted, so 6.67 diverted
+  units per notch), and a turn to the right came as a negative rotation with the default direction
+  byte 0. The UI hides the scroll wheel speed row off macOS; `bootstrap/guard.js` shows it again.
 - **Swap left/right** (finding 9): implement as a device-level remap through `0x1b04`
   (`remap` CID `0x50` ↔ `0x51`) when the device reports `remap` capability; otherwise fall
   back to `xinput set-button-map` on X11 and document the Wayland limitation. Persist in

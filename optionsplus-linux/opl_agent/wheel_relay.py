@@ -15,8 +15,13 @@ diverts it and consumes its motion. The relay then leaves that wheel alone (the 
 but not applied, direction and smoothness still go to the device) and takes it over again,
 through `resume_thumb`, once the card is gone.
 
-`speed` is the card's slider value, 0..1: 0.5 leaves the motion alone, 1 is four times
-faster, 0 is "never set" and also leaves it alone. The range is assumed, see `multiplier`.
+`speed` is the card's slider value on the UI's own scale, -1..1 (it shows `round(50 * (speed + 1))`
+percent): 0 is 50% and leaves the motion alone, 1 is four times faster, -1 is four times slower.
+Unset also means 0. See `multiplier`.
+
+The thumb wheel reports rotation in units per revolution, not per notch: getThumbwheelInfo gives
+the native and the diverted resolution (18 and 120 on the MX Master 3S), so one notch is
+diverted / native units. Which way a positive rotation points comes from the same answer.
 """
 
 import logging
@@ -27,8 +32,12 @@ from . import hidpp, uinput
 
 log = logging.getLogger("opl.relay")
 
-NEUTRAL_SPEED = 0.5
-MAX_FACTOR = 4.0
+NEUTRAL_SPEED = 0.0                 # 50% on the UI's slider, and what a card holds when nothing was chosen
+# What the thumb wheel capability carries while the relay can apply a speed (0 keeps the control
+# off). Not a card value; it was the old neutral, kept as it was working live, whether the UI
+# reads it as anything but "on" is unverified.
+THUMB_OVERRIDE_SPEED = 0.5
+MAX_FACTOR = 4.0                    # speed +1
 HIRES_PER_NOTCH = 120               # kernel convention: REL_*_HI_RES counts 120 per notch
 
 WHEEL, THUMB = "wheel", "thumb"
@@ -39,12 +48,13 @@ _AXES = {  # axis -> (hi-res code, notch code) of the virtual device
 
 
 def multiplier(speed):
-    """The factor a card's speed value scales motion by. Unset or non-positive means 1; the
-    slider runs 0..1 with 0.5 as 1x, a quarter as 0.5x and the top as 4x. That range is an
-    assumption: confirm what the UI sends on hardware."""
-    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or speed <= 0:
+    """The factor a card's speed value scales motion by: MAX_FACTOR ** speed on the UI's -1..1
+    scale, so it is exponential and monotonic, 1 at 0 (50%), 4x at +1 (100%), 0.25x at -1 (0%)
+    and 2x / 0.5x at the quarter points (75% / 25%). Values beyond the scale are clamped; unset
+    or anything that is not a number is 1."""
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or math.isnan(speed):
         return 1.0
-    return MAX_FACTOR ** (2 * min(float(speed), 1.0) - 1)
+    return MAX_FACTOR ** max(-1.0, min(float(speed), 1.0))
 
 
 def is_neutral(speed):
@@ -64,7 +74,7 @@ class _Axis:
         self.invert = False
         self.smooth = True
         self.diverted = False
-        self.units = 0              # device motion units per notch while diverted
+        self.units = 0              # device motion units per notch while diverted (negative: a positive one points left)
         self.carry = 0.0            # scaled hi-res motion not yet emitted
         self.notch_carry = 0        # emitted hi-res motion not yet a whole notch
         self.lock = threading.RLock()   # held across reading the mouse, writing it and recording the result
@@ -184,8 +194,8 @@ class WheelRelay:
             try:
                 if not is_neutral(new["speed"]):
                     self._sink()
-                    units = self.reg.thumb_units_per_notch(dev.id)
-                    if units <= 0:
+                    units = self.reg.thumb_scale(dev.id)
+                    if not units:
                         raise hidpp.HidppError(hidpp.F_THUMB_WHEEL, 0, 2)    # no scale to relay by
                     self._checked_thumb(dev, False, new["smooth"], True)
                 else:
@@ -328,7 +338,7 @@ class WheelRelay:
                         units = self.reg.wheel_units_per_notch(dev_id)
                         self._checked_wheel(dev, True, invert=False)
                     else:
-                        units = self.reg.thumb_units_per_notch(dev_id)
+                        units = self.reg.thumb_scale(dev_id)
                         self._checked_thumb(dev, False, ax.smooth, True)
                     with self._lock:
                         ax.units = units

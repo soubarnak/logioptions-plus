@@ -18,9 +18,9 @@ TARGET_BIT, HIRES_BIT, INVERT_BIT = 0x01, 0x02, 0x04
 # Linux evdev relative axes, from linux/input-event-codes.h
 REL_HWHEEL, REL_WHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES = 6, 8, 11, 12
 
-NEUTRAL, FAST, SLOW = 0.5, 1.0, 0.25      # speed 0.5 = unchanged, 1.0 = 4x, 0.25 = 0.5x
+NEUTRAL, FAST, SLOW, SLOWEST = 0.0, 1.0, -0.5, -1.0   # the UI scale: 0 = unchanged, 1 = 4x, -0.5 = 0.5x, -1 = 0.25x
 MULTIPLIER = 8                            # the simulated wheel reports 8 hi-res steps per notch
-DIVERTED_RESOLUTION = 14                  # the simulated thumb wheel: 14 units per notch
+DIVERTED_RESOLUTION = 7                   # the simulated thumb wheel: 7 diverted units per notch (126 / 18)
 
 
 def assignment(client, slot):
@@ -102,7 +102,7 @@ def test_the_seeded_cards_carry_the_neutral_speed(client):
 
 def test_wheels_stay_native_until_a_speed_is_set(client, bolt, uinput):
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.thumb["mode"] == 0
-    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(14)
+    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(7)
     assert uinput.events == []
 
 
@@ -274,7 +274,7 @@ def test_a_neutral_thumb_speed_hands_the_wheel_back_with_its_direction(client, b
     reply = thumb(client, speed=NEUTRAL)
     assert reply["result"]["code"] == "SUCCESS"
     assert bolt.mouse.thumb["mode"] == 0 and bolt.mouse.thumb["invert"] == 1
-    assert not bolt.turn_thumb(14)
+    assert not bolt.turn_thumb(7)
     assert uinput.events == []
 
 
@@ -301,7 +301,7 @@ def test_reset_hands_both_wheels_back(client, bolt, uinput):
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.thumb["mode"] == 0
     assert bolt.mouse.thumb["invert"] == 0
     assert scroll_settings(client)["speed"] == NEUTRAL and thumb_settings(client)["speed"] == NEUTRAL
-    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(14)
+    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(7)
 
 
 def test_releasing_with_reset_hands_the_wheel_back_without_hi_res(client, agent, bolt):
@@ -357,7 +357,7 @@ def test_disabling_the_relay_returns_the_wheels_to_native_reporting(agent, clien
     agent.agent.router.set_wheel_relay(False)
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.wheel_mode & INVERT_BIT
     assert bolt.mouse.thumb["mode"] == 0
-    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(14)
+    assert not bolt.turn_wheel(8) and not bolt.turn_thumb(7)
     caps = capabilities(client)
     assert caps["scrollWheelCapabilities"]["adjustableSpeed"] is False
     assert caps["mouseThumbWheelOverride"]["speed"] == 0
@@ -366,11 +366,94 @@ def test_disabling_the_relay_returns_the_wheels_to_native_reporting(agent, clien
     assert capabilities(client)["scrollWheelCapabilities"]["adjustableSpeed"] is True
 
 
-@pytest.mark.parametrize("speed", [0.0, 0.5])
-def test_neutral_values_never_divert(client, bolt, speed):
-    scroll(client, speed=speed)
-    thumb(client, speed=speed)
+def test_neutral_value_never_diverts(client, bolt):
+    scroll(client, speed=0.0)
+    thumb(client, speed=0.0)
     assert bolt.mouse.wheel_mode & TARGET_BIT == 0 and bolt.mouse.thumb["mode"] == 0
+
+
+# ---- the UI's scale: -1..1, 0 = 50% = unchanged (live: dragging to 99% sent 0.98) --------------
+
+@pytest.mark.parametrize("speed, factor", [(-1.0, 0.25), (-0.5, 0.5), (0.0, 1.0), (0.5, 2.0), (1.0, 4.0)])
+def test_the_multiplier_follows_the_uis_scale(speed, factor):
+    from opl_agent import wheel_relay
+    assert wheel_relay.multiplier(speed) == pytest.approx(factor)
+
+
+@pytest.mark.parametrize("junk", [None, "fast", True, float("nan")])
+def test_a_value_that_is_no_number_is_neutral(junk):
+    from opl_agent import wheel_relay
+    assert wheel_relay.multiplier(junk) == 1.0 and wheel_relay.is_neutral(junk)
+
+
+def test_the_multiplier_is_clamped_to_the_scale():
+    from opl_agent import wheel_relay
+    assert wheel_relay.multiplier(7) == wheel_relay.multiplier(1)
+    assert wheel_relay.multiplier(-7) == wheel_relay.multiplier(-1)
+
+
+def test_the_neutral_speed_the_agent_reports_is_the_uis_middle():
+    from opl_agent import wheel_relay
+    assert wheel_relay.NEUTRAL_SPEED == 0 and round(50 * (wheel_relay.NEUTRAL_SPEED + 1)) == 50
+
+
+def test_the_old_neutral_half_is_75_percent_and_speeds_up(client, bolt, uinput):
+    scroll(client, speed=0.5)
+    assert bolt.mouse.wheel_mode & TARGET_BIT       # no longer neutral: 2x
+    turn(bolt, MULTIPLIER)
+    assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [240])
+
+
+def test_the_slowest_speed_slows_the_wheel(client, bolt, uinput):
+    scroll(client, speed=SLOWEST)
+    assert bolt.mouse.wheel_mode & TARGET_BIT
+    turn(bolt, MULTIPLIER)
+    assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES) == [30])     # a quarter of a notch
+    assert uinput.rels(REL_WHEEL) == []
+
+
+def test_the_slowest_thumb_speed_slows_the_thumb_wheel(client, bolt, uinput):
+    thumb(client, speed=SLOWEST, isSmooth=True)
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES) == [30])
+
+
+def test_the_live_value_is_nearly_the_fastest(client, bolt, uinput):
+    scroll(client, speed=0.98)
+    turn(bolt, MULTIPLIER)
+    assert wait_for(lambda: uinput.rels(REL_WHEEL_HI_RES))
+    assert 450 <= uinput.rels(REL_WHEEL_HI_RES)[0] <= 480
+
+
+# ---- thumb wheel: travel per notch and direction as native (live, MX Master 3S) -------------------
+
+def test_a_thumb_wheel_at_neutral_speed_would_travel_a_notch_per_notch(client, bolt, uinput):
+    """The mouse answers getThumbwheelInfo with 18 native / 120 diverted units per revolution:
+    6.67 diverted units are one notch, not 120 (which made max speed travel less than native)."""
+    bolt.mouse.thumb_native_resolution, bolt.mouse.thumb_diverted_resolution = 18, 120
+    thumb(client, speed=0.01, isSmooth=True)         # barely off neutral: diverted, ~1x
+    assert bolt.turn_thumb(20)                       # 3 notches
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES))
+    assert 355 <= uinput.rels(REL_HWHEEL_HI_RES)[0] <= 370
+
+
+def test_the_fastest_thumb_speed_travels_four_notches_per_notch(client, bolt, uinput):
+    bolt.mouse.thumb_native_resolution, bolt.mouse.thumb_diverted_resolution = 18, 120
+    thumb(client, speed=FAST, isSmooth=True)
+    assert bolt.turn_thumb(20)                       # 3 notches, 4x
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES))
+    assert uinput.rels(REL_HWHEEL_HI_RES) == [1440]
+    assert uinput.rels(REL_HWHEEL) == [12]
+
+
+@pytest.mark.parametrize("default_direction", [0, 1])
+def test_a_thumb_turn_to_the_right_is_relayed_to_the_right(client, bolt, uinput, default_direction):
+    """The real mouse (direction byte 0) reports a turn to the right as a negative rotation."""
+    bolt.mouse.thumb_default_direction = default_direction
+    thumb(client, speed=FAST, isSmooth=True)
+    assert bolt.turn_thumb(DIVERTED_RESOLUTION)      # to the right
+    assert wait_for(lambda: uinput.rels(REL_HWHEEL_HI_RES))
+    assert uinput.rels(REL_HWHEEL_HI_RES) == [480]
 
 
 # ---- the thumb wheel has one owner: a thumb action card outranks thumb speed (#23 vs #25) ------

@@ -180,6 +180,7 @@ def test_the_thumb_event_has_rotation_timestamp_status_and_flags(bolt):
     from tests.fakes.hidpp_device import MOUSE_INDEX
     bolt.emit_event = lambda fid, function=0, params=b"", index=MOUSE_INDEX: seen.append(bytes(params))
     from tests.fakes.hidpp_device import SimulatedBolt
+    bolt.mouse.thumb_default_direction = 1          # a positive rotation is to the right: the raw sign is the turn's
     SimulatedBolt.turn_thumb(bolt, 5)
     bolt.mouse.thumb["mode"] = 1
     SimulatedBolt.turn_thumb(bolt, -5)
