@@ -364,7 +364,7 @@ Variables read by the code, besides those under [Usage](#usage): `OPL_ASAR`, `OP
 `OPL_FETCH_CMD` (where the launcher finds our code, Electron, the agent and the fetcher),
 `OPL_MANIFEST` (depot manifest), `OPL_SOCKET`, `OPL_REPLAY` (boot replies from a capture, a
 diagnostic), `OPL_LINK_LOG` (log how the UI's links were rewritten), `OPL_BUILD_ID`,
-`OPL_BUILD_DIR` (output of `tools/build-xbps.sh`), and `OPL_RESTART_WAIT_PID` with
+`OPL_BUILD_DIR` (output of `tools/build-xbps.sh`), `OPL_NO_HARDWARE=1` (the agent lists no hidraw node and opens neither hidraw nor `/dev/uinput`; the test run sets it for every child process), and `OPL_RESTART_WAIT_PID` with
 `OPL_RESTART_WAIT_SECONDS` (set by the app itself when it restarts after an update).
 
 Regenerate the field-name table with `tools/protodefaults.py <proto-root> <out.py>`; the proto

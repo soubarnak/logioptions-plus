@@ -469,6 +469,16 @@ class Reader:
         self.handle.close()
 
 
+def no_hardware():
+    """OPL_NO_HARDWARE=1 (set for every child of the test run): no hidraw node is listed and
+    neither hidraw nor /dev/uinput can be opened, so a spawned agent cannot touch a real mouse."""
+    return os.environ.get("OPL_NO_HARDWARE") == "1"
+
+
+def raise_no_hardware(path):
+    raise OSError(errno.ENODEV, "OPL_NO_HARDWARE is set", path)
+
+
 class HidrawTransport:
     """The production transport: discovery through sysfs, I/O through hidraw."""
 
@@ -476,7 +486,7 @@ class HidrawTransport:
         self._watcher = None
 
     def list_nodes(self):
-        return list_receivers_and_devices()
+        return [] if no_hardware() else list_receivers_and_devices()
 
     def wait_change(self, timeout):
         """Block until a hidraw node is added or removed; True if one was."""
@@ -485,6 +495,8 @@ class HidrawTransport:
         return self._watcher.wait(timeout)
 
     def open(self, path):
+        if no_hardware():
+            raise_no_hardware(path)
         return HidrawHandle(os.open(path, os.O_RDWR | os.O_NONBLOCK))
 
 

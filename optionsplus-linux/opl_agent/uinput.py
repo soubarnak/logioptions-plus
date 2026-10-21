@@ -11,6 +11,8 @@ import os
 import struct
 import threading
 
+from . import hidpp
+
 DEVICE_NAME = "optionsplus-linux virtual input"
 UINPUT_PATH = "/dev/uinput"
 
@@ -39,6 +41,8 @@ class OsBackend:
     """The real thing: open, ioctl, write and close on a file descriptor."""
 
     def open(self, path):
+        if hidpp.no_hardware():
+            hidpp.raise_no_hardware(path)
         return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
 
     def ioctl(self, fd, request, arg=0):

@@ -12,6 +12,10 @@ from tests.fakes.hidpp_device import SimulatedBluetoothMouse, SimulatedBolt
 from tests.fakes.releases import FakeReleaseServer
 from tests.harness import RunningAgent, short_tmpdir
 
+# Every child process of the run (a spawned agent, a launcher) inherits this: it sees no hidraw
+# node and cannot open one or /dev/uinput, so the suite never touches a real mouse.
+os.environ["OPL_NO_HARDWARE"] = "1"
+
 # Only loopback is reachable from tests (the fake release server lives there).
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
