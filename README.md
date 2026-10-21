@@ -332,9 +332,30 @@ cd build && xbps-rindex -a optionsplus-linux-*.noarch.xbps
 sudo xbps-install -R "$PWD" optionsplus-linux
 ```
 
-A local `restricted=yes` void-packages template that would bundle Logitech's data into a system
-package on your own machine is described in feature-parity.md §3.6 but is **not in this
-repository yet**. Use `optionsplus-fetch-payload --system` for a shared copy.
+### Restricted template with Logitech's data (local only)
+
+`srcpkgs/optionsplus-linux-payload/template` builds a second package, `optionsplus-linux-payload`,
+that bundles Logitech's UI bundle and device data into
+`/usr/lib/optionsplus-linux/logitech/`, the shared location the launcher and agent already read.
+It installs the same layout `optionsplus-fetch-payload --system` writes, so you can use either.
+The template is `restricted=yes`: Void never builds, hosts or redistributes it, CI never touches
+it, and it is for your own machine only. Its version is the pinned data version
+(`dataVersion` in `optionsplus-linux/data/depots.json`), and its distfiles and checksums are that
+file's depot URLs and SHA-256 sums (about 550 MB from Logitech's servers). By building it you accept
+[Logitech's terms](https://www.logitech.com/legal/eula.html). The public package never contains
+any of it.
+
+```bash
+cp -r srcpkgs/optionsplus-linux-payload ~/void-packages/srcpkgs/
+cd ~/void-packages
+XBPS_ALLOW_RESTRICTED=yes ./xbps-src pkg optionsplus-linux-payload
+sudo xbps-install -R hostdir/binpkgs/restricted optionsplus-linux-payload
+```
+
+The template's file layout is checked against the fetcher by the tests; building it with
+`xbps-src` itself has not been tried (the repository tests do not run `xbps-src`). When Logitech
+publishes a new depot set, update `depots.json` and the template together;
+`tests/test_payload_template.py` fails if they differ.
 
 Releases are tag-driven: bump `__version__` in `optionsplus-linux/opl_agent/__init__.py`, commit,
 then push the tag `optionsplus-linux-v<version>`. The workflow in `.github/workflows/release.yml`

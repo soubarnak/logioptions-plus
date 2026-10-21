@@ -1,0 +1,95 @@
+# Template file for 'optionsplus-linux-payload'
+#
+# LOCAL BUILDS ONLY. This bundles Logitech's Options+ data (UI bundle and device depots) into a
+# system package for your own machine. It is "restricted", so Void never builds, hosts or
+# redistributes it, and it must never run in CI or be published. Build it with
+#   XBPS_ALLOW_RESTRICTED=yes ./xbps-src pkg optionsplus-linux-payload
+# By building it you accept Logitech's terms: https://www.logitech.com/legal/eula.html
+# The public optionsplus-linux package holds none of this and stays separate.
+#
+# version, distfiles and checksum mirror optionsplus-linux/data/depots.json (dataVersion and
+# each depot's url and sha256); tests/test_payload_template.py fails when they drift. The files
+# are laid out the way `optionsplus-fetch-payload --system` lays them out, in the directory the
+# launcher and agent read (opl_agent/paths.py SYSTEM_DEFAULT).
+pkgname=optionsplus-linux-payload
+version=2.8.981479
+revision=1
+archs=noarch
+create_wrksrc=yes
+skip_extraction="logioptionsplus.depot system_actions.depot mx_master_3s.depot"
+depends="optionsplus-linux>=0.1.0"
+hostmakedepends="python3"
+short_desc="Logitech Options+ UI and device data for optionsplus-linux (restricted, local build)"
+maintainer="soubarnak <soubarna@live.in>"
+license="custom:Logitech-EULA"
+homepage="https://github.com/soubarnak/logioptions-plus"
+restricted=yes
+nostrip=yes
+distfiles="
+ https://updates.optionsplus.logitechg.com/depots/c08bc392-923d-42ea-9511-5a5667b4d0fe/logioptionsplus.depot
+ https://updates.optionsplus.logitechg.com/depots/7e89b27a-323f-4026-93a1-3ef5d5387c15/system_actions.depot
+ https://updates.optionsplus.logitechg.com/depots/9c81feae-0ae7-4e8d-9e9c-ceddbfda8a81/mx_master_3s.depot"
+checksum="
+ baf9ecf05f322b42b0c85a2304e33038f929ee49579ed77be193f2983a715869
+ 85bd8bdba43b61bc7e8341863e5d072518224c9f0defe1710cf6b7c3330445c3
+ 50803b06f23984ef26204c4c8018a274145ab52b94c8bafa9b8ab1a6d88ef521"
+
+do_install() {
+	# Same result as opl_agent.fetch.assemble: app.asar, depots/<name>/ and payload.json.
+	python3 - "${XBPS_SRCDISTDIR}/${pkgname}-${version}" "${DESTDIR}/usr/lib/optionsplus-linux/logitech" \
+		"${version}" ${distfiles} <<'PY'
+import hashlib, json, os, struct, sys, time
+
+src, out, data_version, urls = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+MAGICS = (bytes.fromhex("10011720"), bytes.fromhex("06052120"))   # main app, device assets
+
+
+def unpack(path, root):
+    with open(path, "rb") as fh:
+        head = fh.read(8)
+        if len(head) < 8 or head[:4] not in MAGICS:
+            sys.exit("not a depot file: " + path)
+        n = struct.unpack_from("<I", head, 4)[0]
+        index = json.loads(fh.read(n))["files"]
+        os.makedirs(root, exist_ok=True)
+        for f in index:
+            size = struct.unpack("<I", fh.read(4))[0]
+            name = f["name"].replace("\\", "/")
+            dst = os.path.abspath(os.path.join(root, name))
+            if os.path.isabs(name) or not (dst + os.sep).startswith(os.path.abspath(root) + os.sep):
+                sys.exit("unsafe path in depot: %r" % name)
+            if name.endswith("/"):
+                os.makedirs(dst, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            data = fh.read(size)
+            if len(data) != size:
+                sys.exit("truncated depot: " + path)
+            with open(dst, "wb") as o:
+                o.write(data)
+
+
+record = {"schema": 1, "dataVersion": data_version, "source": "package",
+          "installedAt": int(time.time()), "depots": {}}
+os.makedirs(out)
+for url in urls:
+    fname = url.rsplit("/", 1)[1]
+    name = fname[:-len(".depot")]
+    path = os.path.join(src, fname)
+    with open(path, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    unpack(path, os.path.join(out, "depots", name))
+    record["depots"][name] = {"sha256": digest, "size": os.path.getsize(path), "url": url}
+asar = os.path.join(out, "depots", "logioptionsplus", "resources", "app.asar")
+if not os.path.isfile(asar):
+    sys.exit("main depot has no resources/app.asar")
+os.replace(asar, os.path.join(out, "app.asar"))
+with open(os.path.join(out, "payload.json"), "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+for base, dirs, files in os.walk(out):
+    os.chmod(base, 0o755)
+    for f in files:
+        if not os.path.islink(os.path.join(base, f)):
+            os.chmod(os.path.join(base, f), 0o644)
+PY
+}

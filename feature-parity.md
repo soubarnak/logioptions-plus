@@ -227,11 +227,13 @@ Runtime dependencies for `xbps-create -D`: `python3>=3.11`, `python3-yaml`, `ele
 
 ### 3.6 Local restricted template (optional path)
 
-`srcpkgs/optionsplus-linux-payload/template` with `restricted=yes`,
-`distfiles="https://updates.optionsplus.logitechg.com/depots/<uuid>/logioptionsplus.depot"`,
-`checksum=baf9ecf0…`, `skip_extraction`, `do_install` running `tools/undepot.py` into
-`/usr/lib/optionsplus-linux/logitech/`. Builds only with `XBPS_ALLOW_RESTRICTED=yes` on
-the user's machine. Never in CI.
+`srcpkgs/optionsplus-linux-payload/template` (in the repository) with `restricted=yes`,
+`distfiles` and `checksum` taken from the pinned depots in `optionsplus-linux/data/depots.json`
+(first: `https://updates.optionsplus.logitechg.com/depots/<uuid>/logioptionsplus.depot`,
+`baf9ecf0…`), `skip_extraction`, and a `do_install` that unpacks the depots into
+`/usr/lib/optionsplus-linux/logitech/` in the layout `opl_agent.fetch.assemble` writes. Builds
+only with `XBPS_ALLOW_RESTRICTED=yes` on the user's machine. Never in CI.
+`tests/test_payload_template.py` keeps it in step with `depots.json` and the fetcher.
 
 ### 3.7 Acceptance
 

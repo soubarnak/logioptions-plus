@@ -3,7 +3,6 @@ pkgname=optionsplus-linux
 version=0.1.0
 revision=1
 archs=noarch
-build_style=meta
 depends="python3>=3.11 python3-yaml electron35 eudev"
 short_desc="Logitech Options+ for Linux: native agent and launcher"
 maintainer="soubarnak <soubarna@live.in>"
@@ -11,7 +10,8 @@ license="Apache-2.0"
 homepage="https://github.com/soubarnak/logioptions-plus"
 distfiles="${homepage}/archive/refs/tags/optionsplus-linux-v${version}.tar.gz"
 checksum=e76be882b1d6a4d5251abf827113a6b18bea460be4b56bb18c11f0e458c26b43
-# GitHub unpacks the tag archive to logioptions-plus-<tag>.
+# GitHub unpacks the tag archive to logioptions-plus-<tag>. No build_style: "meta" is for
+# packages without distfiles, and this one extracts the source and only needs do_install.
 wrksrc="logioptions-plus-optionsplus-linux-v${version}"
 
 do_install() {
