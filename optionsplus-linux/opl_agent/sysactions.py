@@ -1,8 +1,15 @@
 """What a SYSTEM card sends on Linux: a default keystroke per action, and the user's overrides.
 
 Desktop switching, show-desktop and the like have no standard key: each compositor binds its
-own. The defaults below suit GNOME (and most others); a per-user file changes any of them, and
-is read again whenever it changes, so an edit applies to the next press without a restart.
+own. The defaults below suit GNOME (and most others). A desktop that binds things differently
+gets its own overrides (DESKTOPS), chosen from XDG_CURRENT_DESKTOP (a colon-separated list, any
+case; the first name with an entry wins, else GNOME's stay). On niri, whose stock config has no
+bare-Super overview, TASK_VIEW and APP_EXPOSE are Super+O (toggle-overview) and the desktop-left
+and -right actions are Super+Left and Super+Right (focus-column-left/right); its default
+gesture card also swaps its up and down swipes for SWITCH_WORKSPACE_UP and _DOWN (Super+Page_Up
+and Super+Page_Down, niri's focus-workspace-up/down; the same keys everywhere else). A per-user
+file changes any of them, and is read again whenever it changes, so an edit applies to the next
+press without a restart.
 
     ~/.config/optionsplus-linux/actions.toml
 
@@ -93,6 +100,9 @@ DEFAULTS = {
     "SWITCH_BETWEEN_DESKTOPS": (M,),                                 # the overview
     "TASK_VIEW": (M,), "APP_EXPOSE": (M,),                           # the overview is GNOME's nearest
     "SWITCH_BETWEEN_DESKTOPS_LEFT": (M, KEY_PAGEUP), "SWITCH_BETWEEN_DESKTOPS_RIGHT": (M, KEY_PAGEDOWN),
+    # agent-side actions, not Logitech's: the default gesture card's up and down swipes on a desktop
+    # whose workspaces are stacked (see DESKTOPS); never offered in the picker
+    "SWITCH_WORKSPACE_UP": (M, KEY_PAGEUP), "SWITCH_WORKSPACE_DOWN": (M, KEY_PAGEDOWN),
     "SWITCH_LANGUAGE": (M, KEY_SPACE),                               # GNOME's next input source
     "CLOSE": (A, KEY_F4), "MINIMIZE": (M, 35), "MAXIMIZE": (M, KEY_UP), "FULLSCREEN": (KEY_F11,),   # Super+H hides
     "SNAP_LEFT": (M, KEY_LEFT), "SNAP_RIGHT": (M, KEY_RIGHT),
@@ -108,6 +118,33 @@ DEFAULTS = {
     "MAIL_CLIENT": (XF86["xf86mail"],), "MEDIA_CLIENT": (XF86["xf86audiomedia"],),
     "CONSOLE_CLIENT": (C, A, 20),                                    # Ctrl+Alt+T
 }
+
+# Per-desktop overrides of DEFAULTS, by lower-case XDG_CURRENT_DESKTOP name. "chords" replace default
+# chords; "cards" swap the SYSTEM action a depot card compiles to (card id -> action), only while
+# the card still holds its Windows chord (see engine.WINDOWS_CHORD_ACTIONS).
+DESKTOPS = {
+    "niri": {
+        "chords": {"TASK_VIEW": (M, 24), "APP_EXPOSE": (M, 24),                  # Mod+O: toggle-overview
+                   "SWITCH_BETWEEN_DESKTOPS_LEFT": (M, KEY_LEFT),               # Mod+Left: focus-column-left
+                   "SWITCH_BETWEEN_DESKTOPS_RIGHT": (M, KEY_RIGHT)},
+        "cards": {"inner_card_vd_start_menu": "SWITCH_WORKSPACE_UP",
+                  "inner_card_vd_hide_show_desktop": "SWITCH_WORKSPACE_DOWN"},
+    },
+}
+
+
+def desktop_names(value):
+    """The lower-case names in an XDG_CURRENT_DESKTOP value, in order."""
+    return [n.strip().lower() for n in (value or "").split(":") if n.strip()]
+
+
+def desktop_profile(value):
+    """The DESKTOPS entry for an XDG_CURRENT_DESKTOP value, or an empty one."""
+    for name in desktop_names(value):
+        if name in DESKTOPS:
+            return DESKTOPS[name]
+    return {}
+
 
 # SYSTEM actions that move the horizontal wheel rather than press keys: action -> sign
 SCROLL_ACTIONS = {"SCROLL_LEFT": -1, "SCROLL_RIGHT": 1}
@@ -127,10 +164,12 @@ def all_codes():
 
 
 class ActionTable:
-    """The chord of each system action: the defaults plus the user's file, re-read on change."""
+    """The chord of each system action: the defaults (the desktop's over GNOME's) plus the user's
+    file, re-read on change. `desktop` is an XDG_CURRENT_DESKTOP value; None reads the environment."""
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, desktop=None):
         self.path = path
+        self._desktop = desktop_profile(os.environ.get("XDG_CURRENT_DESKTOP") if desktop is None else desktop)
         self._stamp = None
         self._overrides = {}
         self._lock = threading.Lock()   # the player, assign and sync threads all ask
@@ -167,4 +206,9 @@ class ActionTable:
 
     def chord(self, action):
         """The key codes to send for `action`, or None when it has no Linux keystroke."""
-        return self._reload().get(action) or DEFAULTS.get(action)
+        return (self._reload().get(action) or self._desktop.get("chords", {}).get(action)
+                or DEFAULTS.get(action))
+
+    def card_action(self, card_id):
+        """The action this desktop gives the depot card `card_id` in place of its usual one, or None."""
+        return self._desktop.get("cards", {}).get(card_id)

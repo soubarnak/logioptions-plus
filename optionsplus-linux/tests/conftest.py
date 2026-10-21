@@ -49,7 +49,7 @@ def hermetic(monkeypatch, spawned):
 
     # a test that lets the agent use the real runner must not start desktop tools (notify-send ...)
     monkeypatch.setattr(real_runner.SubprocessRunner, "run", lambda _self, argv: spawned.append(list(argv)))
-    for var in ("DISPLAY", "WAYLAND_DISPLAY"):
+    for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP"):   # the desktop picks the action defaults
         monkeypatch.delenv(var, raising=False)
     monkeypatch.delenv("OPL_REPLAY", raising=False)
 

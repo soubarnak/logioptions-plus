@@ -149,6 +149,7 @@ def compile_card(card, table=None):
     card = resolve_card(card)                       # a wrapper plays the card it has selected
     action = _windows_chord_action(card)
     if action:
+        action = table.card_action(card.get("id")) or action      # a desktop may read the card differently
         return compile_card({"macro": {"type": "SYSTEM", "system": {"action": action}}}, table)
     macro = card.get("macro") or {}
     kind = macro.get("type")
