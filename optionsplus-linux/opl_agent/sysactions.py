@@ -7,7 +7,11 @@ case; the first name with an entry wins, else GNOME's stay). On niri, whose stoc
 bare-Super overview, TASK_VIEW and APP_EXPOSE are Super+O (toggle-overview) and the desktop-left
 and -right actions are Super+Left and Super+Right (focus-column-left/right); its default
 gesture card also swaps its up and down swipes for SWITCH_WORKSPACE_UP and _DOWN (Super+Page_Up
-and Super+Page_Down, niri's focus-workspace-up/down; the same keys everywhere else). A per-user
+and Super+Page_Down, niri's focus-workspace-up/down; the same keys everywhere else). That is
+intended: on niri the swipes play those two actions, so retuning TASK_VIEW or SHOW_DESKTOP does
+not change them; retune SWITCH_WORKSPACE_UP and SWITCH_WORKSPACE_DOWN (the click swipe is still
+TASK_VIEW, left and right are SWITCH_BETWEEN_DESKTOPS_LEFT and _RIGHT). The table logs which
+profile it chose, once, when it is built. A per-user
 file changes any of them, and is read again whenever it changes, so an edit applies to the next
 press without a restart.
 
@@ -169,7 +173,11 @@ class ActionTable:
 
     def __init__(self, path=None, desktop=None):
         self.path = path
-        self._desktop = desktop_profile(os.environ.get("XDG_CURRENT_DESKTOP") if desktop is None else desktop)
+        value = os.environ.get("XDG_CURRENT_DESKTOP") if desktop is None else desktop
+        self._desktop = desktop_profile(value)
+        chosen = next((n for n in desktop_names(value) if n in DESKTOPS), None)
+        log.info("system actions: %s defaults (XDG_CURRENT_DESKTOP%s)", chosen or "GNOME",
+                 "=" + value if value else " unset")
         self._stamp = None
         self._overrides = {}
         self._lock = threading.Lock()   # the player, assign and sync threads all ask
