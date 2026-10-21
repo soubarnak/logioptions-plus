@@ -84,19 +84,30 @@ def _broadcast_battery(server, reg, dev_id):
     server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
 
 
+async def _poll_one(server, reg, loop, dev_id):
+    prev = _battery_key(reg, dev_id)
+    try:
+        await loop.run_in_executor(None, reg.refresh_battery, dev_id)
+    except Exception:
+        if dev_id in reg.devices:
+            log.debug("battery refresh of %s failed", dev_id, exc_info=True)
+        return
+    if _battery_key(reg, dev_id) != prev:
+        _broadcast_battery(server, reg, dev_id)
+
+
 async def _poll(server, reg, interval=POLL_SECONDS):
-    """Periodically re-read battery; broadcast changes to subscribers."""
+    """Periodically re-read battery; broadcast changes to subscribers. A device the
+    rescan removes mid-poll is skipped; nothing a single device does ends the loop."""
     loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval)
         for dev_id in list(reg.devices):
-            prev = _battery_key(reg, dev_id)
             try:
-                await loop.run_in_executor(None, reg.refresh_battery, dev_id)
+                await _poll_one(server, reg, loop, dev_id)
             except Exception:
-                continue
-            if _battery_key(reg, dev_id) != prev:
-                _broadcast_battery(server, reg, dev_id)
+                if dev_id in reg.devices:
+                    log.exception("battery poll of %s failed", dev_id)
 
 
 RETRY_FIRST, RETRY_LAST = 1.0, 8.0     # seconds before a failed profile switch is tried again, doubling

@@ -116,3 +116,42 @@ def test_unchanged_battery_is_not_repushed(bolt, live):
     live.sock.settimeout(0.5)
     with pytest.raises((socket.timeout, TimeoutError)):
         live.recv()
+
+
+# ---- the poller survives a device going away mid-poll ----------------------
+
+def test_poller_skips_a_device_removed_mid_poll_and_keeps_running():
+    import asyncio
+    from types import SimpleNamespace
+
+    from opl_agent import main
+
+    reg = SimpleNamespace(devices={
+        "gone": SimpleNamespace(battery_cache={"percent": 50}),
+        "stays": SimpleNamespace(battery_cache={"percent": 50}),
+    })
+    refreshed = []
+
+    def refresh(dev_id):
+        refreshed.append(dev_id)
+        if dev_id == "gone":
+            del reg.devices["gone"]      # the rescan thread drops it while the read runs
+        else:
+            reg.devices[dev_id].battery_cache = {"percent": 40 + len(refreshed)}
+
+    reg.refresh_battery = refresh
+    reg.battery = lambda dev_id: ({"percentage": reg.devices[dev_id].battery_cache["percent"]}, None)
+    reg.device_info = lambda dev_id: {"id": dev_id}
+    sent = []
+    server = SimpleNamespace(broadcast=lambda path, pl: sent.append(path))
+
+    async def run():
+        task = asyncio.ensure_future(main._poll(server, reg, 0.01))
+        await asyncio.sleep(0.15)
+        died = task.done()
+        task.cancel()
+        return died
+
+    assert asyncio.run(run()) is False
+    assert refreshed.count("stays") >= 2          # polled again on later ticks
+    assert "/battery/stays/state/changed" in sent
