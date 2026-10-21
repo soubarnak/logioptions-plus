@@ -67,7 +67,7 @@ def test_the_ui_drops_the_card_on_unplug_through_the_paths_it_subscribes(bolt, u
             continue
         if m["path"] == "/devices/state/changed" and m["payload"].get("id") == DEV:
             seen["changed"] = m["payload"]
-        elif m["path"] == "/devices/devio/device_removal":
+        elif m["path"] == "/devices/devio/device_removal" and m["payload"].get("deviceId") == DEV:
             seen["removal"] = m["payload"]
     assert seen["changed"]["state"] == "ABSENT" and seen["changed"]["connected"] is False
     assert seen["removal"]["deviceId"] == DEV
@@ -235,6 +235,7 @@ def test_a_receiver_that_fails_with_eio_mid_unplug_counts_as_gone_not_as_a_crash
     events = reg.rescan()                       # must not raise
     assert [d.id for d in events["removed"]] == [DEV] and len(events["receiver_removed"]) == 1
     assert reg.receivers == {} and reg.devices == {}
+    assert bolt.path not in reg._fds            # the handle on the dying node is released
     monkeypatch.setattr(hidpp, "get_paired_devices", real)
     events = reg.rescan()                       # the very next scan brings both back
     assert events["returned"] == [DEV] and events["receiver_added"] == ["rcv00000000"]
@@ -266,3 +267,119 @@ def test_a_mouse_comes_back_on_the_first_scan_where_it_answers_a_ping(bolt):
     assert reg.rescan()["returned"] == []        # still silent: nothing waits on a timer
     bolt.mouse.power(True)
     assert reg.rescan()["returned"] == [DEV]
+
+
+def test_a_transient_error_on_a_node_that_is_still_there_does_not_drop_the_receiver(bolt, monkeypatch):
+    import errno
+    from opl_agent import hidpp
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    real = hidpp.get_paired_devices
+    for code in (errno.ETIMEDOUT, errno.EPIPE):
+        monkeypatch.setattr(hidpp, "get_paired_devices",
+                            lambda fd, code=code, **kw: (_ for _ in ()).throw(OSError(code, "hiccup")))
+        events = reg.rescan()
+        assert events["removed"] == [] and events["receiver_removed"] == []
+        assert list(reg.devices) == [DEV] and list(reg.receivers) == ["rcv00000000"]
+    monkeypatch.setattr(hidpp, "get_paired_devices", real)
+    events = reg.rescan()
+    assert events["removed"] == [] and events["returned"] == []
+
+
+def test_a_reader_that_died_on_eio_is_reopened_by_the_next_scan(bolt):
+    import errno
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    old = reg._fds[bolt.path]
+
+    def eio(timeout):
+        raise OSError(errno.EIO, "Input/output error")
+
+    old.handle.read = eio
+    assert wait_for(lambda: old.dead is not None)
+    events = reg.rescan()                       # the node is still there: nothing is removed
+    assert events["removed"] == [] and events["receiver_removed"] == []
+    assert reg._fds[bolt.path] is not old and reg._fds[bolt.path].dead is None
+    assert list(reg.devices) == [DEV]
+
+
+def test_an_error_while_a_returning_device_is_built_loses_neither_receiver_nor_device_id(bolt, monkeypatch):
+    import errno
+    from opl_agent import hidpp
+    from opl_agent.model import RESUME_FEATURES, Registry
+    reg = Registry(bolt)
+    reg.scan()
+    bolt.unplug()
+    events = reg.rescan()
+    assert [d.id for d in events["removed"]] == [DEV] and DEV in reg.absent
+    bolt.plug()
+    real = hidpp.feature_index
+
+    def eio(fd, idx, fid):
+        if fid in RESUME_FEATURES:              # the probe's own lookups work; _build's loop hits EIO
+            raise OSError(errno.EIO, "Input/output error")
+        return real(fd, idx, fid)
+
+    monkeypatch.setattr(hidpp, "feature_index", eio)
+    events = reg.rescan()                       # must not raise, must still report the receiver
+    assert events["receiver_added"] == ["rcv00000000"]
+    assert events["returned"] == [] and DEV in reg.absent and reg.devices == {}
+    monkeypatch.setattr(hidpp, "feature_index", real)
+    events = reg.rescan()
+    assert events["returned"] == [DEV] and events["added"] == []   # the same id, not a new device
+    assert list(reg.devices) == [DEV] and reg.absent == {}
+
+
+def test_a_failed_announcement_does_not_end_the_watch_task(bolt, monkeypatch):
+    import asyncio
+    from opl_agent import main as agent_main
+    from opl_agent.model import Registry
+
+    class Server:
+        def __init__(self):
+            self.sent = []
+
+        def broadcast(self, path, payload=None):
+            self.sent.append(path)
+
+    reg = Registry(bolt)
+    reg.scan()
+    calls = []
+
+    def flaky(server, reg_, events):
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyError("gone")
+
+    monkeypatch.setattr(agent_main, "_announce", flaky)
+
+    async def run():
+        task = asyncio.ensure_future(agent_main._watch(Server(), reg, 0.01))
+        await asyncio.sleep(0.5)
+        alive = not task.done()
+        task.cancel()
+        return alive
+
+    assert asyncio.run(run()) and len(calls) > 1
+
+
+def test_announce_skips_ids_a_pairing_rescan_dropped(bolt):
+    from opl_agent import main as agent_main
+    from opl_agent.model import Registry
+
+    class Server:
+        def __init__(self):
+            self.sent = []
+
+        def broadcast(self, path, payload=None):
+            self.sent.append((path, payload))
+
+    reg = Registry(bolt)
+    events = reg.scan()
+    reg.devices.clear()
+    reg.receivers.clear()
+    server = Server()
+    agent_main._announce(server, reg, events)       # must not raise
+    assert server.sent == []

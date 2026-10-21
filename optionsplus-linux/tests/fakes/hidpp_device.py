@@ -366,6 +366,9 @@ class SimulatedBolt:
             raise FileNotFoundError(path)
         return _Handle(self)
 
+    def node_exists(self, path):
+        return self.present and path == self.path
+
     def wait_change(self, timeout):
         """Block until a node appears or disappears; True if one did."""
         hit = self._changed.wait(timeout)

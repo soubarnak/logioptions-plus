@@ -62,17 +62,35 @@ def _announce_gone(server, info):
 
 
 def _announce(server, reg, events):
-    """Broadcast what a rescan found: what went away (state ABSENT), what came or returned (ACTIVE)."""
+    """Broadcast what a rescan found: what went away (state ABSENT), what came or returned (ACTIVE).
+    An id a pairing job's rescan has dropped since is skipped; one bad event never stops the rest."""
     for d in events["removed"]:
-        info = d.info()
-        info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
-        _announce_gone(server, info)
+        try:
+            info = d.info()
+            info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+            _announce_gone(server, info)
+        except Exception:
+            log.exception("announcing removal of %s failed", d.id)
     for r in events["receiver_removed"]:
-        _announce_gone(server, _receiver_info(r))
+        try:
+            _announce_gone(server, _receiver_info(r))
+        except Exception:
+            log.exception("announcing removal of %s failed", r.id)
     for dev_id in events["added"] + events["returned"]:
-        server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
+        if dev_id not in reg.devices:
+            continue
+        try:
+            server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
+        except Exception:
+            log.exception("announcing %s failed", dev_id)
     for rid in events["receiver_added"]:
-        server.broadcast("/devices/state/changed", _receiver_info(reg.receivers[rid]))
+        r = reg.receivers.get(rid)
+        if r is None:
+            continue
+        try:
+            server.broadcast("/devices/state/changed", _receiver_info(r))
+        except Exception:
+            log.exception("announcing %s failed", rid)
 
 
 async def _watch(server, reg, interval=RESCAN_SECONDS):
@@ -87,10 +105,9 @@ async def _watch(server, reg, interval=RESCAN_SECONDS):
             await asyncio.sleep(interval)
         try:
             events = await loop.run_in_executor(None, reg.rescan)
+            _announce(server, reg, events)
         except Exception:
             log.exception("rescan failed")
-            continue
-        _announce(server, reg, events)
 
 
 def _broadcast_battery(server, reg, dev_id):

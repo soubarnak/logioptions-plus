@@ -11,7 +11,9 @@ installed (see resources.py), Device.Info carries the catalogue identity and
 the UI loads the device images and metadata from that depot.
 """
 
+import errno
 import logging
+import os
 import threading
 import time
 
@@ -43,6 +45,8 @@ def _dtype(raw):
 
 # Features whose events mean the mouse lost state: wireless status (wake), config change.
 RESUME_FEATURES = (0x1D4B, 0x0020)
+# errors that say the hidraw node is going or gone; anything else on a node still there is a hiccup
+NODE_GONE_ERRNOS = frozenset({errno.ENODEV, errno.EIO, errno.EBADF, errno.ESHUTDOWN, errno.ENXIO})
 
 # Connection enum names (logi.protocol.devices.Device.Interface.Connection).
 CONN_BOLT = "BLE_PRO"
@@ -367,6 +371,10 @@ class Registry:
             self._fds[node.path] = fd
         return fd
 
+    def _node_exists(self, path):
+        exists = getattr(self.transport, "node_exists", None)
+        return exists(path) if exists else os.path.exists(path)
+
     def _forget_fd(self, path):
         """Close and drop the handle on `path`, so the next scan opens it afresh."""
         fd = self._fds.pop(path, None)
@@ -418,6 +426,11 @@ class Registry:
             except hidpp.HidppError:
                 found = []
             except OSError as exc:
+                if exc.errno not in NODE_GONE_ERRNOS and self._node_exists(node.path):
+                    # a hiccup (ETIMEDOUT, EPIPE) on a node that is still there: not a removal,
+                    # so leave the table alone and look again on the next tick
+                    log.warning("transient error talking to %s: %s", node.path, exc)
+                    return None
                 # EIO / ENODEV from a node that is being unplugged: it counts as gone for this scan
                 log.warning("cannot talk to %s: %s", node.path, exc)
                 self._forget_fd(node.path)
@@ -539,6 +552,17 @@ class Registry:
                 pass
         return d
 
+    def _try_build(self, dev_id, node, info, previous=None):
+        """_build, or None when the node fails under it (unplugged mid-replug): the scan goes on,
+        and the device is looked at again on the next one."""
+        try:
+            return self._build(dev_id, node, info, previous)
+        except OSError as exc:
+            log.warning("cannot set up %s on %s: %s", dev_id, node.path, exc)
+            if exc.errno in NODE_GONE_ERRNOS:
+                self._forget_fd(node.path)
+            return None
+
     def scan(self):
         """Discover receivers/devices; every device found counts as (re)discovered."""
         return self.rescan(force=True)
@@ -577,8 +601,10 @@ class Registry:
             if not force and d.node.path == node.path and d.index == info["index"]:
                 new_devices[dev_id] = d
                 continue
-            new_devices[dev_id] = self._build(dev_id, node, info, d)
-            events["returned"].append(dev_id)
+            built = self._try_build(dev_id, node, info, d)
+            if built is not None:           # else it drops out below and is retried as a returning device
+                new_devices[dev_id] = built
+                events["returned"].append(dev_id)
         for dev_id, d in list(self.devices.items()):
             if dev_id not in new_devices:
                 d.connected = False
@@ -587,13 +613,19 @@ class Registry:
             hit = by_key.pop((d.pid, d.name), None)
             if hit is None:
                 continue
+            built = self._try_build(dev_id, hit[0], hit[1], d)
+            if built is None:
+                continue                    # it stays absent, keeps its id, and the next scan retries
             del self.absent[dev_id]
-            new_devices[dev_id] = self._build(dev_id, hit[0], hit[1], d)
+            new_devices[dev_id] = built
             events["returned"].append(dev_id)
         for key, (node, info) in by_key.items():
             dev_id = "dev%08d" % self._next_id
+            built = self._try_build(dev_id, node, info)
+            if built is None:
+                continue                    # the id is not used up
             self._next_id += 1
-            new_devices[dev_id] = self._build(dev_id, node, info)
+            new_devices[dev_id] = built
             events["added"].append(dev_id)
         for d in events["removed"]:
             self.absent[d.id] = d
