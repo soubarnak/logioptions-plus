@@ -20,7 +20,7 @@ import os
 import signal
 import sys
 
-from . import focus, resources, updates
+from . import focus, hidpp, resources, updates
 from .ipc import Server, socket_alive, socket_path
 from .model import Registry
 from .router import Router
@@ -88,6 +88,8 @@ async def _poll_one(server, reg, loop, dev_id):
     prev = _battery_key(reg, dev_id)
     try:
         await loop.run_in_executor(None, reg.refresh_battery, dev_id)
+    except hidpp.FeatureNotSupported:
+        return                          # no battery feature: nothing to poll, nothing to log
     except Exception:
         if dev_id in reg.devices:
             log.debug("battery refresh of %s failed", dev_id, exc_info=True)

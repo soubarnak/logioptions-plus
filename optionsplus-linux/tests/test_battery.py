@@ -147,7 +147,10 @@ def test_poller_skips_a_device_removed_mid_poll_and_keeps_running():
 
     async def run():
         task = asyncio.ensure_future(main._poll(server, reg, 0.01))
-        await asyncio.sleep(0.15)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 3.0     # two ticks, however slow the machine is
+        while refreshed.count("stays") < 2 and not task.done() and loop.time() < deadline:
+            await asyncio.sleep(0.01)
         died = task.done()
         task.cancel()
         return died
