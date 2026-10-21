@@ -1,6 +1,9 @@
 """Per-desktop defaults for the SYSTEM actions and the default gesture card, chosen from
 XDG_CURRENT_DESKTOP (ticket #23). GNOME stays the fallback; actions.toml overrides everything."""
 
+import json
+import os
+
 import pytest
 
 from opl_agent import engine, sysactions
@@ -88,6 +91,33 @@ def test_the_top_level_desktop_presets_follow_niri_columns():
     assert table.chord("SWITCH_BETWEEN_DESKTOPS_LEFT") == (M, KEY_LEFT)
 
 
-def test_the_workspace_actions_are_not_offered_in_the_picker():
-    from opl_agent import actions
-    assert "SWITCH_WORKSPACE_UP" not in repr(vars(actions))
+def test_the_first_listed_name_with_an_entry_wins_and_an_unknown_one_falls_through():
+    assert chord("GNOME:niri", "TASK_VIEW") == (M, KEY_O)           # GNOME has no entry: niri's applies
+    assert chord("someotherdesktop:niri", "TASK_VIEW") == (M, KEY_O)
+    assert chord("niri:GNOME", "TASK_VIEW") == (M, KEY_O)
+    assert chord("GNOME:KDE", "TASK_VIEW") == (M,)
+
+
+def test_an_edit_of_actions_toml_applies_to_a_niri_table_that_already_read_it(tmp_path):
+    path = tmp_path / "actions.toml"
+    path.write_text('[system]\nTASK_VIEW = "super+tab"\n')
+    table = sysactions.ActionTable(str(path), desktop="niri")
+    assert table.chord("TASK_VIEW") == sysactions.parse_chord("super+tab")
+    path.write_text('[system]\nSWITCH_WORKSPACE_DOWN = "ctrl+alt+down"\n')
+    os.utime(path, ns=(1, 2_000_000_000))                    # a different stamp even on a coarse clock
+    assert table.chord("TASK_VIEW") == (M, KEY_O)            # the niri default is back
+    assert table.chord("SWITCH_WORKSPACE_DOWN") == sysactions.parse_chord("ctrl+alt+down")
+
+
+def test_the_table_logs_the_profile_it_chose(caplog):
+    with caplog.at_level("INFO", logger="opl.sysactions"):
+        sysactions.ActionTable(desktop="niri")
+        sysactions.ActionTable(desktop=None)
+    assert "niri defaults (XDG_CURRENT_DESKTOP=niri)" in caplog.text
+    assert "GNOME defaults (XDG_CURRENT_DESKTOP unset)" in caplog.text
+
+
+def test_the_workspace_actions_are_not_in_what_the_ui_is_served(client):
+    from tests.test_action_catalogue import presets, rac
+    served = json.dumps([presets(client), rac(client)])
+    assert "SWITCH_WORKSPACE" not in served
