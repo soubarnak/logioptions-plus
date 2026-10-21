@@ -5,6 +5,8 @@ staging directory next to the payload, are verified against the pinned SHA-256, 
 there, and only then swapped in, so a failure never leaves a half-installed payload.
 """
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -26,6 +28,7 @@ EXIT_FAILED = 1
 MAGICS = (bytes.fromhex("10011720"), bytes.fromhex("06052120"))   # main app, device assets
 EOCD = b"PK\x05\x06"
 SCAN_LIMIT = (16 << 20) + (64 << 10) + 22     # how far from the end of an installer the ZIP record is sought
+HARD_MAX = 4 << 30                            # ceiling for a depot whose manifest entry pins no size
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
@@ -116,19 +119,34 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def download(url, dest, progress):
+def download(url, dest, progress, size=None):
+    """Fetch url to dest. The pinned size is a hard cap: a longer stream is aborted and the partial
+    file deleted, and a shorter one is an error. Without a size, HARD_MAX caps the stream."""
+    cap = HARD_MAX if size is None else size
+    got = 0
     try:
-        with urllib.request.urlopen(check_url(url), timeout=60) as r, open(dest, "wb") as o:
-            while True:
-                chunk = r.read(1 << 16)
-                if not chunk:
-                    break
-                o.write(chunk)
-                progress(len(chunk))
+        try:
+            with urllib.request.urlopen(check_url(url), timeout=60) as r, open(dest, "wb") as o:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > cap:
+                        raise FetchError("download of %s is larger than the pinned %d bytes; aborted"
+                                         % (url, cap))
+                    o.write(chunk)
+                    progress(len(chunk))
+            if size is not None and got != size:
+                raise FetchError("download of %s is %d bytes, expected the pinned %d" % (url, got, size))
+        except FetchError:
+            raise
+        except Exception as e:
+            raise FetchError("download failed for %s: %s" % (url, e))
     except FetchError:
+        with contextlib.suppress(OSError):
+            os.unlink(dest)
         raise
-    except Exception as e:
-        raise FetchError("download failed for %s: %s" % (url, e))
 
 
 class Progress:
@@ -269,19 +287,39 @@ def assemble(staging, depot_files, record):
                 os.chmod(os.path.join(base, f), 0o644)
 
 
+@contextlib.contextmanager
+def fetch_lock(parent):
+    """Exclusive, non-blocking lock on the payload's parent directory (flock on the directory
+    itself, so no lock file is left behind). Released on every path, including a crash."""
+    try:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise FetchError("cannot lock %s: %s" % (parent, e))
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise FetchError("another fetch is running for %s; try again when it has finished" % parent)
+        yield
+    finally:
+        os.close(fd)            # closing drops the flock
+
+
 def stage_and_swap(dest, collect):
-    """collect(staging) -> (depot_files, record); then unpack and swap into dest."""
+    """collect(staging) -> (depot_files, record); then unpack and swap into dest. The lock is held
+    for the whole fetch and swap."""
     parent = os.path.dirname(dest.rstrip("/"))
     os.makedirs(parent, exist_ok=True)
-    staging = tempfile.mkdtemp(prefix=".staging-", dir=parent)
-    try:
-        files, record = collect(staging)
-        build = os.path.join(staging, "payload")
-        os.mkdir(build)
-        assemble(build, files, record)
-        swap_in(build, dest)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+    with fetch_lock(parent):
+        staging = tempfile.mkdtemp(prefix=".staging-", dir=parent)
+        try:
+            files, record = collect(staging)
+            build = os.path.join(staging, "payload")
+            os.mkdir(build)
+            assemble(build, files, record)
+            swap_in(build, dest)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def collect_download(manifest, gui):
@@ -291,7 +329,7 @@ def collect_download(manifest, gui):
         try:
             for d in manifest["depots"]:
                 target = os.path.join(staging, d["name"] + ".depot")
-                download(d["url"], target, progress)
+                download(d["url"], target, progress, int(d["size"]))
                 if sha256_file(target) != d["sha256"].lower():
                     raise FetchError("checksum mismatch for %s; nothing was installed" % d["name"])
                 files[d["name"]] = target

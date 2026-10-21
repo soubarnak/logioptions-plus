@@ -13,7 +13,8 @@ from tests.test_fetcher import fetch, tree, world  # noqa: F401  (world is a fix
 
 
 def test_checksum_mismatch_aborts_before_unpacking_and_leaves_nothing(world):
-    world.srv.routes["/depots/test_mouse.depot"] = b"tampered" + world.srv.routes["/depots/test_mouse.depot"]
+    good = world.srv.routes["/depots/test_mouse.depot"]
+    world.srv.routes["/depots/test_mouse.depot"] = b"tampered" + good[8:]     # same length: size check passes
     r = fetch(world, "--accept-eula")
     assert r.returncode != 0
     assert "checksum" in r.stderr
