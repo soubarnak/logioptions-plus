@@ -32,7 +32,7 @@ TYPE = "type.googleapis.com/"
 POLL_SECONDS = 30
 FOCUS_SECONDS = 0.5      # how often the focused window is looked at
 SHUTDOWN_SECONDS = 5.0   # longest each step of a stop (work in flight, handing the mouse back) may take
-RESCAN_SECONDS = 2.0     # also the longest a switched-off mouse can stay on screen
+RESCAN_SECONDS = 2.0     # pause between scans; a scan with silent indices adds up to 2 x 1 s per index
 
 
 def _battery_key(reg, dev_id):

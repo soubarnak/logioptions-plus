@@ -240,10 +240,17 @@ def test_two_timeouts_reading_a_paired_devices_name_mean_it_is_gone(bolt):
 
 def test_one_timeout_on_a_paired_devices_ping_does_not_drop_it(bolt):
     reader = open_reader(bolt)
+    events = []
+    reader.add_listener(lambda *ev: events.append(ev))
     bolt.drop_pings = 1
     try:
         found = hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.3)
         assert [(d["index"], d["name"]) for d in found] == [(MOUSE_INDEX, "Test Mouse X1")]
+        assert found[0]["protocol"] == (4, 2)
+        pings = [w[1] for w in bolt.writes if w[2] == 0 and w[3] >> 4 == 1]
+        assert pings.count(MOUSE_INDEX) == 2
+        time.sleep(0.2)             # the first ping's answer arrived after its wait ended
+        assert events == []
     finally:
         reader.close()
 
