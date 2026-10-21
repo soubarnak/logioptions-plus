@@ -79,4 +79,31 @@ function guardWebRequest(wr, { isBlockedLoad, onBlocked }) {
   };
 }
 
-module.exports = { guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS };
+// The UI builds the scroll wheel speed row with the class `hidden-on-windows` unless its main
+// process answers IS_MAC with true, and its CSS hides that class (height 0, invisible). The agent
+// does support scroll wheel speed (through the uinput relay), so show the row again. The rule is
+// as narrow as the UI allows: only that row. The row keeps the bottom padding the hidden rule
+// leaves it, which is the spacing between rows (not confirmed against a macOS render).
+const SCROLL_SPEED_CSS = '.scrollwheel-speed.hidden-on-windows{height:auto!important;visibility:visible!important}';
+
+// The wheel relay is on unless OPL_WHEEL_RELAY=0, the variable the agent reads. The UI process
+// cannot see the relay being switched on or off while the agent runs, so this follows the
+// environment the launcher gave both of them.
+function wheelRelayEnabled(env) {
+  return (env || {}).OPL_WHEEL_RELAY !== '0';
+}
+
+// Insert the CSS into the UI's own page each time it loads (a navigation drops inserted CSS).
+function showScrollSpeed(contents, env) {
+  if (!wheelRelayEnabled(env)) return;
+  contents.on('dom-ready', () => {
+    try {
+      if (isOwnPage(contents.getURL())) contents.insertCSS(SCROLL_SPEED_CSS).catch(() => {});
+    } catch (_) { /* the page is already gone */ }
+  });
+}
+
+module.exports = {
+  guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS,
+  SCROLL_SPEED_CSS, wheelRelayEnabled, showScrollSpeed,
+};

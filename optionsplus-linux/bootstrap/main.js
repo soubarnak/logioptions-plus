@@ -43,7 +43,7 @@ shell.openExternal = async (url, ...rest) => {
 // wrap the setter: a listener the frontend installs later runs after ours instead of
 // replacing it.
 const { BrowserWindow } = require('electron');
-const { guardWebRequest, isOwnPage } = require('./guard');
+const { guardWebRequest, isOwnPage, showScrollSpeed } = require('./guard');
 let lastNotice = 0;
 const notifyBlocked = () => {
   const now = Date.now();
@@ -82,6 +82,7 @@ function guardSession(ses) {
 app.on('session-created', guardSession);
 app.on('web-contents-created', (_e, contents) => {
   guardSession(contents.session); // covers sessions created before this handler ran
+  showScrollSpeed(contents, process.env); // the UI hides the scroll wheel speed row off macOS
   // Belt and braces for navigations the network hook would see too late to close the window.
   const guard = (event, url) => {
     if (isBlockedLoad(url)) { event.preventDefault(); blockLoad(url, contents, event.isMainFrame !== false); }

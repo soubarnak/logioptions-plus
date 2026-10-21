@@ -1,7 +1,11 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS } = require('./guard');
+const { EventEmitter } = require('node:events');
+const {
+  guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS,
+  SCROLL_SPEED_CSS, wheelRelayEnabled, showScrollSpeed,
+} = require('./guard');
 const { isBlockedLoad } = require('./links');
 
 // Stands in for session.webRequest: records each (filter, listener) the wrapper installs.
@@ -136,4 +140,55 @@ test('the UI\'s own page is the file:// page', () => {
   assert.equal(isOwnPage('https://marketplace.logi.com/'), false);
   assert.equal(isOwnPage(''), false);
   assert.equal(isOwnPage(undefined), false);
+});
+
+// ---- the scroll wheel speed row the UI hides off macOS -----------------------------------------
+
+function fakeContents(url) {
+  const c = new EventEmitter();
+  c.inserted = [];
+  c.getURL = () => url;
+  c.insertCSS = (css) => { c.inserted.push(css); return Promise.resolve('key'); };
+  return c;
+}
+const OWN = 'file:///usr/lib/optionsplus-linux/app.asar/index.html';
+
+test('the CSS un-hides only the scroll wheel speed row', () => {
+  assert.match(SCROLL_SPEED_CSS, /^\.scrollwheel-speed\.hidden-on-windows\{/);
+  assert.match(SCROLL_SPEED_CSS, /visibility:visible!important/);
+  assert.match(SCROLL_SPEED_CSS, /height:auto!important/);
+  assert.equal(SCROLL_SPEED_CSS.split('{').length, 2, 'one rule');
+});
+
+test('the CSS goes into the UI\'s page each time it loads', () => {
+  const c = fakeContents(OWN);
+  showScrollSpeed(c, {});
+  assert.deepEqual(c.inserted, []);
+  c.emit('dom-ready');
+  c.emit('dom-ready');
+  assert.deepEqual(c.inserted, [SCROLL_SPEED_CSS, SCROLL_SPEED_CSS]);
+});
+
+test('no other page gets the CSS', () => {
+  const c = fakeContents('https://example.org/');
+  showScrollSpeed(c, {});
+  c.emit('dom-ready');
+  assert.deepEqual(c.inserted, []);
+});
+
+test('with the wheel relay switched off nothing is inserted', () => {
+  assert.equal(wheelRelayEnabled({}), true);
+  assert.equal(wheelRelayEnabled({ OPL_WHEEL_RELAY: '1' }), true);
+  assert.equal(wheelRelayEnabled({ OPL_WHEEL_RELAY: '0' }), false);
+  const c = fakeContents(OWN);
+  showScrollSpeed(c, { OPL_WHEEL_RELAY: '0' });
+  c.emit('dom-ready');
+  assert.deepEqual(c.inserted, []);
+});
+
+test('a page that cannot be asked for its URL does not break the load', () => {
+  const c = fakeContents(OWN);
+  c.getURL = () => { throw new Error('destroyed'); };
+  showScrollSpeed(c, {});
+  assert.doesNotThrow(() => c.emit('dom-ready'));
 });
