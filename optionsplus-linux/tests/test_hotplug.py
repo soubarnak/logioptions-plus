@@ -5,6 +5,8 @@ import time
 
 import pytest
 
+from tests.fakes.hidpp_device import SimulatedBolt, SimulatedMouse
+
 from tests.harness import wait_for
 from tests.test_battery import next_push
 from tests.test_pointer_speed import slider
@@ -305,7 +307,7 @@ def test_a_reader_that_died_on_eio_is_reopened_by_the_next_scan(bolt):
     assert list(reg.devices) == [DEV]
 
 
-def test_an_error_while_a_returning_device_is_built_loses_neither_receiver_nor_device_id(bolt, monkeypatch):
+def test_a_transient_error_while_a_returning_device_is_built_loses_neither_receiver_nor_device_id(bolt, monkeypatch):
     import errno
     from opl_agent import hidpp
     from opl_agent.model import RESUME_FEATURES, Registry
@@ -319,7 +321,7 @@ def test_an_error_while_a_returning_device_is_built_loses_neither_receiver_nor_d
 
     def eio(fd, idx, fid):
         if fid in RESUME_FEATURES:              # the probe's own lookups work; _build's loop hits EIO
-            raise OSError(errno.EIO, "Input/output error")
+            raise OSError(errno.ETIMEDOUT, "timed out")
         return real(fd, idx, fid)
 
     monkeypatch.setattr(hidpp, "feature_index", eio)
@@ -383,3 +385,112 @@ def test_announce_skips_ids_a_pairing_rescan_dropped(bolt):
     server = Server()
     agent_main._announce(server, reg, events)       # must not raise
     assert server.sent == []
+
+
+# ---- review round 2: gone node mid-build, hiccups, pairing on a released handle ----
+
+class Both:
+    """One transport over several simulated receivers (their nodes list together)."""
+
+    def __init__(self, *parts):
+        self.parts = parts
+
+    def list_nodes(self):
+        return [n for t in self.parts for n in t.list_nodes()]
+
+    def open(self, path):
+        return next(t for t in self.parts if t.path == path).open(path)
+
+    def node_exists(self, path):
+        return any(t.node_exists(path) for t in self.parts)
+
+
+def _fail_in_build(monkeypatch, errno_):
+    """feature_index fails with `errno_` for the features _build's own loops look up."""
+    from opl_agent import hidpp
+    from opl_agent.model import RESUME_FEATURES
+    real = hidpp.feature_index
+
+    def fail(fd, idx, fid):
+        if fid in RESUME_FEATURES:
+            raise OSError(errno_, "injected")
+        return real(fd, idx, fid)
+
+    monkeypatch.setattr(hidpp, "feature_index", fail)
+    return real
+
+
+def test_eio_while_building_the_first_of_two_devices_keeps_both_ids_for_the_next_scan(bolt, monkeypatch):
+    import errno
+    from opl_agent import hidpp
+    from opl_agent.model import Registry
+    second = "dev00000001"
+    bolt.add_device()
+    reg = Registry(bolt)
+    reg.scan()
+    assert sorted(reg.devices) == [DEV, second]
+    bolt.unplug()
+    reg.rescan()
+    bolt.plug()
+    real = _fail_in_build(monkeypatch, errno.EIO)
+    events = reg.rescan()                           # no KeyError for the second device
+    assert events["returned"] == [] and events["added"] == []
+    assert events["receiver_added"] == [] and reg.receivers == {}      # no receiver left without a handle
+    assert sorted(reg.absent) == [DEV, second] and reg.devices == {}
+    assert bolt.path not in reg._fds
+    monkeypatch.setattr(hidpp, "feature_index", real)
+    events = reg.rescan()
+    assert sorted(events["returned"]) == [DEV, second] and events["added"] == []
+    assert events["receiver_added"] == ["rcv00000000"]
+
+
+def test_a_node_that_keeps_timing_out_does_not_block_another_receivers_unplug(monkeypatch):
+    import errno
+    from opl_agent import hidpp
+    from opl_agent.model import Registry
+    one = SimulatedBolt()
+    two = SimulatedBolt(path="/dev/hidraw-sim1", unique_id=b"\x0b\x02\x0b\x02",
+                        mouse=SimulatedMouse("Other Mouse", 0x4343))
+    reg = Registry(Both(one, two))
+    reg.scan()
+    assert sorted(reg.receivers) == ["rcv00000000", "rcv00000001"]
+    one_fd = reg._fds[one.path]
+    real = hidpp.get_paired_devices
+
+    def probe(fd, **kw):
+        if fd is one_fd:
+            raise OSError(errno.ETIMEDOUT, "hiccup")
+        return real(fd, **kw)
+
+    monkeypatch.setattr(hidpp, "get_paired_devices", probe)
+    two.unplug()
+    events = reg.rescan()
+    assert [r.id for r in events["receiver_removed"]] == ["rcv00000001"]
+    assert [d.id for d in events["removed"]] == ["dev00000001"]
+    assert list(reg.receivers) == ["rcv00000000"] and list(reg.devices) == [DEV]    # the hiccuping one is kept
+
+
+def test_a_hiccup_while_a_device_is_rebuilt_in_place_keeps_it_without_flicker(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    old = reg.devices[DEV]
+    bolt.unplug()
+    bolt.plug("/dev/hidraw-sim7")                   # back on another node before any scan
+    _fail_in_build(monkeypatch, errno.ETIMEDOUT)
+    events = reg.rescan()
+    assert events["removed"] == [] and events["returned"] == []
+    assert reg.devices[DEV] is old and reg.absent == {}
+
+
+def test_pairing_on_a_receiver_whose_handle_was_released_fails_cleanly(bolt):
+    import errno
+    from opl_agent.model import Registry
+    reg = Registry(bolt)
+    reg.scan()
+    r = reg.receivers["rcv00000000"]
+    reg._forget_fd(bolt.path)
+    with pytest.raises(OSError) as exc:
+        reg._receiver_fd(r)
+    assert exc.value.errno == errno.ENODEV
