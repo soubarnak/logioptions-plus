@@ -282,3 +282,55 @@ def test_the_finish_does_not_run_on_the_dispatch_thread(unifying, reg, monkeypat
         assert wait_for(lambda: buttons, timeout=2)
     finally:
         gate.set()
+
+
+def _locking_seen(reg):
+    seen = []
+    reg.on_locking.append(lambda rid, payload: seen.append(payload["state"]))
+    return seen
+
+
+def test_pairing_again_before_the_cancels_echoes_arrive_keeps_the_new_pairing(unifying, reg):
+    finishes = []
+    real = reg._unifying_finish
+    reg._unifying_finish = lambda *a: (finishes.append(a), real(*a))
+    seen = _locking_seen(reg)
+    unifying.hold_lock_status = True                  # the receiver is slow to report
+    reg.open_pairing(RCV)
+    reg.cancel_pairing(RCV)
+    assert reg.open_pairing(RCV)["state"] == "START"  # again, at once
+    unifying.release_lock_status()                    # "open", "closed", "open": all ours, all late
+    assert wait_for(lambda: seen[-1:] == ["OPENED"] and "CLOSED" in seen)
+    assert finishes == []                             # the cancel's "closed" did not end the new pairing
+    assert reg.receivers[RCV].pairing["state"] == "START"
+
+
+def test_a_receiver_that_never_reports_the_close_does_not_hide_another_tools_open(unifying, reg, monkeypatch):
+    monkeypatch.setattr(model, "ECHO_SECONDS", 0.2)
+    unifying.hold_lock_status = True
+    reg.open_pairing(RCV)
+    assert reg.cancel_pairing(RCV)["state"] == "CANCEL"
+    unifying.drop_lock_status()                       # neither the open nor the close is ever reported
+    time.sleep(0.3)                                   # past the wait for them
+    unifying.emit_lock_status(open_=True)             # another tool opens the lock
+    assert wait_for(lambda: reg.receivers[RCV].pairing["state"] == "START")
+
+
+def test_cancelling_with_the_lock_already_shut_waits_for_no_close(unifying, reg, monkeypatch):
+    seen = []
+    reg.on_pairing.append(lambda rid, state, passkey, events: state and seen.append(state))
+    monkeypatch.setattr(model, "ECHO_SECONDS", 0.2)
+    unifying.hold_lock_status = True
+    reg.open_pairing(RCV)
+    unifying.drop_lock_status()
+    time.sleep(0.3)                                   # the open was never reported: the lock is shut
+    monkeypatch.setattr(model, "ECHO_SECONDS", 30)
+    unifying.hold_lock_status = True
+    assert reg.cancel_pairing(RCV)["state"] == "CANCEL"
+    unifying.drop_lock_status()                       # and the close is not reported either
+    unifying.emit_lock_status(open_=True)             # another tool opens the lock
+    assert wait_for(lambda: reg.receivers[RCV].pairing["state"] == "START")
+    index = unifying.add_device("Second Mouse Z2", 0x4343)
+    unifying.emit_lock_status(open_=False)            # a device paired: news, not our close
+    assert wait_for(lambda: seen and seen[-1]["state"] == "STOP")
+    assert seen[-1]["error"] == "NO_PAIRING_ERROR" and seen[-1]["pairingSlot"] == index

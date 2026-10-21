@@ -212,6 +212,8 @@ class Receiver:
         self.generation = 0          # counts pairing starts; a watchdog only ends the one it was set for
         self.watchdog = None         # threading.Timer ending a pairing nobody reports on
         self.closing = False         # we are closing the lock ourselves: its notification is no news
+        self.echoes = []             # Unifying: 0x4A notifications our own lock writes will cause, in
+                                     # order: [opened, stale, deadline]; stale = its pairing was cancelled
         self.slots_before = set()    # device indexes on the node when pairing began
         self.locked = False          # Unifying lock open, as the receiver last said
         self.discovery = "UNKNOWN_STATE"    # Bolt discovery: START / STOP / CANCEL
@@ -256,6 +258,7 @@ class Receiver:
 # it goes out as Receiver.PassKeyDisplay.
 PAIRING_MARGIN = 5.0            # seconds past the lock's timeout before the watchdog gives up
 SETTLE_SECONDS, SETTLE_TRIES = 0.3, 4   # a paired device may take a moment to answer the receiver
+ECHO_SECONDS = 2.0              # how long a lock write's own notification is waited for
 
 
 def pairing_state(rcv_id, state, error="NO_PAIRING_ERROR", slot=0, device=None, address=""):
@@ -879,6 +882,7 @@ class Registry:
             self._transition(r, "STOP", {"START"}, error="DISCONNECTED")
             self._disarm(r)
             r.locked, r.closing, r.phase = False, False, None
+            r.echoes = []
             if r.discovery == "START":
                 r.discovery = "STOP"
 
@@ -923,7 +927,13 @@ class Registry:
             return r.pairing
         fd = self._receiver_fd(r)
         if not r.bolt:
-            hidpp.unifying_lock(fd, True, timeout)
+            with r.lock:
+                echo = self._expect_echo(r, True)
+            try:
+                hidpp.unifying_lock(fd, True, timeout)
+            except Exception:
+                self._drop_echo(r, echo)
+                raise
             r.phase = "pairing"
         elif raw is not None:
             self._bolt_pair(r, raw, authentication or 0, 2)
@@ -979,8 +989,17 @@ class Registry:
                 return r.pairing
             phase = r.phase
             r.closing = True            # the receiver's own "closed" notification is no news
-        fd = self._receiver_fd(r)
+            echo, staled = None, []
+            if not r.bolt:
+                # opens still on their way belong to the pairing being cancelled; a "closed"
+                # comes back only when the lock is open
+                staled = [e for e in r.echoes if e[0] and not e[1]]
+                for e in staled:
+                    e[1] = True
+                if self._lock_open(r):
+                    echo = self._expect_echo(r, False)
         try:
+            fd = self._receiver_fd(r)
             if not r.bolt:
                 hidpp.unifying_lock(fd, False)
             elif phase == "pairing":
@@ -990,6 +1009,9 @@ class Registry:
         except Exception:
             with r.lock:
                 r.closing = False
+                for e in staled:
+                    e[1] = False
+            self._drop_echo(r, echo)
             raise
         with r.lock:
             if r.discovery == "START":
@@ -998,6 +1020,40 @@ class Registry:
             return self._transition(r, "CANCEL", {"START"}) or r.pairing
 
     # ---- Unifying notifications ---------------------------------------------
+    @staticmethod
+    def _expect_echo(r, opened):
+        """Under r.lock: note the 0x4A notification the lock write about to go out will cause."""
+        echo = [opened, False, time.monotonic() + ECHO_SECONDS]
+        r.echoes.append(echo)
+        return echo
+
+    @staticmethod
+    def _drop_echo(r, echo):
+        """The write failed: no notification is coming for it."""
+        with r.lock:
+            r.echoes = [e for e in r.echoes if e is not echo]
+
+    @staticmethod
+    def _take_echo(r, opened):
+        """Under r.lock: the expected echo this notification is, or None when it is news (another
+        tool, or the receiver ending the pairing). Echoes past their deadline are dropped: a
+        receiver that does not report a write is not waited on for good. An echo answered after
+        earlier ones means those earlier ones were not reported."""
+        now = time.monotonic()
+        r.echoes = [e for e in r.echoes if e[2] > now]
+        for i, e in enumerate(r.echoes):
+            if e[0] == opened:
+                del r.echoes[:i + 1]
+                return e
+        return None
+
+    @staticmethod
+    def _lock_open(r):
+        """Under r.lock: whether the lock is open once the echoes on their way have arrived."""
+        now = time.monotonic()
+        pending = [e for e in r.echoes if e[2] > now]
+        return pending[-1][0] if pending else r.locked
+
     def _on_unifying_lock(self, node, address, params):
         """Dispatch thread: 0x4A lock status (address bit0 = lock open, params[0] = error)."""
         r = self._receiver_at(node, bolt=False)
@@ -1006,8 +1062,9 @@ class Registry:
         code = params[0] if params else 0
         opened = bool(address & 0x01)
         with r.lock:
-            if opened and r.closing:
-                return              # our own open, reported after we closed the lock: its "closed" follows
+            echo = self._take_echo(r, opened)
+            if echo is not None and echo[1]:
+                return              # our own open of a pairing since cancelled: its "closed" follows
             r.locked = opened
             for hook in list(self.on_locking):
                 try:
@@ -1015,17 +1072,15 @@ class Registry:
                 except Exception:
                     log.exception("locking hook failed for %s", r.id)
             if r.locked:
+                r.closing = False                       # open again: a "closed" from now on is news
                 if r.pairing["state"] != "START":       # opened by another tool, or by us a moment ago
                     r.phase = "pairing"
                     if not r.slots_before:
                         r.slots_before = {d.index for d in self.devices.values() if d.node.path == r.node.path}
                     self._transition(r, "START", self.PAIRING_FROM)
                 return
-            if r.closing:
-                r.closing = False                       # we closed it: an open after this is news again
-                return
-            if r.pairing["state"] != "START":
-                return                                  # nobody opened it
+            if echo is not None or r.closing or r.pairing["state"] != "START":
+                return                                  # we closed it ourselves, or nobody opened it
             generation = r.generation
         self._jobs.post(("pairing", r.id), lambda: self._unifying_finish(r, code, generation))
 
