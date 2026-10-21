@@ -345,6 +345,7 @@ class SimulatedBolt:
         self._counter = 0
         self.writes = []                  # every raw report the agent wrote
         self.drop_name_reads = 0          # leave this many device-name requests unanswered
+        self.drop_pings = 0               # leave this many root pings of a present device unanswered
         self._out = queue.Queue()
         self._lock = threading.Lock()
 
@@ -568,6 +569,9 @@ class SimulatedBolt:
             if not mouse.powered:
                 self._error(data, False, 8)           # nothing answers for a mouse that is off
                 return
+            if self.drop_pings and b2 == 0 and b3 >> 4 == 1:
+                self.drop_pings -= 1
+                return                                # a ping answered too late to count
             if self.drop_name_reads and b2 < len(mouse.features) and mouse.features[b2] == 0x0005:
                 self.drop_name_reads -= 1
                 return                                # a busy reader: this request goes unanswered

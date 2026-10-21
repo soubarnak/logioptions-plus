@@ -1125,8 +1125,8 @@ def _device_gone(err):
 
 
 def _once_more_on_timeout(fn, *args):
-    """fn(*args); one HidppTimeout is retried once, since a busy reader makes a live device
-    miss a single answer."""
+    """fn(*args); one HidppTimeout is retried once, since a busy reader or a slow device
+    makes a live one miss a single answer."""
     try:
         return fn(*args)
     except HidppTimeout:
@@ -1141,7 +1141,7 @@ def get_paired_devices(fd, bolt=None, max_devices=6, ping_timeout=1.0):
     out = []
     for i in range(1, max_devices + 1):
         try:
-            proto = root_ping(fd, i, timeout=ping_timeout)
+            proto = _once_more_on_timeout(root_ping, fd, i, ping_timeout)
         except HidppError:
             continue
         d = {"index": i, "protocol": proto, "wpid": None, "name": None, "type": None}

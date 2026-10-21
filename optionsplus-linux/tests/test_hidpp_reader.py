@@ -236,3 +236,33 @@ def test_two_timeouts_reading_a_paired_devices_name_mean_it_is_gone(bolt):
         assert hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.5) == []
     finally:
         reader.close()
+
+
+def test_one_timeout_on_a_paired_devices_ping_does_not_drop_it(bolt):
+    reader = open_reader(bolt)
+    bolt.drop_pings = 1
+    try:
+        found = hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.3)
+        assert [(d["index"], d["name"]) for d in found] == [(MOUSE_INDEX, "Test Mouse X1")]
+    finally:
+        reader.close()
+
+
+def test_two_timeouts_on_a_paired_devices_ping_mean_it_is_not_there(bolt):
+    reader = open_reader(bolt)
+    bolt.drop_pings = 2
+    try:
+        assert hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.3) == []
+    finally:
+        reader.close()
+
+
+def test_an_index_that_answers_the_ping_with_an_error_is_pinged_once(bolt):
+    reader = open_reader(bolt)
+    try:
+        hidpp.get_paired_devices(reader, bolt=True, ping_timeout=0.3)
+        pings = [w[1] for w in bolt.writes if w[2] == 0 and w[3] >> 4 == 1]
+        empty = [i for i in range(1, 7) if i != MOUSE_INDEX]
+        assert all(pings.count(i) == 1 for i in empty)
+    finally:
+        reader.close()
