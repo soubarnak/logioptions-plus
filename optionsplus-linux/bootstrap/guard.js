@@ -2,6 +2,8 @@
 // tested with a fake webRequest object.
 'use strict';
 
+const fs = require('fs');
+
 // Every host isCloudHost() (links.js) can block lives under one of these domains.
 const OURS_URLS = [
   '*://*.logi.com/*', '*://logi.com/*',
@@ -93,17 +95,34 @@ function wheelRelayEnabled(env) {
   return (env || {}).OPL_WHEEL_RELAY !== '0';
 }
 
+// The agent relays the wheel only when it can open its virtual input device (opl_agent/uinput.py
+// UINPUT_PATH); without it the agent reports adjustableSpeed false and the row would do nothing.
+// The UI process has no channel to the agent, so it asks the same question of the same node: both
+// run as the same user. A mouse without high-resolution scrolling is not told apart here.
+const UINPUT_PATH = '/dev/uinput';
+
+function uinputWritable(access = fs.accessSync) {
+  try {
+    access(UINPUT_PATH, fs.constants.W_OK);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // Insert the CSS into the UI's own page each time it loads (a navigation drops inserted CSS).
-function showScrollSpeed(contents, env) {
+// uinput access is asked on each load, so a permission fixed while the UI runs shows the row
+// after a reload.
+function showScrollSpeed(contents, env, writable = uinputWritable) {
   if (!wheelRelayEnabled(env)) return;
   contents.on('dom-ready', () => {
     try {
-      if (isOwnPage(contents.getURL())) contents.insertCSS(SCROLL_SPEED_CSS).catch(() => {});
+      if (isOwnPage(contents.getURL()) && writable()) contents.insertCSS(SCROLL_SPEED_CSS).catch(() => {});
     } catch (_) { /* the page is already gone */ }
   });
 }
 
 module.exports = {
   guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS,
-  SCROLL_SPEED_CSS, wheelRelayEnabled, showScrollSpeed,
+  SCROLL_SPEED_CSS, UINPUT_PATH, wheelRelayEnabled, uinputWritable, showScrollSpeed,
 };

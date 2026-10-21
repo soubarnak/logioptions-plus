@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const {
   guardWebRequest, matchPattern, matchesFilter, isOwnPage, OURS_URLS,
-  SCROLL_SPEED_CSS, wheelRelayEnabled, showScrollSpeed,
+  SCROLL_SPEED_CSS, UINPUT_PATH, wheelRelayEnabled, uinputWritable, showScrollSpeed,
 } = require('./guard');
 const { isBlockedLoad } = require('./links');
 
@@ -152,6 +152,7 @@ function fakeContents(url) {
   return c;
 }
 const OWN = 'file:///usr/lib/optionsplus-linux/app.asar/index.html';
+const WRITABLE = () => true;
 
 test('the CSS un-hides only the scroll wheel speed row', () => {
   assert.match(SCROLL_SPEED_CSS, /^\.scrollwheel-speed\.hidden-on-windows\{/);
@@ -162,7 +163,7 @@ test('the CSS un-hides only the scroll wheel speed row', () => {
 
 test('the CSS goes into the UI\'s page each time it loads', () => {
   const c = fakeContents(OWN);
-  showScrollSpeed(c, {});
+  showScrollSpeed(c, {}, WRITABLE);
   assert.deepEqual(c.inserted, []);
   c.emit('dom-ready');
   c.emit('dom-ready');
@@ -171,7 +172,7 @@ test('the CSS goes into the UI\'s page each time it loads', () => {
 
 test('no other page gets the CSS', () => {
   const c = fakeContents('https://example.org/');
-  showScrollSpeed(c, {});
+  showScrollSpeed(c, {}, WRITABLE);
   c.emit('dom-ready');
   assert.deepEqual(c.inserted, []);
 });
@@ -181,7 +182,7 @@ test('with the wheel relay switched off nothing is inserted', () => {
   assert.equal(wheelRelayEnabled({ OPL_WHEEL_RELAY: '1' }), true);
   assert.equal(wheelRelayEnabled({ OPL_WHEEL_RELAY: '0' }), false);
   const c = fakeContents(OWN);
-  showScrollSpeed(c, { OPL_WHEEL_RELAY: '0' });
+  showScrollSpeed(c, { OPL_WHEEL_RELAY: '0' }, WRITABLE);
   c.emit('dom-ready');
   assert.deepEqual(c.inserted, []);
 });
@@ -189,6 +190,31 @@ test('with the wheel relay switched off nothing is inserted', () => {
 test('a page that cannot be asked for its URL does not break the load', () => {
   const c = fakeContents(OWN);
   c.getURL = () => { throw new Error('destroyed'); };
-  showScrollSpeed(c, {});
+  showScrollSpeed(c, {}, WRITABLE);
   assert.doesNotThrow(() => c.emit('dom-ready'));
+});
+
+test('without write access to uinput the agent cannot relay, so nothing is inserted', () => {
+  const c = fakeContents(OWN);
+  showScrollSpeed(c, {}, () => false);
+  c.emit('dom-ready');
+  assert.deepEqual(c.inserted, []);
+});
+
+test('uinput access is asked again on each load, so a fixed permission shows the row', () => {
+  let writable = false;
+  const c = fakeContents(OWN);
+  showScrollSpeed(c, {}, () => writable);
+  c.emit('dom-ready');
+  writable = true;
+  c.emit('dom-ready');
+  assert.deepEqual(c.inserted, [SCROLL_SPEED_CSS]);
+});
+
+test('uinput is writable when the agent\'s device node can be opened for writing', () => {
+  assert.equal(UINPUT_PATH, '/dev/uinput');
+  const asked = [];
+  assert.equal(uinputWritable((path, mode) => { asked.push([path, mode]); }), true);
+  assert.deepEqual(asked, [['/dev/uinput', require('node:fs').constants.W_OK]]);
+  assert.equal(uinputWritable(() => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); }), false);
 });
