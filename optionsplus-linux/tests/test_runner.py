@@ -3,7 +3,28 @@
 import logging
 import sys
 
+import pytest
+
 from opl_agent.runner import SubprocessRunner
+
+
+@pytest.fixture(autouse=True)
+def tools_allowed(monkeypatch):
+    monkeypatch.setenv("OPL_NO_HARDWARE", "0")   # these tests run harmless python children
+
+
+def test_no_hardware_starts_no_tool_and_logs_it(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv("OPL_NO_HARDWARE", "1")
+    marker = tmp_path / "ran"
+    argv = [sys.executable, "-c", "open(%r, 'w')" % str(marker)]
+    runner = SubprocessRunner()
+    with caplog.at_level(logging.INFO, logger="opl.runner"):
+        runner.run(argv)
+        assert runner.run_wait(argv) == -1
+        assert runner.run_output(argv) == (-1, "")
+        assert runner.which("sh") is None
+    assert "not running" in caplog.text
+    assert not marker.exists()
 
 
 def test_run_wait_gives_up_on_a_program_that_never_ends(caplog):

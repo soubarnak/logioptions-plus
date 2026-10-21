@@ -470,9 +470,10 @@ class Reader:
 
 
 def no_hardware():
-    """OPL_NO_HARDWARE=1 (set for every child of the test run): no hidraw node is listed and
-    neither hidraw nor /dev/uinput can be opened, so a spawned agent cannot touch a real mouse."""
-    return os.environ.get("OPL_NO_HARDWARE") == "1"
+    """OPL_NO_HARDWARE=1 (or true, yes, on; set for every child of the test run): no hidraw node
+    is listed and neither hidraw nor /dev/uinput can be opened, so a spawned agent cannot touch
+    a real mouse. Unset, empty or 0 is the normal behaviour."""
+    return os.environ.get("OPL_NO_HARDWARE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def raise_no_hardware(path):

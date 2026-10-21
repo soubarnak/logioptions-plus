@@ -1,6 +1,7 @@
 import os
 import shutil
 import socket
+import subprocess
 
 import pytest
 
@@ -15,6 +16,20 @@ from tests.harness import RunningAgent, short_tmpdir
 # Every child process of the run (a spawned agent, a launcher) inherits this: it sees no hidraw
 # node and cannot open one or /dev/uinput, so the suite never touches a real mouse.
 os.environ["OPL_NO_HARDWARE"] = "1"
+
+_Popen = subprocess.Popen
+
+
+class GuardedPopen(_Popen):
+    """A child started with a hand-built env (no OPL_NO_HARDWARE) would reach the real mouse:
+    add the guard unless the test set the variable itself (even to "0" or "")."""
+    def __init__(self, *args, env=None, **kwargs):
+        if env is not None and "OPL_NO_HARDWARE" not in env:
+            env = dict(env, OPL_NO_HARDWARE="1")
+        super().__init__(*args, env=env, **kwargs)
+
+
+subprocess.Popen = GuardedPopen
 
 # Only loopback is reachable from tests (the fake release server lives there).
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
