@@ -546,3 +546,56 @@ def test_assigning_the_default_gesture_card_back_keeps_the_button_diverted(defau
     assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})
     assert assign_gesture(client, default_gesture_card())["result"]["code"] == "SUCCESS"
     assert bolt.mouse.diverted == {GESTURE}
+
+
+def depot_gesture_wrapper():
+    """The gesture button's default card in the shape the depot ships it: a ONE_OF wrapper holding eight
+    four-way adapters (some with a horizontal slot), the virtual-desktops one selected, the wrapper listing
+    them in its own nestedCardsOrder. Invented ids and values."""
+    def adapter(name, **nested):
+        cards = {d: {"id": "inner_%s_%s" % (name, d), "attribute": "MACRO_PLAYBACK", "continuous": True,
+                     "macro": {"type": "KEYSTROKE", "keystroke": {"code": code, "modifiers": []}}}
+                 for d, code in ACTIONS.items()}
+        cards.update(nested)
+        return {"id": "card_wrapper_" + name, "attribute": "ADAPTER_4WAYS", "continuous": True,
+                "gestureInfo": {"x": {"speedControl": True}, "y": {"pauseBetweenActionsMs": 300}},
+                "nestedCards": cards, "readOnly": True, "tags": ["PRESET_TAG_GESTURE"]}
+    names = ["virtual_desktops", "media_control", "window_management", "pan"]
+    return {"id": "card_wrapper", "attribute": "ONE_OF", "continuous": True,
+            "nestedCards": {n: adapter(n) for n in names}, "nestedCardsOrder": names,
+            "selectedNestedCard": "virtual_desktops", "tags": ["PRESET_TAG_GESTURE"]}
+
+
+@pytest.fixture
+def depot_default_agent(workdir, agent_factory):
+    path = os.path.join(workdir, "depots", fx.DEPOT, "default_configurations.json")
+    with open(path) as f:
+        conf = json.load(f)
+    conf["defaultConfigurations"][0]["settings"]["control_id_mappings"]["195"] = depot_gesture_wrapper()
+    with open(path, "w") as f:
+        json.dump(conf, f)
+    running = agent_factory()
+    c = running.client()
+    yield running, c
+    c.close()
+
+
+def test_a_depot_shaped_default_wrapper_diverts_the_button_with_raw_xy(depot_default_agent, bolt):
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE} and bolt.mouse.raw_xy == {GESTURE})
+
+
+def test_a_depot_shaped_default_wrapper_is_diverted_again_after_the_mouse_wakes(depot_default_agent, bolt):
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})
+    bolt.mouse.diverted.clear()
+    bolt.mouse.raw_xy.clear()
+    bolt.emit_event(F_WAKE)
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE} and bolt.mouse.raw_xy == {GESTURE})
+
+
+def test_resetting_to_defaults_leaves_a_depot_shaped_default_wrapper_diverted(depot_default_agent, bolt):
+    _agent, client = depot_default_agent
+    assert wait_for(lambda: bolt.mouse.diverted == {GESTURE})
+    assert assign_gesture(client, keystroke(6, 224))["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.raw_xy == set()           # a plain key needs the press only
+    assert client.call("SET", "/v2/profiles/reset", {"deviceId": "dev00000000"})["result"]["code"] == "SUCCESS"
+    assert bolt.mouse.diverted == {GESTURE} and bolt.mouse.raw_xy == {GESTURE}
