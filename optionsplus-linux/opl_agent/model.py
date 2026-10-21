@@ -11,7 +11,9 @@ installed (see resources.py), Device.Info carries the catalogue identity and
 the UI loads the device images and metadata from that depot.
 """
 
+import errno
 import logging
+import os
 import threading
 import time
 
@@ -43,6 +45,8 @@ def _dtype(raw):
 
 # Features whose events mean the mouse lost state: wireless status (wake), config change.
 RESUME_FEATURES = (0x1D4B, 0x0020)
+# errors that say the hidraw node is going or gone; anything else on a node still there is a hiccup
+NODE_GONE_ERRNOS = frozenset({errno.ENODEV, errno.EIO, errno.EBADF, errno.ESHUTDOWN, errno.ENXIO})
 
 # Connection enum names (logi.protocol.devices.Device.Interface.Connection).
 CONN_BOLT = "BLE_PRO"
@@ -340,6 +344,8 @@ class Registry:
         self.absent_receivers = {}
         self._next_receiver = 0
         self._probed_receivers = []
+        self._held = set()         # node paths with a transient error in this scan's probe
+        self._gone = set()         # node paths that failed for good while a device was built in this scan
         self._scan_lock = threading.RLock()
         self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change;
                                    # state is None when only a passkey is shown
@@ -367,6 +373,26 @@ class Registry:
             self._fds[node.path] = fd
         return fd
 
+    def _receiver_fd(self, r):
+        """The open handle of receiver `r`'s node, or OSError(ENODEV) when it was released."""
+        fd = self._fds.get(r.node.path)
+        if fd is None:
+            raise OSError(errno.ENODEV, "receiver %s is gone" % r.id)
+        return fd
+
+    def _node_exists(self, path):
+        exists = getattr(self.transport, "node_exists", None)
+        return exists(path) if exists else os.path.exists(path)
+
+    def _forget_fd(self, path):
+        """Close and drop the handle on `path`, so the next scan opens it afresh."""
+        fd = self._fds.pop(path, None)
+        if fd is not None:
+            try:
+                hidpp.close_node(fd)
+            except OSError:
+                pass
+
     @staticmethod
     def _identity(info, node):
         """Hardware identity that survives a replug (hidraw node and index may change)."""
@@ -383,6 +409,7 @@ class Registry:
             log.exception("HID++ discovery failed")
             return None
         live = {n.path for n in nodes}
+        self._held = set()          # nodes that hiccuped this scan: their receiver and devices stay as they were
         for path in [p for p in self._fds if p not in live]:
             try:
                 hidpp.close_node(self._fds.pop(path))
@@ -394,10 +421,8 @@ class Registry:
             try:
                 fd = self._fd(node)
             except OSError as exc:
-                log.warning("cannot open %s: %s", node.path, exc)
+                log.warning("cannot open %s: %s", node.path, exc)      # not ready (EACCES just after plug): next tick
                 continue
-            if node.is_receiver:
-                receivers.append(node)
             bolt = getattr(node, "is_bolt", False)
             try:
                 if node.is_receiver:
@@ -410,6 +435,19 @@ class Registry:
                               "type": hidpp.get_device_type(fd, 0xFF)}]
             except hidpp.HidppError:
                 found = []
+            except OSError as exc:
+                if exc.errno not in NODE_GONE_ERRNOS and self._node_exists(node.path):
+                    # a hiccup (ETIMEDOUT, EPIPE) on a node that is still there: not a removal,
+                    # so leave the table alone and look again on the next tick
+                    log.warning("transient error talking to %s: %s", node.path, exc)
+                    self._held.add(node.path)
+                    continue
+                # EIO / ENODEV from a node that is being unplugged: it counts as gone for this scan
+                log.warning("cannot talk to %s: %s", node.path, exc)
+                self._forget_fd(node.path)
+                continue
+            if node.is_receiver:
+                receivers.append(node)
             out += [(node, info) for info in found]
         self._probed_receivers = receivers
         return out
@@ -422,6 +460,8 @@ class Registry:
         free = {n.path: n for n in self._probed_receivers}
         for rid, r in list(self.receivers.items()):
             node = free.pop(r.node.path, None)
+            if node is None and r.node.path in self._held:
+                continue                        # it hiccuped: still plugged, not looked at this scan
             if node is None:
                 r.connected = False
                 self._receiver_gone(r)
@@ -525,6 +565,47 @@ class Registry:
                 pass
         return d
 
+    def _try_build(self, dev_id, node, info, previous=None):
+        """_build, or None when the node fails under it (unplugged mid-replug): the scan goes on,
+        and the device is looked at again on the next one. A node that failed for good is noted in
+        `_gone` and not built on again in this scan; _sweep_gone settles it at the end."""
+        if node.path in self._gone or node.path not in self._fds:
+            return None
+        try:
+            return self._build(dev_id, node, info, previous)
+        except OSError as exc:
+            log.warning("cannot set up %s on %s: %s", dev_id, node.path, exc)
+            if exc.errno in NODE_GONE_ERRNOS or not self._node_exists(node.path):
+                self._gone.add(node.path)
+            return None
+
+    def _sweep_gone(self, new_devices, from_absent, events):
+        """End of a scan in which a node failed for good while devices were built on it: those
+        devices and the receiver are gone for this scan (nothing of them is announced as new),
+        and the handle on the node is released only now, so no build in the scan lost it."""
+        for path in self._gone:
+            for dev_id, d in list(new_devices.items()):
+                if d.node.path != path:
+                    continue
+                del new_devices[dev_id]
+                for kind in ("added", "returned"):
+                    if dev_id in events[kind]:
+                        events[kind].remove(dev_id)
+                if dev_id in from_absent:
+                    self.absent[dev_id] = from_absent.pop(dev_id)
+            for rid, r in list(self.receivers.items()):
+                if r.node.path != path:
+                    continue
+                r.connected = False
+                self._receiver_gone(r)
+                self.absent_receivers[rid] = r
+                del self.receivers[rid]
+                if rid in events["receiver_added"]:
+                    events["receiver_added"].remove(rid)    # never announced: nothing to take back
+                else:
+                    events["receiver_removed"].append(r)
+            self._forget_fd(path)
+
     def scan(self):
         """Discover receivers/devices; every device found counts as (re)discovered."""
         return self.rescan(force=True)
@@ -554,33 +635,52 @@ class Registry:
         for node, info in probed:
             by_key.setdefault(self._identity(info, node), (node, info))
         new_devices = {}
+        self._gone = set()
+        from_absent = {}
         for dev_id, d in list(self.devices.items()):
             key = (d.pid, d.name)
             hit = by_key.pop(key, None)
             if hit is None:
+                if d.node.path in self._held:
+                    new_devices[dev_id] = d      # its node hiccuped: not looked at, not removed
                 continue
             node, info = hit
             if not force and d.node.path == node.path and d.index == info["index"]:
                 new_devices[dev_id] = d
                 continue
-            new_devices[dev_id] = self._build(dev_id, node, info, d)
-            events["returned"].append(dev_id)
-        for dev_id, d in list(self.devices.items()):
-            if dev_id not in new_devices:
-                d.connected = False
-                events["removed"].append(d)
+            built = self._try_build(dev_id, node, info, d)
+            if built is not None:
+                new_devices[dev_id] = built
+                events["returned"].append(dev_id)
+            elif node.path not in self._gone:
+                new_devices[dev_id] = d          # a hiccup: keep it as it was, no ABSENT/ACTIVE flicker
         for dev_id, d in list(self.absent.items()):
             hit = by_key.pop((d.pid, d.name), None)
             if hit is None:
                 continue
-            del self.absent[dev_id]
-            new_devices[dev_id] = self._build(dev_id, hit[0], hit[1], d)
+            built = self._try_build(dev_id, hit[0], hit[1], d)
+            if built is None:
+                continue                    # it stays absent, keeps its id, and the next scan retries
+            from_absent[dev_id] = d
+            new_devices[dev_id] = built
             events["returned"].append(dev_id)
         for key, (node, info) in by_key.items():
             dev_id = "dev%08d" % self._next_id
+            built = self._try_build(dev_id, node, info)
+            if built is None:
+                continue                    # the id is not used up
             self._next_id += 1
-            new_devices[dev_id] = self._build(dev_id, node, info)
+            new_devices[dev_id] = built
             events["added"].append(dev_id)
+        if self._gone:
+            self._sweep_gone(new_devices, from_absent, events)
+        for dev_id, d in list(self.devices.items()):
+            if dev_id not in new_devices:
+                d.connected = False
+                events["removed"].append(d)
+        for dev_id in from_absent:
+            if dev_id in new_devices:
+                del self.absent[dev_id]
         for d in events["removed"]:
             self.absent[d.id] = d
             log.info("device %s (%s) went away", d.id, d.name)
@@ -812,7 +912,7 @@ class Registry:
         raw = self._address(address) if address and r.bolt else None
         if not self._begin(r, timeout, raw.hex() if raw else ""):
             return r.pairing
-        fd = self._fds[r.node.path]
+        fd = self._receiver_fd(r)
         if not r.bolt:
             hidpp.unifying_lock(fd, True, timeout)
             r.phase = "pairing"
@@ -840,7 +940,7 @@ class Registry:
             r.closing, r.timeout = False, timeout
             r.advertised.clear()
             r.candidate = None
-        hidpp.bolt_discover(self._fds[r.node.path], timeout)
+        hidpp.bolt_discover(self._receiver_fd(r), timeout)
         with r.lock:
             r.discovery, r.auto_pair = "START", False
             self._announce_discovery(r)
@@ -853,7 +953,7 @@ class Registry:
             was = r.phase
             r.phase, r.address = "pairing", address.hex()
         try:
-            hidpp.bolt_pair(self._fds[r.node.path], address, authentication,
+            hidpp.bolt_pair(self._receiver_fd(r), address, authentication,
                             entropy=20 if kind == 2 else 10)
         except Exception:
             with r.lock:
@@ -870,7 +970,7 @@ class Registry:
                 return r.pairing
             phase = r.phase
             r.closing = True            # the receiver's own "closed" notification is no news
-        fd = self._fds[r.node.path]
+        fd = self._receiver_fd(r)
         try:
             if not r.bolt:
                 hidpp.unifying_lock(fd, False)

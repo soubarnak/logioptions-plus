@@ -50,6 +50,49 @@ def _receiver_info(receiver):
     return info
 
 
+def _announce_gone(server, info):
+    """Tell the UI a device or receiver is gone. The UI subscribes neither /devices/state/deactivated
+    nor (for a supported device) /devices/options/device_removal: it drops a card when
+    /devices/state/changed brings the device with state ABSENT. /devices/devio/device_removal
+    ({deviceId}) is the UI's own removal event (it drives the firmware-update unplug modal), so
+    that goes out too. /devices/state/deactivated stays for clients that listen to it."""
+    server.broadcast("/devices/state/changed", info)
+    server.broadcast("/devices/devio/device_removal", {"deviceId": info["id"]})
+    server.broadcast("/devices/state/deactivated", info)
+
+
+def _announce(server, reg, events):
+    """Broadcast what a rescan found: what went away (state ABSENT), what came or returned (ACTIVE).
+    An id a pairing job's rescan has dropped since is skipped; one bad event never stops the rest."""
+    for d in events["removed"]:
+        try:
+            info = d.info()
+            info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
+            _announce_gone(server, info)
+        except Exception:
+            log.exception("announcing removal of %s failed", d.id)
+    for r in events["receiver_removed"]:
+        try:
+            _announce_gone(server, _receiver_info(r))
+        except Exception:
+            log.exception("announcing removal of %s failed", r.id)
+    for dev_id in events["added"] + events["returned"]:
+        if dev_id not in reg.devices:
+            continue
+        try:
+            server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
+        except Exception:
+            log.exception("announcing %s failed", dev_id)
+    for rid in events["receiver_added"]:
+        r = reg.receivers.get(rid)
+        if r is None:
+            continue
+        try:
+            server.broadcast("/devices/state/changed", _receiver_info(r))
+        except Exception:
+            log.exception("announcing %s failed", rid)
+
+
 async def _watch(server, reg, interval=RESCAN_SECONDS):
     """Rescan on hidraw node add/remove and every `interval` (a mouse switching
     on or off leaves the receiver's node alone); announce what changed."""
@@ -62,19 +105,9 @@ async def _watch(server, reg, interval=RESCAN_SECONDS):
             await asyncio.sleep(interval)
         try:
             events = await loop.run_in_executor(None, reg.rescan)
+            _announce(server, reg, events)
         except Exception:
             log.exception("rescan failed")
-            continue
-        for d in events["removed"]:
-            info = d.info()
-            info["@type"] = TYPE + "logi.protocol.devices.Device.Info"
-            server.broadcast("/devices/state/deactivated", info)
-        for r in events["receiver_removed"]:
-            server.broadcast("/devices/state/deactivated", _receiver_info(r))
-        for dev_id in events["added"] + events["returned"]:
-            server.broadcast("/devices/state/changed", _device_info(reg, dev_id))
-        for rid in events["receiver_added"]:
-            server.broadcast("/devices/state/changed", _receiver_info(reg.receivers[rid]))
 
 
 def _broadcast_battery(server, reg, dev_id):
