@@ -510,3 +510,67 @@ def test_pairing_on_a_receiver_whose_handle_was_released_fails_cleanly(bolt):
     with pytest.raises(OSError) as exc:
         reg._receiver_fd(r)
     assert exc.value.errno == errno.ENODEV
+
+
+# ---- a node held for transient errors is not held forever ----
+
+def _hiccup_probe(monkeypatch, errno_):
+    """get_paired_devices fails with `errno_` while the returned switch is on."""
+    from opl_agent import hidpp
+    real = hidpp.get_paired_devices
+    on = {"fail": True}
+
+    def probe(fd, **kw):
+        if on["fail"]:
+            raise OSError(errno_, "hiccup")
+        return real(fd, **kw)
+
+    monkeypatch.setattr(hidpp, "get_paired_devices", probe)
+    return on
+
+
+def test_a_node_that_keeps_timing_out_is_dropped_after_the_held_scans_run_out(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import HELD_SCANS, Registry
+    reg = Registry(bolt)
+    reg.scan()
+    _hiccup_probe(monkeypatch, errno.ETIMEDOUT)
+    for _ in range(HELD_SCANS):
+        events = reg.rescan()
+        assert events["removed"] == [] and events["receiver_removed"] == []
+    events = reg.rescan()
+    assert [r.id for r in events["receiver_removed"]] == ["rcv00000000"]
+    assert [d.id for d in events["removed"]] == [DEV]
+    assert reg.devices == {} and reg.receivers == {} and DEV in reg.absent
+
+
+def test_an_answer_between_hiccups_starts_the_held_count_again(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import HELD_SCANS, Registry
+    reg = Registry(bolt)
+    reg.scan()
+    hiccup = _hiccup_probe(monkeypatch, errno.EPIPE)
+    for _ in range(HELD_SCANS):
+        reg.rescan()
+    hiccup["fail"] = False
+    reg.rescan()
+    hiccup["fail"] = True
+    for _ in range(HELD_SCANS):
+        events = reg.rescan()
+        assert events["removed"] == [] and events["receiver_removed"] == []
+    assert list(reg.devices) == [DEV] and list(reg.receivers) == ["rcv00000000"]
+
+
+def test_a_dropped_node_that_answers_again_returns_with_the_same_ids(bolt, monkeypatch):
+    import errno
+    from opl_agent.model import HELD_SCANS, Registry
+    reg = Registry(bolt)
+    reg.scan()
+    hiccup = _hiccup_probe(monkeypatch, errno.ETIMEDOUT)
+    for _ in range(HELD_SCANS + 2):
+        reg.rescan()
+    assert reg.devices == {} and reg.receivers == {}
+    hiccup["fail"] = False
+    events = reg.rescan()
+    assert events["receiver_added"] == ["rcv00000000"]
+    assert events["returned"] == [DEV] and events["added"] == []

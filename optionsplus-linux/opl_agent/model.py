@@ -47,6 +47,7 @@ def _dtype(raw):
 RESUME_FEATURES = (0x1D4B, 0x0020)
 # errors that say the hidraw node is going or gone; anything else on a node still there is a hiccup
 NODE_GONE_ERRNOS = frozenset({errno.ENODEV, errno.EIO, errno.EBADF, errno.ESHUTDOWN, errno.ENXIO})
+HELD_SCANS = 5      # scans in a row a node may hiccup and be held before it counts as gone
 
 # Connection enum names (logi.protocol.devices.Device.Interface.Connection).
 CONN_BOLT = "BLE_PRO"
@@ -345,6 +346,7 @@ class Registry:
         self._next_receiver = 0
         self._probed_receivers = []
         self._held = set()         # node paths with a transient error in this scan's probe
+        self._held_scans = {}      # node path -> scans in a row it has been held
         self._gone = set()         # node paths that failed for good while a device was built in this scan
         self._scan_lock = threading.RLock()
         self.on_pairing = []       # callables(rcv_id, state, passkey, events), on every pairing change;
@@ -410,6 +412,8 @@ class Registry:
             return None
         live = {n.path for n in nodes}
         self._held = set()          # nodes that hiccuped this scan: their receiver and devices stay as they were
+        for path in [p for p in self._held_scans if p not in live]:
+            del self._held_scans[path]
         for path in [p for p in self._fds if p not in live]:
             try:
                 hidpp.close_node(self._fds.pop(path))
@@ -436,16 +440,20 @@ class Registry:
             except hidpp.HidppError:
                 found = []
             except OSError as exc:
-                if exc.errno not in NODE_GONE_ERRNOS and self._node_exists(node.path):
+                held = self._held_scans.get(node.path, 0)
+                if exc.errno not in NODE_GONE_ERRNOS and self._node_exists(node.path) and held < HELD_SCANS:
                     # a hiccup (ETIMEDOUT, EPIPE) on a node that is still there: not a removal,
                     # so leave the table alone and look again on the next tick
                     log.warning("transient error talking to %s: %s", node.path, exc)
+                    self._held_scans[node.path] = held + 1
                     self._held.add(node.path)
                     continue
-                # EIO / ENODEV from a node that is being unplugged: it counts as gone for this scan
+                # EIO / ENODEV from a node that is being unplugged, or a node that kept failing
+                # for HELD_SCANS scans: it counts as gone for this scan
                 log.warning("cannot talk to %s: %s", node.path, exc)
                 self._forget_fd(node.path)
                 continue
+            self._held_scans.pop(node.path, None)
             if node.is_receiver:
                 receivers.append(node)
             out += [(node, info) for info in found]
