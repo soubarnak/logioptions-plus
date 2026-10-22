@@ -10,6 +10,11 @@
 #                    confirms Logitech's EULA; declining exits without starting anything.
 #   OPL_ASAR, OPL_DATA_DIR, OPL_DEPOT_DIR  override single payload paths
 #   OPL_NO_SANDBOX=1 fallback ONLY if Void's Electron cannot sandbox (adds --no-sandbox)
+#   OPL_OZONE_PLATFORM  auto (default), wayland or x11: passes --ozone-platform=<value> to Electron.
+#                    Use x11 where the native Wayland window never appears (see the README).
+#                    If unset, read from a line OPL_OZONE_PLATFORM=x11 in
+#                    ${XDG_CONFIG_HOME:-~/.config}/optionsplus-linux/launcher.conf (never sourced).
+#                    The environment wins over the file; other values warn and are ignored.
 #   OPL_BIN_DIR, OPL_LIB_DIR, OPL_AGENT_CMD, OPL_FETCH_CMD  locations of Electron, our code, agent and fetcher commands
 LIB=${OPL_LIB_DIR:-/usr/lib/optionsplus-linux}
 BINDIR=${OPL_BIN_DIR:-/usr/bin}
@@ -72,7 +77,25 @@ if ! "$AGENT" --is-running; then
     done
 fi
 
-if [ "${OPL_NO_SANDBOX:-}" = 1 ]; then
-    exec "$ELECTRON" --no-sandbox "$LIB/bootstrap" "$@"
+# Ozone platform override. The config file is parsed, not sourced.
+OZONE=${OPL_OZONE_PLATFORM:-}
+if [ -z "$OZONE" ]; then
+    CONF=${XDG_CONFIG_HOME:-$HOME/.config}/optionsplus-linux/launcher.conf
+    if [ -f "$CONF" ]; then
+        OZONE=$(grep '^[[:space:]]*OPL_OZONE_PLATFORM=' "$CONF" | tail -n 1 \
+            | sed -e 's/^[^=]*=//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' -e "s/^[\"']\(.*\)[\"']\$/\1/")
+    fi
 fi
-exec "$ELECTRON" "$LIB/bootstrap" "$@"
+case $OZONE in
+    wayland|x11) set -- "--ozone-platform=$OZONE" "$LIB/bootstrap" "$@" ;;
+    ''|auto) set -- "$LIB/bootstrap" "$@" ;;
+    *)
+        echo "optionsplus-linux: ignoring OPL_OZONE_PLATFORM='$OZONE' (want auto, wayland or x11)" >&2
+        set -- "$LIB/bootstrap" "$@"
+        ;;
+esac
+
+if [ "${OPL_NO_SANDBOX:-}" = 1 ]; then
+    exec "$ELECTRON" --no-sandbox "$@"
+fi
+exec "$ELECTRON" "$@"

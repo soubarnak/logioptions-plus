@@ -166,3 +166,80 @@ def test_agent_command_runs_module_from_lib_dir(tmp_path):
     e = dict(os.environ, OPL_LIB_DIR=str(ROOT), OPL_SOCKET=str(tmp_path / "none.sock"))
     r = subprocess.run([str(AGENT_CMD), "--is-running"], env=e, capture_output=True, timeout=20)
     assert r.returncode == 1
+
+
+# --- OPL_OZONE_PLATFORM / launcher.conf ----------------------------------------
+
+def write_conf(env, text):
+    conf = Path(env["HOME"]) / ".config" / "optionsplus-linux" / "launcher.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text(text)
+
+
+def ozone_flags(out):
+    return [a for a in out["argv"] if a.startswith("--ozone-platform")]
+
+
+def test_ozone_unset_passes_nothing(env):
+    env.pop("OPL_OZONE_PLATFORM", None)
+    r, out = launch(env)
+    assert ozone_flags(out) == []
+    assert "OPL_OZONE_PLATFORM" not in r.stderr
+
+
+def test_ozone_env_x11_passes_flag_before_bootstrap(env):
+    env["OPL_OZONE_PLATFORM"] = "x11"
+    _, out = launch(env, "--foo")
+    assert out["argv"][1:] == ["--ozone-platform=x11", str(ROOT / "bootstrap"), "--foo"]
+
+
+def test_ozone_env_wayland_with_no_sandbox(env):
+    env["OPL_OZONE_PLATFORM"] = "wayland"
+    env["OPL_NO_SANDBOX"] = "1"
+    _, out = launch(env)
+    assert out["argv"][1:] == ["--no-sandbox", "--ozone-platform=wayland", str(ROOT / "bootstrap")]
+
+
+def test_ozone_auto_passes_nothing(env):
+    env["OPL_OZONE_PLATFORM"] = "auto"
+    _, out = launch(env)
+    assert ozone_flags(out) == []
+
+
+def test_ozone_file_x11_passes_flag(env):
+    write_conf(env, "# comment\nOPL_OZONE_PLATFORM=x11\n")
+    _, out = launch(env)
+    assert ozone_flags(out) == ["--ozone-platform=x11"]
+
+
+def test_ozone_file_honours_xdg_config_home(env, tmp_path):
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    conf = tmp_path / "xdg" / "optionsplus-linux" / "launcher.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text('OPL_OZONE_PLATFORM="wayland"\n')
+    _, out = launch(env)
+    assert ozone_flags(out) == ["--ozone-platform=wayland"]
+
+
+def test_ozone_env_overrides_file(env):
+    write_conf(env, "OPL_OZONE_PLATFORM=x11\n")
+    env["OPL_OZONE_PLATFORM"] = "wayland"
+    _, out = launch(env)
+    assert ozone_flags(out) == ["--ozone-platform=wayland"]
+
+
+def test_ozone_file_is_parsed_not_sourced(env, tmp_path):
+    marker = tmp_path / "ran"
+    write_conf(env, f"touch {marker}\nOPL_OZONE_PLATFORM=x11\n")
+    _, out = launch(env)
+    assert ozone_flags(out) == ["--ozone-platform=x11"]
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("bad", ["x12", "wayland --no-sandbox", "$(id)"])
+def test_ozone_invalid_value_is_ignored_with_warning(env, bad):
+    env["OPL_OZONE_PLATFORM"] = bad
+    r, out = launch(env)
+    assert r.returncode == 0
+    assert ozone_flags(out) == []
+    assert "ignoring OPL_OZONE_PLATFORM" in r.stderr

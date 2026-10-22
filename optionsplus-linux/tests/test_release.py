@@ -132,7 +132,8 @@ def test_signing_requires_key():
 def test_template_describes_this_package():
     t = TEMPLATE.read_text()
     assert re.search(r"^pkgname=optionsplus-linux$", t, re.M)
-    assert re.search(r"^version=%s$" % re.escape(version()), t, re.M)
+    # CI bumps the template's version and checksum after the release, so it trails the source.
+    assert re.search(r"^version=\d+\.\d+\.\d+$", t, re.M)
     assert re.search(r"^checksum=[0-9a-f]{64}$", t, re.M)
     assert "soubarnak/logioptions-plus" in t
     assert "optionsplus-linux-v${version}" in t
@@ -284,3 +285,30 @@ def test_readme_states_the_limits_honestly():
     for needle in ("SHUT_DOWN", "KEY_POWER", "CONSOLE_CLIENT", "Ctrl+Alt+T", "Solaar", "logiops",
                    "fwupd", "not affiliated", "schema_defaults.py", "protodefaults.py", "unverified"):
         assert needle in t, needle
+
+
+# --- release notes -----------------------------------------------------------
+
+def test_release_notes_prints_the_matching_changelog_section():
+    r = run(TOOLS / "release-notes.sh", version())
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip()
+    assert "## [" not in r.stdout
+
+
+def test_release_notes_stops_at_the_next_section():
+    r = run(TOOLS / "release-notes.sh", "0.1.0")
+    assert r.returncode == 0, r.stderr
+    assert "First release" in r.stdout
+    assert "OPL_OZONE_PLATFORM" not in r.stdout
+
+
+@pytest.mark.parametrize("ver", ["99.0.0", "0.1", ""])
+def test_release_notes_missing_section_fails(ver):
+    r = run(TOOLS / "release-notes.sh", ver)
+    assert r.returncode != 0
+    assert r.stderr
+
+
+def test_workflow_includes_changelog_section_in_notes():
+    assert "tools/release-notes.sh" in WORKFLOW.read_text()

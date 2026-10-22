@@ -290,6 +290,27 @@ disable the other tool first. (This is advice; the agent does not detect them.)
 - **Reset everything.** Quit the app and the agent, then remove `~/.config/optionsplus-linux/`
   (settings) and, if wanted, `~/.local/share/optionsplus-linux/payload/` (Logitech data).
 
+### Window does not appear (hybrid NVIDIA/AMD, Wayland)
+
+Symptom: `optionsplus-linux` starts, the agent runs, but no window ever shows. The UI process logs
+that the GPU process crashed with `Cannot create bo with format= RGBA_8888 and usage=SCANOUT`.
+
+Observed, not proven: on a laptop with an NVIDIA GPU driving HDMI and an AMD GPU driving the
+internal panel (eDP), under niri, the default native Wayland mode showed a window in 0 of 8 runs
+and `--ozone-platform=x11` in 8 of 8. Nothing in this project sets that mode beyond Electron's
+`ozone-platform-hint=auto`, so the cause looks like Chromium's buffer allocation across the two GPUs.
+A stale `~/.config/logioptionsplus` is not the cause.
+
+Fix: run the UI through X11. This needs Xwayland (on niri, `xwayland-satellite`).
+
+```sh
+mkdir -p ~/.config/optionsplus-linux
+echo 'OPL_OZONE_PLATFORM=x11' > ~/.config/optionsplus-linux/launcher.conf
+```
+
+or set `OPL_OZONE_PLATFORM=x11` in the environment for one run. The variable wins over the file;
+`wayland` and `auto` (the default) are the other accepted values. Remove the line to go back.
+
 ### Known limitations
 
 These behaviours are guesses from the protocol or from other implementations and have not been

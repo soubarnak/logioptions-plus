@@ -68,7 +68,11 @@ jobs:
 
           Later updates arrive with \`sudo xbps-install -Su\`. The first sync asks you to accept the
           repository key. Check that the fingerprint matches the README before you accept.
+
+          ## Changes in ${VERSION}
+
           NOTES
+          tools/release-notes.sh "$VERSION" >> "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" --title "Options+ for Linux ${VERSION}" \
             --notes-file "$RUNNER_TEMP/notes.md" --generate-notes \
