@@ -301,14 +301,17 @@ and `--ozone-platform=x11` in 8 of 8. Nothing in this project sets that mode bey
 `ozone-platform-hint=auto`, so the cause looks like Chromium's buffer allocation across the two GPUs.
 A stale `~/.config/logioptionsplus` is not the cause.
 
-Fix: run the UI through X11. This needs Xwayland (on niri, `xwayland-satellite`).
+Fix: run the UI through X11. This needs Xwayland (on niri, `xwayland-satellite`). The easiest way
+is the "Options+ (X11)" entry in the application menu, installed next to "Options+ for Linux"; it
+starts the UI with `OPL_OZONE_PLATFORM=x11`. To make the plain `optionsplus-linux` command do the
+same, use the config file:
 
 ```sh
 mkdir -p ~/.config/optionsplus-linux
 echo 'OPL_OZONE_PLATFORM=x11' > ~/.config/optionsplus-linux/launcher.conf
 ```
 
-or set `OPL_OZONE_PLATFORM=x11` in the environment for one run. The variable wins over the file;
+or set `OPL_OZONE_PLATFORM=x11` in the environment for one run (this is what the menu entry does). The variable wins over the file;
 `wayland` and `auto` (the default) are the other accepted values. Remove the line to go back.
 
 ### Known limitations

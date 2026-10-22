@@ -17,7 +17,7 @@ ALLOW = [re.compile(p + "$") for p in (
     r"usr/lib/udev/rules\.d/70-optionsplus-linux\.rules",
     r"usr/share/polkit-1/actions/io\.github\.soubarnak\.optionsplus-linux\.policy",
     r"etc/xdg/autostart/optionsplus-linux-agent\.desktop",
-    r"usr/share/applications/optionsplus-linux\.desktop",
+    r"usr/share/applications/optionsplus-linux(-x11)?\.desktop",
     r"usr/share/icons/hicolor/scalable/apps/optionsplus-linux\.svg",
     r"usr/share/licenses/optionsplus-linux/LICENSE",
     r"(INSTALL|REMOVE)",            # hooks in a destdir

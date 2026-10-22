@@ -2,6 +2,14 @@
 
 All notable changes to Options+ for Linux. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2]
+
+### Added
+
+- A second application-menu entry, "Options+ (X11)", that starts the UI with
+  `OPL_OZONE_PLATFORM=x11`. It is the quickest fix where the default window never appears, with no
+  configuration to edit.
+
 ## [0.1.1]
 
 ### Added

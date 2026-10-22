@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Options+ (X11)
+GenericName=Mouse and keyboard settings
+Comment=Options+ forced onto X11/Xwayland, for machines where the default window does not appear
+Exec=env OPL_OZONE_PLATFORM=x11 optionsplus-linux
+Icon=optionsplus-linux
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=logitech;mouse;keyboard;x11;xwayland;

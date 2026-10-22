@@ -42,6 +42,7 @@ def clean_tree(root):
         "usr/share/polkit-1/actions/io.github.soubarnak.optionsplus-linux.policy",
         "etc/xdg/autostart/optionsplus-linux-agent.desktop",
         "usr/share/applications/optionsplus-linux.desktop",
+        "usr/share/applications/optionsplus-linux-x11.desktop",
         "usr/share/icons/hicolor/scalable/apps/optionsplus-linux.svg",
         "usr/share/licenses/optionsplus-linux/LICENSE",
     ]
@@ -170,13 +171,20 @@ def test_menu_entry_launches_ui():
     assert "Type=Application" in d and "NoDisplay=true" not in d
 
 
+def test_x11_menu_entry_forces_the_x11_platform():
+    d = (ROOT / "data" / "optionsplus-linux-x11.desktop").read_text()
+    assert "Name=Options+ (X11)" in d and "Icon=optionsplus-linux" in d
+    assert "Exec=env OPL_OZONE_PLATFORM=x11 optionsplus-linux\n" in d
+    assert "Type=Application" in d and "NoDisplay=true" not in d
+
+
 def test_autostart_entry_runs_agent_hidden():
     d = (ROOT / "data" / "optionsplus-linux-agent.desktop").read_text()
     assert "Exec=optionsplus-agent" in d and "NoDisplay=true" in d
 
 
 @pytest.mark.skipif(not shutil.which("desktop-file-validate"), reason="desktop-file-validate missing")
-@pytest.mark.parametrize("name", ["optionsplus-linux.desktop", "optionsplus-linux-agent.desktop"])
+@pytest.mark.parametrize("name", ["optionsplus-linux.desktop", "optionsplus-linux-x11.desktop", "optionsplus-linux-agent.desktop"])
 def test_desktop_files_validate(name):
     r = subprocess.run(["desktop-file-validate", str(ROOT / "data" / name)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -234,6 +242,8 @@ def test_built_package_carries_hooks_and_all_parts(built):
                  "usr/share/polkit-1/actions/io.github.soubarnak.optionsplus-linux.policy",
                  "etc/xdg/autostart/optionsplus-linux-agent.desktop",
                  "usr/share/applications/optionsplus-linux.desktop",
+                 "usr/share/applications/optionsplus-linux-x11.desktop",
+        "usr/share/applications/optionsplus-linux-x11.desktop",
                  "usr/share/icons/hicolor/scalable/apps/optionsplus-linux.svg",
                  "usr/bin/optionsplus-fetch-payload",
                  "usr/lib/optionsplus-linux/depots.json",
