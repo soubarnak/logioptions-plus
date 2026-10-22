@@ -1,6 +1,6 @@
 # Template file for 'optionsplus-linux'
 pkgname=optionsplus-linux
-version=0.1.1
+version=0.1.2
 revision=1
 archs=noarch
 depends="python3>=3.11 python3-yaml electron35 eudev"
@@ -9,7 +9,7 @@ maintainer="soubarnak <soubarna@live.in>"
 license="Apache-2.0"
 homepage="https://github.com/soubarnak/logioptions-plus"
 distfiles="${homepage}/archive/refs/tags/optionsplus-linux-v${version}.tar.gz"
-checksum=9f9ab496acca2e8545456a4576c17dc3d30475a45b7bbb028084bd82a8cc3e2a
+checksum=39a020e7b6ac6c7febe1167e3b7e17189057e35f1e0f19bf479d4b334219e357
 # GitHub unpacks the tag archive to logioptions-plus-<tag>. No build_style: "meta" is for
 # packages without distfiles, and this one extracts the source and only needs do_install.
 wrksrc="logioptions-plus-optionsplus-linux-v${version}"

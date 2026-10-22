@@ -108,7 +108,7 @@ Do not use `-y`, which skips that check. The key is the same for every package s
 soubarnak, so you accept one fingerprint once.
 
 Each release is a signed xbps repository attached to a GitHub release. It holds the single
-`noarch` package `optionsplus-linux-0.1.1_1.noarch.xbps`, its `.sig2`, and signed repodata for
+`noarch` package `optionsplus-linux-0.1.2_1.noarch.xbps`, its `.sig2`, and signed repodata for
 `x86_64`, `x86_64-musl`, `i686`, `aarch64`, `aarch64-musl`, `armv7l`, `armv7l-musl`, `armv6l`
 and `armv6l-musl`. Void has no musl i686 flavour. The package installs the agent and launcher
 under `/usr/lib/optionsplus-linux`, the `optionsplus-linux`, `optionsplus-agent` and
