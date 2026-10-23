@@ -76,6 +76,17 @@ def test_bump_is_idempotent(tree):
     assert (tree / "srcpkgs/optionsplus-linux/template").read_text() == before
 
 
+def test_bump_never_moves_the_template_backwards(tree):
+    run(TOOLS / "bump-template.sh", "1.10.0", SUM, tree)
+    before = (tree / "srcpkgs/optionsplus-linux/template").read_text()
+    readme = (tree / "README.md").read_text()
+    r = run(TOOLS / "bump-template.sh", "1.9.0", "b" * 64, tree)  # an older tag re-run
+    assert r.returncode == 0
+    assert "older" in r.stderr
+    assert (tree / "srcpkgs/optionsplus-linux/template").read_text() == before
+    assert (tree / "README.md").read_text() == readme
+
+
 def test_bump_rejects_bad_input(tree):
     assert run(TOOLS / "bump-template.sh", "1.2.3", "nothex", tree).returncode != 0
     assert run(TOOLS / "bump-template.sh", "not a version", SUM, tree).returncode != 0
